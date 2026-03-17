@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ralph Wiggum outer loop for bodypipe Qt port
-# Usage: ./ralph/loop.sh [plan|build]
+# Usage: ralph/loop.sh [plan|build]
 #
 # plan  — one shot: re-generate IMPLEMENTATION_PLAN.md from specs
 # build — loop: pick next [ ] task, implement, commit, repeat until done or stuck
@@ -17,42 +17,37 @@ case "$MODE" in
   *)     echo "Usage: $0 [plan|build]"; exit 1 ;;
 esac
 
+# Temp file for prompt (avoids "argument list too long" with large prompts)
+PROMPT_TMP="$(mktemp)"
+trap 'rm -f "$PROMPT_TMP"' EXIT
+
 assemble_prompt() {
-  local PROMPT=""
+  # Write prompt to temp file instead of shell variable
+  cat "ralph/$PROMPT_FILE" > "$PROMPT_TMP"
 
-  # 1. Mode prompt
-  PROMPT="$(cat "ralph/$PROMPT_FILE")"
-
-  # 2. Implementation plan
+  # Append implementation plan
   if [[ -f ralph/IMPLEMENTATION_PLAN.md ]]; then
-    PROMPT="$PROMPT
-
----
-# Current IMPLEMENTATION_PLAN.md
-$(cat ralph/IMPLEMENTATION_PLAN.md)"
+    printf '\n\n---\n# Current IMPLEMENTATION_PLAN.md\n' >> "$PROMPT_TMP"
+    cat ralph/IMPLEMENTATION_PLAN.md >> "$PROMPT_TMP"
   fi
 
-  # 3. All specs
+  # Append all specs
   for spec in ralph/specs/*.md; do
     if [[ -f "$spec" ]]; then
-      PROMPT="$PROMPT
-
----
-# Spec: $(basename "$spec")
-$(cat "$spec")"
+      printf '\n\n---\n# Spec: %s\n' "$(basename "$spec")" >> "$PROMPT_TMP"
+      cat "$spec" >> "$PROMPT_TMP"
     fi
   done
 
-  # 4. AGENTS.md
+  # Append AGENTS.md
   if [[ -f ralph/AGENTS.md ]]; then
-    PROMPT="$PROMPT
-
----
-# AGENTS.md
-$(cat ralph/AGENTS.md)"
+    printf '\n\n---\n# AGENTS.md\n' >> "$PROMPT_TMP"
+    cat ralph/AGENTS.md >> "$PROMPT_TMP"
   fi
+}
 
-  echo "$PROMPT"
+run_claude() {
+  cat "$PROMPT_TMP" | claude --dangerously-skip-permissions -p
 }
 
 has_todo_tasks() {
@@ -66,12 +61,11 @@ has_blocked_tasks() {
 iteration=0
 
 if [[ "$MODE" == "plan" ]]; then
-  # Plan mode: one shot
-  PROMPT="$(assemble_prompt)"
+  assemble_prompt
   echo "=== Ralph Wiggum (plan mode) ==="
-  echo "Prompt: $(echo "$PROMPT" | wc -c) bytes"
+  echo "Prompt: $(wc -c < "$PROMPT_TMP") bytes"
   echo ""
-  claude --dangerously-skip-permissions -p "$PROMPT"
+  run_claude
   exit 0
 fi
 
@@ -97,10 +91,10 @@ while has_todo_tasks; do
   echo "Next: $next_task"
   echo ""
 
-  PROMPT="$(assemble_prompt)"
+  assemble_prompt
 
   # Run one Claude Code session
-  if ! claude --dangerously-skip-permissions -p "$PROMPT"; then
+  if ! run_claude; then
     echo ""
     echo "=== Claude exited non-zero on iteration $iteration. Stopping. ==="
     exit 1
