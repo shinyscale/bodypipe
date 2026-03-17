@@ -4,7 +4,7 @@
 [x] 02. session-model — Session dataclass, PersonTrack, PipelineConfig, JSON persistence
 [x] 03. video-player — FrameCache, FrameDisplay, VideoPlayer, transport controls, keyboard shortcuts
 [x] 04. confidence-timeline — QPainter confidence bars, keyframe markers, click-to-seek
-[ ] 05. pipeline-workers — GVHMRWorker subprocess runner, progress parsing, cancellation
+[P] 05. pipeline-workers — GVHMRWorker subprocess runner, progress parsing, cancellation
 [ ] 06. single-person-tab — video input, settings, run button, output file list
 [ ] 07. perf-capture-tab — hand/face toggles, multi-stage progress, SMPLest-X integration
 [ ] 08. multi-person-tab — splitter layout, pipeline wiring, track overview, signal hub
