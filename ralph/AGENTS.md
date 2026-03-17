@@ -180,6 +180,31 @@ bodypipe/
     └── conftest.py
 ```
 
+## GVHMR Source Reference
+
+The Gradio app being ported lives at `/mnt/f/GVHMR/GVHMR/`. **Read these files before implementing any task.** They are your ground truth.
+
+### GUI layer (what we're replacing with Qt)
+
+| File | Lines | What's inside |
+|------|-------|---------------|
+| `gvhmr_gui.py` | 1448 | Main Gradio app: 3 tabs, `run_gvhmr()`, `run_full_pipeline()`, `run_multi_person_pipeline()`, `_run_gvhmr_subprocess()`, `_run_smplestx_subprocess()`, `save/load_solve_config()`, `find_output_dir()` |
+| `identity_panel.py` | 2502 | Identity inspector: `_SESSION_DATA` dict, `_LRUFrameCache`, `_extract_frame()`, `_render_frame_with_bboxes()`, `_render_confidence_timeline()`, `build_identity_panel()`, `init_panel_state()`, all identity callbacks (`on_verify`, `on_add_keyframe`, `on_frame_click`, `on_swap_ids`, `on_split_track`, `on_merge_track`, `on_reprocess_all_dirty`, `on_scan_issues`, etc.) |
+| `pose_correction_panel.py` | 1179 | Pose corrector: `_POSE_SESSION` dict, `_render_skeleton_preview()`, `_camera_space_params()`, `build_pose_correction_panel()`, `init_pose_session()`, all pose callbacks (`on_skeleton_click`, `on_euler_change`, `on_apply_correction`, `on_flip_whole_body`, `on_mirror_lr`, `on_copy_from_frame`, `on_reexport_bvh`, `on_add_space_override`, etc.) |
+
+### Backend layer (imported read-only, never modified)
+
+| File | Lines | What's inside |
+|------|-------|---------------|
+| `identity_tracking.py` | 286 | `IdentityKeyframe`, `IdentityTrack` (keyframe CRUD, nearest/surrounding queries, serialization), `auto_generate_keyframes()` |
+| `identity_confidence.py` | 295 | `TrackConfidence` (detection, visibility, overlap, shape, motion → `.overall`), `compute_all_confidences()`, `confidence_to_array()` |
+| `identity_bridge.py` | 440 | `OcclusionBridge` (SLERP/linear interpolation through crossings), `crossing_spans_from_signal()`, `crossing_spans_from_overlap()` |
+| `pose_correction.py` | 485 | `FrameSpaceOverride`, `PoseCorrection`, `CorrectionTrack`, `apply_corrections()`, `compute_skeleton_frame()`, `find_nearest_joint()`, `flip_global_orient()`, `mirror_lr_pose()`, `copy_pose_from_frame()`, `axis_angle_to_euler_deg()`, `euler_deg_to_axis_angle()` |
+| `world_assembly.py` | 433 | `compute_person_offsets()`, `apply_offsets_to_smplx()`, `apply_identity_position_constraints()`, `assemble_scene()` |
+| `multi_person_split.py` | 1792 | `split_multi_person_video()` (detection→segmentation→isolation→SLAM→solve→assembly), `reprocess_person()`, `render_multi_person_incam()`, `interpolate_bbox_corrections()` |
+| `smplx_to_bvh.py` | 1882 | `extract_gvhmr_params()`, `extract_smplx_params()`, `merge_gvhmr_smplestx_params()`, `convert_smplx_to_bvh()`, `activate_coordinate_space()`, smoothing filters |
+| `visualize_skeleton.py` | 1005 | `forward_kinematics()`, `project_to_2d()`, `render_skeleton_frame()`, `render_skeleton_video()`, `BONE_CONNECTIONS`, `JOINT_NAMES`, `JOINT_PARENTS`, `DEFAULT_OFFSETS` |
+
 ## Style Guide
 
 - Type hints on all public methods
