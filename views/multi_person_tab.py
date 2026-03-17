@@ -38,6 +38,7 @@ from models.pipeline_config import PipelineConfig
 from models.session import Session
 from views.video_player import VideoPlayer
 from views.confidence_timeline import ConfidenceTimeline
+from views.identity_inspector import IdentityInspector
 from views.single_person_tab import _DropArea, VIDEO_EXTENSIONS
 from workers.pipeline_orchestrator import MultiPersonWorker
 
@@ -242,12 +243,8 @@ class MultiPersonTab(QWidget):
         # Bottom horizontal splitter: identity inspector | pose corrector
         self._bottom_splitter = QSplitter(Qt.Horizontal)
 
-        # Placeholder: Identity Inspector
-        self._identity_panel = QWidget()
-        id_layout = QVBoxLayout(self._identity_panel)
-        id_layout.addWidget(QLabel("Identity Inspector"))
-        id_layout.addWidget(QLabel("(will be implemented in Phase 2)"))
-        id_layout.addStretch()
+        # Identity Inspector (Phase 2)
+        self._identity_panel = IdentityInspector(self._session)
         self._bottom_splitter.addWidget(self._identity_panel)
 
         # Placeholder: Pose Corrector
@@ -279,25 +276,36 @@ class MultiPersonTab(QWidget):
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
 
-        # Frame sync: video player → track overview (and future panels)
+        # Frame sync: video player → track overview + identity inspector
         self._video_player.frame_changed.connect(self._on_frame_changed)
 
         # Track overview → seek + select person
         self._track_overview.person_clicked.connect(self._on_track_clicked)
 
+        # Identity inspector → video player seek, person selection
+        self._identity_panel.frame_requested.connect(self._video_player.seek)
+        self._identity_panel.person_changed.connect(self._on_identity_person_changed)
+
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
         self._session.current_frame = frame_idx
         self._track_overview.set_current_frame(frame_idx)
+        self._identity_panel.set_frame(frame_idx)
         self._show_frame(frame_idx)
         self.frame_changed.emit(frame_idx)
 
     def _on_track_clicked(self, person_id: int, frame_idx: int):
         """Select person and seek to frame from track overview."""
         self._session.selected_person = person_id
+        self._identity_panel.set_person(person_id)
         self._video_player.seek(frame_idx)
         self.person_selected.emit(person_id)
         self.status_message.emit(f"Selected Person {person_id} at frame {frame_idx}")
+
+    def _on_identity_person_changed(self, person_id: int):
+        """Handle person change from identity inspector."""
+        self._session.selected_person = person_id
+        self.person_selected.emit(person_id)
 
     def _show_frame(self, frame_idx: int):
         """Display the current frame (with overlays in future)."""
@@ -428,8 +436,9 @@ class MultiPersonTab(QWidget):
         if output_dir:
             self._session.output_dir = Path(output_dir)
 
-        # Populate track overview with dummy confidence data if tracks exist
+        # Populate track overview and identity inspector from results
         self._populate_tracks()
+        self._identity_panel.refresh()
 
     def _on_error(self, message: str):
         self._set_running(False)

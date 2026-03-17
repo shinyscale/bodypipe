@@ -24,11 +24,17 @@ class PersonTrack:
     bboxes: np.ndarray | None = None
     original_bboxes: np.ndarray | None = None
     bbox_corrections: np.ndarray | None = None
+    # User-created keyframes for identity verification
+    keyframes: list[dict] = field(default_factory=list)
+    # Per-component confidence breakdown (computed from backend, not serialized)
+    # Keys: "detection", "visibility", "overlap", "shape", "motion", "overall"
+    confidence_breakdown: dict[str, list[float]] | None = None
 
     def to_dict(self) -> dict:
         d = {
             "person_id": self.person_id,
             "person_dir": str(self.person_dir) if self.person_dir else None,
+            "keyframes": self.keyframes,
         }
         if self.identity_track is not None and hasattr(self.identity_track, "to_dict"):
             d["identity_track"] = self.identity_track.to_dict()
@@ -39,6 +45,7 @@ class PersonTrack:
         return cls(
             person_id=data.get("person_id", -1),
             person_dir=Path(data["person_dir"]) if data.get("person_dir") else None,
+            keyframes=data.get("keyframes", []),
         )
 
 

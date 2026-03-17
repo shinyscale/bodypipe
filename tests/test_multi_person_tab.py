@@ -97,10 +97,12 @@ class TestMultiPersonTabConstruction:
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
         assert tab._bottom_splitter is not None
 
-    def test_has_identity_panel_placeholder(self, qapp):
+    def test_has_identity_panel(self, qapp):
+        from views.identity_inspector import IdentityInspector
         session = Session()
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
         assert tab._identity_panel is not None
+        assert isinstance(tab._identity_panel, IdentityInspector)
 
     def test_has_pose_panel_placeholder(self, qapp):
         session = Session()
