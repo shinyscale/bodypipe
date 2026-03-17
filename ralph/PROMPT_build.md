@@ -2,7 +2,7 @@
 0b. Study `ralph/IMPLEMENTATION_PLAN.md`.
 0c. For reference, the application source code is in `./*.py`, `models/`, `views/`, `workers/`, `tests/`. The Gradio GUI being ported lives at `../GVHMR/` — read it to understand the behavior you are reimplementing. Backend modules there are imported read-only via sys.path in `main.py`.
 
-1. Your task is to implement functionality per the specifications using parallel subagents. Follow `ralph/IMPLEMENTATION_PLAN.md` and choose the most important item to address. Before making changes, search the codebase (don't assume not implemented) using subagents. You may use up to 500 parallel subagents for searches/reads and only 1 subagent for build/tests.
+1. Your task is to implement exactly ONE item from `ralph/IMPLEMENTATION_PLAN.md` — the single most important unchecked item. Do NOT implement multiple items. After completing one item, commit and exit. The outer loop will restart you for the next item. Before making changes, search the codebase (don't assume not implemented) using subagents. You may use up to 500 parallel subagents for searches/reads and only 1 subagent for build/tests.
 2. After implementing functionality or resolving problems, run the tests for that unit of code that was improved. If functionality is missing then it's your job to add it as per the application specifications. Ultrathink.
 3. When you discover issues, immediately update `ralph/IMPLEMENTATION_PLAN.md` with your findings using a subagent. When resolved, update and remove the item.
 4. When the tests pass, update `ralph/IMPLEMENTATION_PLAN.md`, then `git add -A` then `git commit` with a message describing the changes.
