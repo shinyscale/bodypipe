@@ -9,8 +9,9 @@ conda activate gvhmr
 # Install Qt dependencies (one-time)
 pip install PySide6 PyOpenGL PyOpenGL-accelerate
 
-# GVHMR root (backend modules live here)
-export GVHMR_ROOT=/mnt/f/GVHMR/GVHMR
+# GVHMR root (backend modules live here — sibling directory)
+# Resolved by loop.sh and passed as GVHMR_ROOT in the prompt
+# From bodypipe root: ../GVHMR
 ```
 
 ## Build & Test Commands
@@ -182,7 +183,7 @@ bodypipe/
 
 ## GVHMR Source Reference
 
-The Gradio app being ported lives at `/mnt/f/GVHMR/GVHMR/`. **Read these files before implementing any task.** They are your ground truth.
+The Gradio app being ported lives at GVHMR_ROOT (resolved by loop.sh, passed in the prompt). **Read these files before implementing any task.** They are your ground truth. All file paths below are relative to GVHMR_ROOT.
 
 ### GUI layer (what we're replacing with Qt)
 

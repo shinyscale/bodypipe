@@ -1,65 +1,63 @@
-# Ralph Wiggum — PLANNING Mode
+# Ralph Wiggum — PLAN mode (MEOW)
 
-You are a software architect planning the implementation of **bodypipe**, a Qt/PySide6 desktop application that replaces the Gradio-based GVHMR GUI.
+You are tracing ONE feature through the GVHMR Gradio codebase to document how it works, so a future build session can implement the Qt/PySide6 equivalent.
 
 ## Your Job
 
-1. Read all specs in `ralph/specs/` and the current `ralph/IMPLEMENTATION_PLAN.md`
-2. **Read the GVHMR source files** to understand what you're planning to port (see source reference below)
-3. Break remaining unfinished work into atomic, testable tasks
-4. Update `ralph/IMPLEMENTATION_PLAN.md` with the task list
+1. Read `ralph/FEATURES.md` — find the next `[ ]` feature
+2. Read `ralph/AGENTS.md` — find which GVHMR source files are relevant
+3. **Read those actual source files.** Trace the feature end-to-end:
+   - What Gradio components are involved?
+   - What callbacks fire and in what order?
+   - What state gets read and mutated?
+   - What backend functions get called?
+   - What are the inputs and outputs at each step?
+4. Write a trace document to `ralph/traces/NN-feature-slug.md`
+5. Mark the feature `[P]` in `ralph/FEATURES.md`
+6. Commit and exit
 
-## GVHMR Source Code (READ THIS)
+## Trace Document Format
 
-The Gradio app you are porting lives at `/mnt/f/GVHMR/GVHMR/`. Read these files to understand scope, complexity, and edge cases:
+```markdown
+# Feature: <name>
 
-### GUI files (what we're replacing)
-- `/mnt/f/GVHMR/GVHMR/gvhmr_gui.py` — Main Gradio app (1448 lines): 3 tabs, pipeline runners, subprocess wrappers
-- `/mnt/f/GVHMR/GVHMR/identity_panel.py` — Identity inspector (2502 lines): frame display, bbox editing, keyframes, confidence, track ops
-- `/mnt/f/GVHMR/GVHMR/pose_correction_panel.py` — Pose corrector (1179 lines): skeleton preview, joint editing, quick-fix, export
+## What it does
+<1-2 sentence description of the user-facing behavior>
 
-### Backend files (imported read-only by the Qt app)
-- `/mnt/f/GVHMR/GVHMR/identity_tracking.py` — IdentityTrack, IdentityKeyframe
-- `/mnt/f/GVHMR/GVHMR/identity_confidence.py` — TrackConfidence, confidence scoring
-- `/mnt/f/GVHMR/GVHMR/identity_bridge.py` — OcclusionBridge, crossing spans
-- `/mnt/f/GVHMR/GVHMR/pose_correction.py` — CorrectionTrack, PoseCorrection, FK
-- `/mnt/f/GVHMR/GVHMR/world_assembly.py` — offset computation, position constraints
-- `/mnt/f/GVHMR/GVHMR/multi_person_split.py` — pipeline orchestration, reprocess_person
-- `/mnt/f/GVHMR/GVHMR/smplx_to_bvh.py` — BVH/FBX export
-- `/mnt/f/GVHMR/GVHMR/visualize_skeleton.py` — forward kinematics, joint projection
+## Gradio Implementation
+
+### Components
+<List every Gradio component involved: type, variable name, file:line>
+
+### Signal Flow
+<Step-by-step: user action → callback → state change → UI update>
+<Include function signatures and the exact state dict keys read/written>
+
+### Backend Calls
+<Which backend functions are called, with what args, returning what>
+
+## State
+<What keys in _SESSION_DATA / _POSE_SESSION are touched>
+<What gets persisted to disk and where>
+
+## Edge Cases
+<Anything tricky: error handling, missing data, race conditions>
+
+## Qt Implementation Notes
+<How this maps to Qt: which widget, which signals, what changes>
+<Call out anything that works differently in Qt vs Gradio>
+```
 
 ## Rules
 
-- Each task must be completable in a single Claude Code session (< 500 lines changed)
-- Tasks must have clear acceptance criteria
-- Tasks must list file dependencies (which files to read/create/modify)
-- Tasks must list which GVHMR source files to read as reference
-- Order tasks so each one builds on completed predecessors
-- Mark tasks as: `[ ]` todo, `[x]` done, `[~]` in progress, `[!]` blocked
-- Group tasks by phase (Foundation → Pipeline → HITL Editing)
-- Include smoke test verification after each phase
+- Trace exactly ONE feature per session
+- Read the ACTUAL source code — do not guess or summarize from memory
+- Include real function signatures, real variable names, real line numbers
+- If a callback chain crosses files, follow it across files
+- Do not write any Python code — only the trace document
+- The GVHMR source is read-only — do not modify it
 
-## Task Format
+## GVHMR Source Location
 
-```markdown
-### Task N: Short title
-- **Phase**: 1/2/3
-- **Files**: list of files to create or modify
-- **Read first**: GVHMR source files to study before implementing
-- **Depends on**: Task numbers
-- **Acceptance**: what "done" looks like (test command or behavior)
-- **Notes**: any gotchas or design decisions
-```
-
-## Important Context
-
-- Backend modules in `/mnt/f/GVHMR/GVHMR/` are reused as-is (identity_tracking, pose_correction, etc.)
-- The Qt app imports them via `sys.path` manipulation in main.py
-- PySide6 is the Qt binding (not PyQt6) — use PySide6 import paths
-- PyOpenGL for the 3D mesh viewport
-- Video frames via OpenCV (cv2.VideoCapture), NOT QMediaPlayer
-- All inter-widget communication via Qt signals, not direct method calls
-
-## Output
-
-Write the updated `ralph/IMPLEMENTATION_PLAN.md` and exit. Do not write any code.
+The Gradio app lives at: GVHMR_ROOT (passed in prompt below).
+Backend modules are in the same directory.
