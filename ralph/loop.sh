@@ -5,7 +5,8 @@ set -euo pipefail
 
 MODE="${1:-plan}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
 
 case "$MODE" in
   plan)
@@ -20,19 +21,19 @@ case "$MODE" in
     ;;
 esac
 
-PROMPT="$(cat "$PROMPT_FILE")"
+PROMPT="$(cat "ralph/$PROMPT_FILE")"
 
 # Append current implementation plan state
-if [[ -f IMPLEMENTATION_PLAN.md ]]; then
+if [[ -f ralph/IMPLEMENTATION_PLAN.md ]]; then
   PROMPT="$PROMPT
 
 ---
 # Current IMPLEMENTATION_PLAN.md
-$(cat IMPLEMENTATION_PLAN.md)"
+$(cat ralph/IMPLEMENTATION_PLAN.md)"
 fi
 
 # Append all specs
-for spec in specs/*.md; do
+for spec in ralph/specs/*.md; do
   if [[ -f "$spec" ]]; then
     PROMPT="$PROMPT
 
@@ -43,16 +44,16 @@ $(cat "$spec")"
 done
 
 # Append AGENTS.md
-if [[ -f AGENTS.md ]]; then
+if [[ -f ralph/AGENTS.md ]]; then
   PROMPT="$PROMPT
 
 ---
 # AGENTS.md
-$(cat AGENTS.md)"
+$(cat ralph/AGENTS.md)"
 fi
 
 echo "=== Ralph Wiggum ($MODE mode) ==="
-echo "Working directory: $SCRIPT_DIR"
+echo "Working directory: $PROJECT_DIR"
 echo "Prompt length: $(echo "$PROMPT" | wc -c) bytes"
 echo ""
 
