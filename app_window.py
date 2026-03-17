@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QVBoxLayout,
+    QFileDialog,
 )
 from PySide6.QtCore import Signal, QSettings, Qt, QByteArray
 from PySide6.QtGui import QAction, QPalette, QColor
 
 from models.session import Session
+from views.single_person_tab import SinglePersonTab
 
 # Theme colors matching Gradio dark mode
 COLORS = {
@@ -178,10 +180,11 @@ class AppWindow(QMainWindow):
     session_saved = Signal(Path)
     tab_changed = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
         self._session = Session()
         self._settings = QSettings("GVHMR", "bodypipe")
+        self._gvhmr_root = gvhmr_root or Path(__file__).resolve().parent.parent / "GVHMR"
 
         self.setWindowTitle("bodypipe \u2014 Motion Capture Studio")
         self.setMinimumSize(1200, 700)
@@ -193,17 +196,17 @@ class AppWindow(QMainWindow):
         self._setup_status_bar()
         self._setup_log_panel()
         self._restore_geometry()
+        self._connect_tab_signals()
 
     def _setup_ui(self):
-        """Create tab widget with placeholder tabs."""
+        """Create tab widget with real and placeholder tabs."""
         self._tabs = QTabWidget()
         self._tabs.currentChanged.connect(self.tab_changed.emit)
 
-        # Placeholder tabs — will be replaced with real widgets in later tasks
-        self._tab_single = QWidget()
-        self._tab_single.setLayout(QVBoxLayout())
-        self._tab_single.layout().addWidget(QLabel("GVHMR Body Capture (coming soon)"))
+        # Tab 1: Single-person GVHMR body capture
+        self._tab_single = SinglePersonTab(self._session, self._gvhmr_root)
 
+        # Placeholder tabs — will be replaced with real widgets in later tasks
         self._tab_perf = QWidget()
         self._tab_perf.setLayout(QVBoxLayout())
         self._tab_perf.layout().addWidget(QLabel("Full Performance Capture (coming soon)"))
@@ -227,6 +230,7 @@ class AppWindow(QMainWindow):
 
         open_video_action = QAction("Open &Video...", self)
         open_video_action.setShortcut("Ctrl+O")
+        open_video_action.triggered.connect(self._on_open_video)
         file_menu.addAction(open_video_action)
 
         open_session_action = QAction("Open &Session...", self)
@@ -312,6 +316,26 @@ class AppWindow(QMainWindow):
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("windowState", self.saveState())
         super().closeEvent(event)
+
+    def _connect_tab_signals(self):
+        """Wire tab signals to main window status bar and log panel."""
+        self._tab_single.status_message.connect(self.set_status)
+        self._tab_single.log_message.connect(
+            lambda text, level: self._log_panel.append_line(text, level)
+        )
+
+    def _on_open_video(self):
+        """Open Video menu action — load video into the active tab."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Video",
+            "",
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv *.wmv);;All Files (*)",
+        )
+        if path:
+            current = self._tabs.currentWidget()
+            if hasattr(current, "_load_video"):
+                current._load_video(path)
 
     @property
     def session(self) -> Session:

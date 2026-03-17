@@ -2,7 +2,7 @@
 
 ## Phase 1: Pipeline Tabs
 
-- [ ] Single-person tab: video input (drag-drop + browse), settings group (static_cam checkbox, use_dpvo checkbox, focal_mm spinbox), run button wired to GVHMRWorker, progress bar, output file list with double-click to open. Replace placeholder in app_window.py tab 1. Reference: `gvhmr_gui.py:1300-1360`, `run_gvhmr()`, `find_output_dir()`.
+- [x] Single-person tab: `views/single_person_tab.py` — drag-drop + browse video input with thumbnail/info, settings group (static_cam, use_dpvo, focal_mm), run/cancel wired to GVHMRWorker, progress bar, output file list with context menus, VideoPlayer preview. AppWindow tab 1 replaced. Tests in `tests/test_single_person_tab.py` (85 total pass).
 - [ ] Performance capture tab: extends single-person with hand capture group (enable checkbox, hybrid vs SMPLest-X radio buttons), face capture checkbox, multi-stage progress display. Wire to FullPipelineWorker. Replace placeholder in app_window.py tab 2. Reference: `gvhmr_gui.py:1360-1400`, `run_full_pipeline()`.
 - [ ] Multi-person tab shell: left sidebar with pipeline controls, main viewport area (VideoPlayer + bbox overlay), horizontal QSplitter bottom with placeholder panels for identity inspector and pose corrector. Run button wired to MultiPersonWorker. Track overview showing per-person confidence bars. Signal hub wiring frame_changed across all sub-panels. Replace placeholder in app_window.py tab 3. Reference: `gvhmr_gui.py:1400-1448`, `run_multi_person_pipeline()`.
 
