@@ -19,6 +19,7 @@ from PySide6.QtGui import QAction, QPalette, QColor
 
 from models.session import Session
 from views.single_person_tab import SinglePersonTab
+from views.perf_capture_tab import PerfCaptureTab
 
 # Theme colors matching Gradio dark mode
 COLORS = {
@@ -206,10 +207,8 @@ class AppWindow(QMainWindow):
         # Tab 1: Single-person GVHMR body capture
         self._tab_single = SinglePersonTab(self._session, self._gvhmr_root)
 
-        # Placeholder tabs — will be replaced with real widgets in later tasks
-        self._tab_perf = QWidget()
-        self._tab_perf.setLayout(QVBoxLayout())
-        self._tab_perf.layout().addWidget(QLabel("Full Performance Capture (coming soon)"))
+        # Tab 2: Performance capture (body + hands + face)
+        self._tab_perf = PerfCaptureTab(self._session, self._gvhmr_root)
 
         self._tab_multi = QWidget()
         self._tab_multi.setLayout(QVBoxLayout())
@@ -319,10 +318,11 @@ class AppWindow(QMainWindow):
 
     def _connect_tab_signals(self):
         """Wire tab signals to main window status bar and log panel."""
-        self._tab_single.status_message.connect(self.set_status)
-        self._tab_single.log_message.connect(
-            lambda text, level: self._log_panel.append_line(text, level)
-        )
+        for tab in (self._tab_single, self._tab_perf):
+            tab.status_message.connect(self.set_status)
+            tab.log_message.connect(
+                lambda text, level: self._log_panel.append_line(text, level)
+            )
 
     def _on_open_video(self):
         """Open Video menu action — load video into the active tab."""

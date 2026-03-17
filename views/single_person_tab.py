@@ -100,7 +100,7 @@ class SinglePersonTab(QWidget):
 
         # ---- Left panel ----
         left = QWidget()
-        left_layout = QVBoxLayout(left)
+        self._left_layout = left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
