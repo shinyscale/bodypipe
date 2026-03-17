@@ -40,9 +40,7 @@ while true; do
     fi
 
     cat "$PROMPT_FILE" | claude -p \
-        --dangerously-skip-permissions \
-        --model opus \
-        --verbose
+        --dangerously-skip-permissions
 
     ITERATION=$((ITERATION + 1))
     echo -e "\n\n======================== LOOP $ITERATION ========================\n"

@@ -1,0 +1,693 @@
+"""Tests for multi-person capture tab.
+
+Why: The MultiPersonTab is the most complex tab — it orchestrates the
+multi-person pipeline, hosts the signal hub for frame/person sync across
+sub-panels, and provides the track overview. These tests verify widget
+construction, settings round-trip, video loading, running state UI
+transitions, worker lifecycle, track overview population, and the
+signal hub wiring — all without needing a real GPU or video backend.
+"""
+
+import sys
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from models.session import Session, PersonTrack
+from models.pipeline_config import PipelineConfig
+from views.multi_person_tab import MultiPersonTab, _TrackOverview, PERSON_COLORS
+
+
+# ---------------------------------------------------------------------------
+# Widget construction
+# ---------------------------------------------------------------------------
+
+
+class TestMultiPersonTabConstruction:
+    """Verify that the tab creates correctly and has expected child widgets."""
+
+    def test_creates_without_error(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab is not None
+
+    def test_run_button_disabled_initially(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert not tab._run_btn.isEnabled()
+
+    def test_cancel_button_hidden_initially(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._cancel_btn.isHidden()
+
+    def test_progress_bar_hidden_initially(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._progress_bar.isHidden()
+
+    def test_progress_label_hidden_initially(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._progress_label.isHidden()
+
+    def test_has_pipeline_settings(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._static_cam is not None
+        assert tab._use_dpvo is not None
+        assert tab._focal_mm is not None
+
+    def test_has_multi_person_settings(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._max_persons is not None
+        assert tab._confidence_threshold is not None
+
+    def test_max_persons_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._max_persons.value() == 8
+        assert tab._max_persons.minimum() == 1
+        assert tab._max_persons.maximum() == 20
+
+    def test_confidence_threshold_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._confidence_threshold.value() == 0.5
+        assert tab._confidence_threshold.minimum() == 0.0
+        assert tab._confidence_threshold.maximum() == 1.0
+
+    def test_has_video_player(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._video_player is not None
+
+    def test_has_track_overview(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._track_overview is not None
+
+    def test_has_bottom_splitter(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._bottom_splitter is not None
+
+    def test_has_identity_panel_placeholder(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._identity_panel is not None
+
+    def test_has_pose_panel_placeholder(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._pose_panel is not None
+
+    def test_has_vertical_splitter(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._vert_splitter is not None
+
+    def test_has_drop_area(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._drop_area is not None
+
+    def test_has_browse_button(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._browse_btn is not None
+
+    def test_has_video_info_label(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._video_info is not None
+        assert tab._video_info.isHidden()
+
+    def test_has_signals(self, qapp):
+        """Tab exposes signals for inter-panel communication."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert hasattr(tab, "status_message")
+        assert hasattr(tab, "log_message")
+        assert hasattr(tab, "frame_changed")
+        assert hasattr(tab, "person_selected")
+
+
+# ---------------------------------------------------------------------------
+# Settings / PipelineConfig
+# ---------------------------------------------------------------------------
+
+
+class TestMultiPersonSettings:
+    """Verify round-trip between UI controls and PipelineConfig."""
+
+    def test_default_config(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        config = tab.get_config()
+        assert config.mode == "multi"
+        assert config.static_cam is True
+        assert config.use_dpvo is False
+        assert config.focal_mm == 24.0
+        assert config.max_persons == 8
+        assert config.confidence_threshold == 0.5
+
+    def test_changed_config(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._static_cam.setChecked(False)
+        tab._use_dpvo.setChecked(True)
+        tab._focal_mm.setValue(50.0)
+        tab._max_persons.setValue(4)
+        tab._confidence_threshold.setValue(0.7)
+
+        config = tab.get_config()
+        assert config.static_cam is False
+        assert config.use_dpvo is True
+        assert config.focal_mm == 50.0
+        assert config.max_persons == 4
+        assert config.confidence_threshold == 0.7
+
+    def test_set_config(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab.set_config(PipelineConfig(
+            static_cam=False,
+            use_dpvo=True,
+            focal_mm=85.0,
+            max_persons=3,
+            confidence_threshold=0.8,
+        ))
+        assert tab._static_cam.isChecked() is False
+        assert tab._use_dpvo.isChecked() is True
+        assert tab._focal_mm.value() == 85.0
+        assert tab._max_persons.value() == 3
+        assert tab._confidence_threshold.value() == 0.8
+
+    def test_config_round_trip(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        original = PipelineConfig(
+            mode="multi",
+            static_cam=False,
+            use_dpvo=True,
+            focal_mm=35.0,
+            max_persons=5,
+            confidence_threshold=0.65,
+        )
+        tab.set_config(original)
+        recovered = tab.get_config()
+        assert recovered.mode == "multi"
+        assert recovered.static_cam == original.static_cam
+        assert recovered.use_dpvo == original.use_dpvo
+        assert recovered.focal_mm == original.focal_mm
+        assert recovered.max_persons == original.max_persons
+        assert recovered.confidence_threshold == original.confidence_threshold
+
+
+# ---------------------------------------------------------------------------
+# Video loading
+# ---------------------------------------------------------------------------
+
+
+class TestVideoLoading:
+    """Verify that loading a video updates session state and enables run."""
+
+    def test_load_video_updates_session(self, qapp, tmp_path):
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._load_video(str(video_path))
+
+        assert session.video_path == video_path
+        assert session.num_frames > 0
+        assert session.img_width > 0
+        assert session.img_height > 0
+        assert tab._run_btn.isEnabled()
+
+    def test_load_video_shows_info(self, qapp, tmp_path):
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._load_video(str(video_path))
+
+        assert not tab._video_info.isHidden()
+        assert "test.mp4" in tab._video_info.text()
+
+    def test_load_video_updates_drop_area(self, qapp, tmp_path):
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._load_video(str(video_path))
+
+        assert "test.mp4" in tab._drop_area.text()
+
+    def test_load_video_emits_status(self, qapp, tmp_path):
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._load_video(str(video_path))
+
+        assert any("loaded" in m.lower() for m in messages)
+
+    def test_load_nonexistent_video(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._load_video("/tmp/nonexistent_video.mp4")
+
+        assert not tab._run_btn.isEnabled()
+        assert any("not found" in m.lower() for m in messages)
+
+    def test_load_invalid_file(self, qapp, tmp_path):
+        bad_file = tmp_path / "bad.mp4"
+        bad_file.write_text("not a video")
+
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._load_video(str(bad_file))
+
+        assert not tab._run_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Running state
+# ---------------------------------------------------------------------------
+
+
+class TestRunningState:
+    """Verify UI state transitions when running/idle.
+
+    Note: We use ``not widget.isHidden()`` instead of ``widget.isVisible()``
+    because Qt's isVisible() requires the entire widget hierarchy to be shown.
+    isHidden() correctly reflects the widget's own visibility flag.
+    """
+
+    def test_set_running_true(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._set_running(True)
+
+        assert not tab._run_btn.isEnabled()
+        assert not tab._cancel_btn.isHidden()
+        assert not tab._progress_bar.isHidden()
+        assert not tab._progress_label.isHidden()
+        assert not tab._browse_btn.isEnabled()
+        assert not tab._static_cam.isEnabled()
+        assert not tab._use_dpvo.isEnabled()
+        assert not tab._focal_mm.isEnabled()
+        assert not tab._max_persons.isEnabled()
+        assert not tab._confidence_threshold.isEnabled()
+
+    def test_set_running_false(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._set_running(True)
+        tab._set_running(False)
+
+        assert tab._run_btn.isEnabled()
+        assert tab._cancel_btn.isHidden()
+        assert tab._progress_bar.isHidden()
+        assert tab._progress_label.isHidden()
+        assert tab._browse_btn.isEnabled()
+        assert tab._static_cam.isEnabled()
+        assert tab._use_dpvo.isEnabled()
+        assert tab._focal_mm.isEnabled()
+        assert tab._max_persons.isEnabled()
+        assert tab._confidence_threshold.isEnabled()
+
+    def test_set_running_false_resets_progress(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._progress_bar.setValue(500)
+        tab._progress_label.setText("Test stage")
+        tab._set_running(False)
+
+        assert tab._progress_bar.value() == 0
+        assert tab._progress_label.text() == ""
+
+    def test_run_button_disabled_without_video(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._set_running(False)
+        assert not tab._run_btn.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Progress updates
+# ---------------------------------------------------------------------------
+
+
+class TestProgressUpdates:
+    def test_on_progress(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._progress_bar.show()
+        tab._on_progress(0.5, "Detection")
+        assert tab._progress_bar.value() == 500
+        assert tab._progress_label.text() == "Detection"
+
+    def test_on_progress_full(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._on_progress(1.0, "Done")
+        assert tab._progress_bar.value() == 1000
+
+    def test_on_progress_emits_status(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._on_progress(0.3, "Tracking")
+
+        assert any("tracking" in m.lower() for m in messages)
+        assert any("30%" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Worker lifecycle (mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerLifecycle:
+    def test_on_finished(self, qapp, tmp_path):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._set_running(True)
+
+        tab._on_finished({"output_dir": str(tmp_path)})
+
+        assert not tab._running
+        assert session.output_dir == tmp_path
+
+    def test_on_finished_clears_worker(self, qapp, tmp_path):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._worker = MagicMock()
+        tab._set_running(True)
+
+        tab._on_finished({"output_dir": str(tmp_path)})
+
+        assert tab._worker is None
+
+    def test_on_error(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._set_running(True)
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._on_error("Something broke")
+
+        assert not tab._running
+        assert any("error" in m.lower() for m in messages)
+
+    def test_on_error_clears_worker(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._worker = MagicMock()
+        tab._set_running(True)
+
+        tab._on_error("Something broke")
+
+        assert tab._worker is None
+
+    def test_on_cancel_emits_status(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._worker = MagicMock()
+        tab._set_running(True)
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._on_cancel()
+
+        assert any("cancel" in m.lower() for m in messages)
+        assert not tab._running
+
+    def test_on_cancel_calls_worker_cancel(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        mock_worker = MagicMock()
+        tab._worker = mock_worker
+        tab._set_running(True)
+
+        tab._on_cancel()
+
+        mock_worker.cancel.assert_called_once()
+
+    def test_on_log_line_emits_log_message(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.log_message.connect(lambda text, level: messages.append((text, level)))
+        tab._on_log_line("test log output")
+
+        assert len(messages) == 1
+        assert messages[0] == ("test log output", "info")
+
+
+# ---------------------------------------------------------------------------
+# Track Overview widget
+# ---------------------------------------------------------------------------
+
+
+class TestTrackOverview:
+    def test_creates(self, qapp):
+        overview = _TrackOverview()
+        assert overview is not None
+
+    def test_set_tracks(self, qapp):
+        overview = _TrackOverview()
+        tracks = {
+            0: np.array([0.9, 0.8, 0.7, 0.6, 0.5]),
+            1: np.array([0.5, 0.6, 0.7, 0.8, 0.9]),
+        }
+        overview.set_tracks(tracks)
+        assert len(overview._timelines) == 2
+        assert len(overview._labels) == 2
+        assert 0 in overview._timelines
+        assert 1 in overview._timelines
+
+    def test_set_tracks_replaces_previous(self, qapp):
+        overview = _TrackOverview()
+        tracks1 = {0: np.ones(5)}
+        overview.set_tracks(tracks1)
+        assert len(overview._timelines) == 1
+
+        tracks2 = {0: np.ones(5), 1: np.ones(5), 2: np.ones(5)}
+        overview.set_tracks(tracks2)
+        assert len(overview._timelines) == 3
+
+    def test_set_current_frame(self, qapp):
+        overview = _TrackOverview()
+        tracks = {0: np.ones(10)}
+        overview.set_tracks(tracks)
+
+        # Should not raise
+        overview.set_current_frame(5)
+
+    def test_person_clicked_signal(self, qapp):
+        overview = _TrackOverview()
+        tracks = {0: np.ones(10)}
+        overview.set_tracks(tracks)
+
+        received = []
+        overview.person_clicked.connect(lambda pid, f: received.append((pid, f)))
+
+        # Simulate a click on the timeline
+        overview._timelines[0].frame_clicked.emit(3)
+
+        assert len(received) == 1
+        assert received[0] == (0, 3)
+
+    def test_labels_use_person_colors(self, qapp):
+        overview = _TrackOverview()
+        tracks = {0: np.ones(5), 1: np.ones(5)}
+        overview.set_tracks(tracks)
+
+        for pid, label in overview._labels.items():
+            expected_color = PERSON_COLORS[pid % len(PERSON_COLORS)]
+            assert expected_color in label.styleSheet()
+
+
+# ---------------------------------------------------------------------------
+# Track population from session
+# ---------------------------------------------------------------------------
+
+
+class TestTrackPopulation:
+    """Verify that _populate_tracks correctly builds track overview from session."""
+
+    def test_populate_with_confidences(self, qapp):
+        session = Session()
+        session.num_frames = 5
+        session.person_tracks = {
+            0: PersonTrack(person_id=0, confidences=[0.9, 0.8, 0.7, 0.6, 0.5]),
+            1: PersonTrack(person_id=1, confidences=[0.5, 0.6, 0.7, 0.8, 0.9]),
+        }
+
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._populate_tracks()
+
+        assert len(tab._track_overview._timelines) == 2
+
+    def test_populate_without_confidences_uses_placeholder(self, qapp):
+        session = Session()
+        session.num_frames = 10
+        session.person_tracks = {
+            0: PersonTrack(person_id=0, confidences=None),
+        }
+
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._populate_tracks()
+
+        assert len(tab._track_overview._timelines) == 1
+
+    def test_populate_empty_tracks(self, qapp):
+        session = Session()
+        session.person_tracks = {}
+
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._populate_tracks()
+
+        assert len(tab._track_overview._timelines) == 0
+
+
+# ---------------------------------------------------------------------------
+# Signal hub wiring
+# ---------------------------------------------------------------------------
+
+
+class TestSignalHub:
+    """Verify frame_changed and person_selected signal propagation."""
+
+    def test_frame_changed_updates_session(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        tab._on_frame_changed(42)
+
+        assert session.current_frame == 42
+
+    def test_frame_changed_emits_signal(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        received = []
+        tab.frame_changed.connect(received.append)
+        tab._on_frame_changed(10)
+
+        assert received == [10]
+
+    def test_track_clicked_updates_session(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        tab._on_track_clicked(2, 15)
+
+        assert session.selected_person == 2
+
+    def test_track_clicked_emits_person_selected(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        received = []
+        tab.person_selected.connect(received.append)
+        tab._on_track_clicked(3, 20)
+
+        assert received == [3]
+
+    def test_track_clicked_emits_status(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        messages = []
+        tab.status_message.connect(messages.append)
+        tab._on_track_clicked(1, 50)
+
+        assert any("person 1" in m.lower() for m in messages)
+        assert any("50" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# PERSON_COLORS constant
+# ---------------------------------------------------------------------------
+
+
+class TestPersonColors:
+    def test_has_8_colors(self, qapp):
+        assert len(PERSON_COLORS) == 8
+
+    def test_all_hex_colors(self, qapp):
+        for color in PERSON_COLORS:
+            assert color.startswith("#")
+            assert len(color) == 7
+
+
+# ---------------------------------------------------------------------------
+# AppWindow integration
+# ---------------------------------------------------------------------------
+
+
+class TestAppWindowIntegration:
+    """Verify that AppWindow uses MultiPersonTab for the third tab."""
+
+    def test_third_tab_is_multi_person(self, qapp):
+        from app_window import AppWindow
+        window = AppWindow()
+        assert isinstance(window._tab_multi, MultiPersonTab)
+
+    def test_multi_tab_status_connected(self, qapp):
+        from app_window import AppWindow
+        window = AppWindow()
+        window._tab_multi.status_message.emit("multi test status")
+        assert window._status_label.text() == "multi test status"
+
+    def test_tab_label(self, qapp):
+        from app_window import AppWindow
+        window = AppWindow()
+        assert window._tabs.tabText(2) == "Multi-Person"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_test_video(path: Path, frames: int = 5, size: tuple = (64, 48)) -> Path:
+    """Create a minimal video file for testing."""
+    import cv2
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(path), fourcc, 30.0, size)
+    for i in range(frames):
+        frame = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+        frame[:, :, 1] = i * 40
+        writer.write(frame)
+    writer.release()
+    return path

@@ -20,6 +20,7 @@ from PySide6.QtGui import QAction, QPalette, QColor
 from models.session import Session
 from views.single_person_tab import SinglePersonTab
 from views.perf_capture_tab import PerfCaptureTab
+from views.multi_person_tab import MultiPersonTab
 
 # Theme colors matching Gradio dark mode
 COLORS = {
@@ -210,9 +211,8 @@ class AppWindow(QMainWindow):
         # Tab 2: Performance capture (body + hands + face)
         self._tab_perf = PerfCaptureTab(self._session, self._gvhmr_root)
 
-        self._tab_multi = QWidget()
-        self._tab_multi.setLayout(QVBoxLayout())
-        self._tab_multi.layout().addWidget(QLabel("Multi-Person Capture (coming soon)"))
+        # Tab 3: Multi-person capture
+        self._tab_multi = MultiPersonTab(self._session, self._gvhmr_root)
 
         self._tabs.addTab(self._tab_single, "GVHMR Body")
         self._tabs.addTab(self._tab_perf, "Performance Capture")
@@ -318,7 +318,7 @@ class AppWindow(QMainWindow):
 
     def _connect_tab_signals(self):
         """Wire tab signals to main window status bar and log panel."""
-        for tab in (self._tab_single, self._tab_perf):
+        for tab in (self._tab_single, self._tab_perf, self._tab_multi):
             tab.status_message.connect(self.set_status)
             tab.log_message.connect(
                 lambda text, level: self._log_panel.append_line(text, level)

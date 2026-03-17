@@ -4,7 +4,7 @@
 
 - [x] Single-person tab: `views/single_person_tab.py` — drag-drop + browse video input with thumbnail/info, settings group (static_cam, use_dpvo, focal_mm), run/cancel wired to GVHMRWorker, progress bar, output file list with context menus, VideoPlayer preview. AppWindow tab 1 replaced. Tests in `tests/test_single_person_tab.py` (85 total pass).
 - [x] Performance capture tab: `views/perf_capture_tab.py` — subclasses SinglePersonTab, adds hand capture group (enable + hybrid/SMPLest-X radios), face capture checkbox. Wired to FullPipelineWorker. AppWindow tab 2 replaced. Tests in `tests/test_perf_capture_tab.py` (105 total pass).
-- [ ] Multi-person tab shell: left sidebar with pipeline controls, main viewport area (VideoPlayer + bbox overlay), horizontal QSplitter bottom with placeholder panels for identity inspector and pose corrector. Run button wired to MultiPersonWorker. Track overview showing per-person confidence bars. Signal hub wiring frame_changed across all sub-panels. Replace placeholder in app_window.py tab 3. Reference: `gvhmr_gui.py:1400-1448`, `run_multi_person_pipeline()`.
+- [x] Multi-person tab shell: `views/multi_person_tab.py` — left sidebar with video input/pipeline settings/multi-person settings (max_persons, confidence_threshold), main viewport with VideoPlayer, vertical+horizontal QSplitters for identity inspector and pose corrector placeholders, TrackOverview with per-person ConfidenceTimeline bars, signal hub wiring frame_changed/person_selected across sub-panels, MultiPersonWorker integration. AppWindow tab 3 replaced. Tests in `tests/test_multi_person_tab.py` (167 total pass).
 
 ## Phase 2: Identity Inspector
 
