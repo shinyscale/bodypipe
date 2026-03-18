@@ -47,21 +47,22 @@ Full spec: `spec/ux-overhaul.md`
 
 **Architecture note:** `PerfCaptureTab` reduced from 367 LOC to 15 LOC — just a `_create_settings()` override. The `__getattr__` proxy ensures all existing tests pass without modification to assertions (only 2 mock patch targets updated).
 
-### Commit 1B: Create Dock Widget Wrappers *(low risk)*
+### Commit 1B: Create Dock Widget Wrappers *(DONE)*
 
-- [ ] Create `views/dock_widgets.py` with thin QDockWidget subclasses:
+- [x] Created `views/dock_widgets.py` with 6 thin QDockWidget subclasses:
   - `VideoDock` wrapping VideoPlayer
   - `MeshViewportDock` wrapping MeshViewport
   - `IdentityDock` wrapping IdentityInspector
   - `PoseCorrectorDock` wrapping PoseCorrectorPanel
-  - `TrackOverviewDock` wrapping _TrackOverview
+  - `TrackOverviewDock` wrapping _TrackOverview (with QScrollArea)
   - `PipelineSettingsDock` wrapping QStackedWidget of 3 settings panels + mode QComboBox
-- [ ] Each has `setObjectName()` for `saveState()`/`restoreState()` serialization
-- [ ] Each exposes inner widget via `@property`
-- [ ] Add ~20 new tests in `tests/test_dock_widgets.py`
-- [ ] All existing tests still pass
+- [x] Each has `setObjectName()` for `saveState()`/`restoreState()` serialization
+- [x] Each exposes inner widget via `@property`
+- [x] PipelineSettingsDock: mode_changed signal, set_mode(), current_mode/current_settings properties, settings_widget() accessor
+- [x] 28 new tests in `tests/test_dock_widgets.py`
+- [x] All 1242 tests pass (1214 original + 28 new)
 
-**Files:** new `views/dock_widgets.py`
+**Files:** new `views/dock_widgets.py`, new `tests/test_dock_widgets.py`
 
 ### Commit 1C: Rewire AppWindow from Tabs to Docks *(medium risk)*
 
