@@ -164,9 +164,11 @@ class TestFrameDisplay:
         # Simulate left click — coordinates in center of widget
         from PySide6.QtGui import QMouseEvent
         from PySide6.QtCore import QPointF
+        local_pos = QPointF(display.width() / 2, display.height() / 2)
         event = QMouseEvent(
             QMouseEvent.Type.MouseButtonPress,
-            QPointF(display.width() / 2, display.height() / 2),
+            local_pos,
+            local_pos,  # globalPos (required to avoid deprecation)
             Qt.LeftButton,
             Qt.LeftButton,
             Qt.NoModifier,

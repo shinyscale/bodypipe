@@ -32,3 +32,11 @@ Full audit completed — all specs are compliant. Minor non-functional notes:
 
 - [x] Settings restoration when video path is re-entered: All three tabs save solve_config.json to their output directory on pipeline run and restore settings when a previously-processed video is loaded. SinglePersonTab uses outputs/demo/{stem}, PerfCaptureTab uses outputs/perfcap/{stem}, MultiPersonTab uses outputs/multi_person/{stem}. Corrupt configs silently ignored. 13 new tests added (1160 total pass).
 - [x] "Download All" button label: renamed from "Open Output Folder" to "Download All" per single-person-tab spec. PerfCaptureTab inherits the fix. 1160 tests pass.
+
+## Code Quality Fixes
+
+- [x] QMouseEvent deprecation warning: `tests/test_video_player.py` used the deprecated 5-argument QMouseEvent constructor (missing globalPos). Updated to 6-argument constructor matching `test_mesh_viewport.py`. 1160 tests pass with `-W error::DeprecationWarning`.
+
+## Status
+
+All specs fully implemented and audited. Full Gradio parity achieved. 1160 tests passing, 0 warnings.
