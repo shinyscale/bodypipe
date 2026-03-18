@@ -756,6 +756,11 @@ class MultiPersonTab(QWidget):
         if output_dir:
             self._session.output_dir = Path(output_dir)
 
+        # Convert pipeline result to session.person_tracks
+        multi_result = result.get("result")
+        if multi_result is not None:
+            self._load_person_tracks_from_result(multi_result)
+
         # Populate track overview and identity inspector from results
         self._populate_tracks()
         self._identity_panel.refresh()
@@ -767,6 +772,131 @@ class MultiPersonTab(QWidget):
             self._worker = None
         self.status_message.emit(f"Error: {message}")
         self.log_message.emit(f"Pipeline error: {message}", "error")
+
+    def _load_person_tracks_from_result(self, multi_result):
+        """Convert MultiPersonResult into session.person_tracks."""
+        from models.session import PersonTrack
+
+        self._session.person_tracks.clear()
+        self._session.inactive_tracks.clear()
+
+        all_tracks = getattr(multi_result, "all_tracks", [])
+        person_dirs = getattr(multi_result, "person_dirs", [])
+        identity_tracks = getattr(multi_result, "identity_tracks", [])
+
+        for i, track in enumerate(all_tracks):
+            tid = track.get("track_id", i)
+            bboxes_raw = track["bbx_xyxy"]
+            if hasattr(bboxes_raw, "numpy"):
+                bboxes = bboxes_raw.cpu().numpy()
+            else:
+                bboxes = np.asarray(bboxes_raw)
+
+            person_dir = Path(person_dirs[i]) if i < len(person_dirs) else None
+            id_track = identity_tracks[i] if i < len(identity_tracks) else None
+
+            # Convert IdentityKeyframe objects to the dict format expected
+            # by IdentityInspector
+            keyframes = []
+            if id_track and hasattr(id_track, "keyframes"):
+                for kf in id_track.keyframes:
+                    keyframes.append({
+                        "frame": kf.frame_index,
+                        "verified": kf.verified,
+                        "confidence": getattr(kf, "confidence", None),
+                    })
+
+            # Load confidences from CSV if available
+            confidences = None
+            confidence_breakdown = None
+            if person_dir:
+                confidences, confidence_breakdown = self._load_confidences_csv(
+                    person_dir
+                )
+
+            # Load SMPL-X parameters from hmr4d_results.pt
+            smplx_params = None
+            if person_dir:
+                smplx_params = self._load_smplx_params(person_dir)
+
+            pt = PersonTrack(
+                person_id=tid,
+                person_dir=person_dir,
+                identity_track=id_track,
+                confidences=confidences,
+                bboxes=bboxes,
+                keyframes=keyframes,
+                confidence_breakdown=confidence_breakdown,
+                smplx_params=smplx_params,
+            )
+            self._session.person_tracks[tid] = pt
+
+        # Mark inactive tracks
+        for track in getattr(multi_result, "inactive_tracks", []):
+            tid = track.get("track_id", -1) if isinstance(track, dict) else -1
+            if tid >= 0:
+                self._session.inactive_tracks.add(tid)
+
+        # Load crossing spans from person dirs
+        for pid, pt in self._session.person_tracks.items():
+            if pt.person_dir:
+                spans_path = pt.person_dir / "crossing_spans.json"
+                if spans_path.is_file():
+                    import json
+                    try:
+                        spans = json.loads(spans_path.read_text())
+                        self._session.crossing_spans[pid] = [
+                            tuple(s) for s in spans
+                        ]
+                    except Exception:
+                        pass
+
+    def _load_smplx_params(self, person_dir: Path) -> dict | None:
+        """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering."""
+        hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
+        if not hmr4d_pt.is_file():
+            return None
+        try:
+            import torch
+
+            results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
+            params = results.get("smpl_params_incam")
+            if params and "body_pose" in params:
+                # Also store camera intrinsics on session if available
+                K = results.get("K_fullimg")
+                if K is not None and self._session.camera_K is None:
+                    # Use first frame's K (they're typically constant)
+                    self._session.camera_K = K[0].numpy()
+                return params
+        except Exception:
+            pass
+        return None
+
+    def _load_confidences_csv(self, person_dir: Path):
+        """Load confidence.csv → (overall_list, breakdown_dict)."""
+        csv_path = person_dir / "confidence.csv"
+        if not csv_path.is_file():
+            return None, None
+
+        import csv
+        overall = []
+        breakdown = {
+            m: [] for m in [
+                "detection", "visibility", "overlap",
+                "shape", "motion", "overall",
+            ]
+        }
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                overall.append(float(row["overall"]))
+                breakdown["detection"].append(float(row["detection"]))
+                breakdown["visibility"].append(float(row["visible_kp"]))
+                breakdown["overlap"].append(float(row["bbox_overlap"]))
+                breakdown["shape"].append(float(row["shape_dist"]))
+                breakdown["motion"].append(float(row["motion_dist"]))
+                breakdown["overall"].append(float(row["overall"]))
+        return overall if overall else None, breakdown if overall else None
 
     def _populate_tracks(self):
         """Populate track overview from session person_tracks."""

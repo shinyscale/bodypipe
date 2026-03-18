@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QTabWidget,
     QStatusBar,
@@ -236,7 +237,7 @@ class AppWindow(QMainWindow):
         self.setWindowTitle("bodypipe \u2014 Motion Capture Studio")
         self.setMinimumSize(1200, 700)
 
-        _apply_dark_theme(self.parent() if self.parent() else self)
+        _apply_dark_theme(QApplication.instance())
 
         self._setup_ui()
         self._setup_menu()

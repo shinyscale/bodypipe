@@ -940,7 +940,7 @@ class MeshViewport(_BaseWidget):
 
             fmt = QSurfaceFormat()
             fmt.setVersion(3, 3)
-            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
             fmt.setDepthBufferSize(24)
             self.setFormat(fmt)
         else:
@@ -1507,7 +1507,7 @@ class MeshViewport(_BaseWidget):
                 model_dir = None
 
             self._body_model = SmplxLite(
-                model_dir=str(model_dir) if model_dir else None
+                model_path=str(model_dir) if model_dir else None
             )
             self._body_model.cpu().eval()
 
@@ -1665,6 +1665,11 @@ class MeshViewport(_BaseWidget):
                 return
 
             # Create VAO + VBOs
+            if not bool(gl.glGenVertexArrays):
+                raise RuntimeError(
+                    "glGenVertexArrays unavailable (GL too old?) — "
+                    "try setting LIBGL_ALWAYS_SOFTWARE=1"
+                )
             self._vao_id = gl.glGenVertexArrays(1)
             gl.glBindVertexArray(self._vao_id)
 
@@ -1681,6 +1686,8 @@ class MeshViewport(_BaseWidget):
         except Exception as e:
             logger.error("OpenGL init failed: %s", e)
             self._gl_ready = False
+            self._status_msg = f"OpenGL init failed: {e}"
+            self._setup_fallback()
 
     def resizeGL(self, w: int, h: int):
         if not _HAS_GL or not self._gl_ready:
@@ -1694,6 +1701,7 @@ class MeshViewport(_BaseWidget):
 
         if not self._gl_ready:
             return
+
 
         # Use QPainter to enable 2D text overlay after GL rendering.
         # beginNativePainting() brackets the raw GL calls; after
@@ -1980,9 +1988,15 @@ class MeshViewport(_BaseWidget):
         gl.glEnableVertexAttribArray(2)
 
         if mode == gl.GL_LINES:
-            gl.glLineWidth(line_width)
+            try:
+                gl.glLineWidth(line_width)
+            except Exception:
+                gl.glLineWidth(1.0)
         elif mode == gl.GL_POINTS:
-            gl.glPointSize(point_size)
+            try:
+                gl.glPointSize(point_size)
+            except Exception:
+                pass
 
         gl.glDrawArrays(mode, 0, len(positions))
 
