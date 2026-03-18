@@ -1077,6 +1077,40 @@ class AppWindow(QMainWindow):
             else:
                 tracks[pid] = np.ones(max(1, self._session.num_frames)) * 0.8
         self._track_overview.set_tracks(tracks)
+        self._populate_track_markers()
+
+    def _populate_track_markers(self):
+        """Push keyframe, issue, correction, and crossing markers to track overview."""
+        for pid, track in self._session.person_tracks.items():
+            kf_frames = [kf["frame"] for kf in (track.keyframes or [])]
+            verified = {
+                kf["frame"] for kf in (track.keyframes or [])
+                if kf.get("verified", False)
+            }
+            corr_frames: list[int] = []
+            ct = self._session.correction_tracks.get(pid)
+            if ct is not None and hasattr(ct, "corrections") and ct.corrections:
+                corr_frames = [c.frame_index for c in ct.corrections]
+            spans = self._session.crossing_spans.get(pid, [])
+            self._track_overview.set_track_markers(
+                pid,
+                keyframes=kf_frames,
+                verified_frames=verified,
+                correction_frames=corr_frames,
+                crossing_spans=spans,
+            )
+        # Issue flags from review scanner
+        try:
+            from views.identity_inspector import compute_review_issues
+
+            issues = compute_review_issues(self._session)
+            by_person: dict[int, list[int]] = {}
+            for issue in issues:
+                by_person.setdefault(issue.person_id, []).append(issue.frame)
+            for pid, frames in by_person.items():
+                self._track_overview.set_track_markers(pid, issue_frames=frames)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Open video

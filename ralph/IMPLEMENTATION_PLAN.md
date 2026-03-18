@@ -182,19 +182,50 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** `views/mesh_viewport.py`, `views/video_player.py`, `app_window.py`, `tests/test_mesh_viewport.py`, `tests/test_video_player.py`, `tests/test_app_window.py`
 
+### Phase 2: Vertical Track Timeline *(DONE)*
+
+- [x] Rewrote `views/track_overview.py` — QGraphicsView-based DAW-style timeline replacing simple ConfidenceTimeline stack
+- [x] `_TrackLaneItem` (QGraphicsItem): per-person horizontal heatmap lane with:
+  - Confidence heatmap (green >0.8, yellow 0.5-0.8, red <0.5) with binning optimization for zoomed-out views
+  - Keyframe markers (triangles at lane bottom, green=verified, yellow=unverified)
+  - Issue flags (red diamonds near lane top, from review scanner)
+  - Correction markers (amber dots at mid-lane)
+  - Crossing-span overlays (blue tint for SAM2-detected overlaps)
+  - Collapsible lanes via header toggle button
+- [x] `_PlayheadItem` (QGraphicsItem): vertical playhead line, ItemIgnoresTransformations for crisp 2px rendering at any zoom
+- [x] `_TimelineView` (QGraphicsView): horizontal zoom (scroll wheel, X-axis only), pan (middle-drag), click-to-select person + seek frame
+- [x] `_TrackHeader` (QWidget): colored dot + "Person N" label + collapse arrow, fixed-width left column
+- [x] `TrackOverview.set_track_markers()` — new API for keyframes, issues, corrections, crossing spans
+- [x] Updated `TrackOverviewDock` — removed QScrollArea wrapper (QGraphicsView handles own scrolling)
+- [x] Updated `app_window._populate_tracks()` → calls new `_populate_track_markers()` for keyframes, corrections, crossing spans, and review scanner issues
+- [x] Marker X-dimensions use inverse device scale for constant screen-pixel size at any zoom level
+- [x] 56 new tests in `tests/test_track_overview.py` (TestConfColor, TestTrackLaneItem, TestPlayheadItem, TestTimelineView, TestTrackHeader, TestTrackOverview, TestPersonColors)
+- [x] Updated 6 existing tests in `test_multi_person_tab.py` (_timelines→_lanes, _labels→_headers, frame_clicked signal chain)
+- [x] Updated 1 test in `test_dock_widgets.py` (QScrollArea→direct widget)
+- [x] All 1331 tests pass (1275 original + 56 new)
+
+**Files:** `views/track_overview.py` (rewrite), `views/dock_widgets.py`, `app_window.py`, `tests/test_track_overview.py` (new), `tests/test_multi_person_tab.py`, `tests/test_dock_widgets.py`
+
 ---
 
-## Execution Order (all complete)
+## Execution Order
 
-1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2
 
-All UX overhaul phases and independent viewport improvements are complete.
+## Remaining UX Overhaul Phases
+
+- [ ] **Phase 5**: Pose Correction UX Upgrades — preview range slider, smoothing controls, apply-to-similar, correction propagation
+- [ ] **Phase 3**: Transport & Scrubbing Polish — viewport-embedded transport, speed presets, read-ahead increase
+- [ ] **Phase 10**: Keyboard & Interaction Polish — context-aware shortcuts, on-screen HUD
+- [ ] **Phase 8**: Property Panel Refinement — tabbed parameter groups, consistent grid layout
+- [ ] **Phase 9**: Session Library — media pool dock with thumbnails, metadata, tags
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — 1275 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — 1331 tests pass
 2. `QT_QPA_PLATFORM=offscreen python main.py --smoke-test` — app launches
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts
 5. 3D viewport: chain highlights, heatmap toggle, quality modes (wireframe/fast/full)
 6. Auto-switch to wireframe during slider scrubbing and playback
+7. Track timeline: zoom (scroll wheel), pan (middle-drag), click to select person + seek, collapsible lanes, marker overlays

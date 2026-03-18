@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
-    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -92,16 +91,17 @@ class PoseCorrectorDock(QDockWidget):
 
 
 class TrackOverviewDock(QDockWidget):
-    """Dock wrapping a TrackOverview widget inside a scroll area."""
+    """Dock wrapping a TrackOverview widget.
+
+    No QScrollArea needed — TrackOverview uses an internal QGraphicsView
+    that handles its own horizontal zoom/scroll.
+    """
 
     def __init__(self, track_overview: TrackOverview, parent: QWidget | None = None):
         super().__init__("Track Overview", parent)
         self.setObjectName("TrackOverviewDock")
         self._track_overview = track_overview
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(track_overview)
-        self.setWidget(scroll)
+        self.setWidget(track_overview)
 
     @property
     def track_overview(self) -> TrackOverview:

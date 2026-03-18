@@ -411,22 +411,22 @@ class TestTrackOverview:
         w = TrackOverview()
         assert w is not None
 
-    def test_set_tracks_creates_timelines(self, qapp):
+    def test_set_tracks_creates_lanes_and_headers(self, qapp):
         w = TrackOverview()
         tracks = {
             0: np.ones(100) * 0.9,
             1: np.ones(100) * 0.7,
         }
         w.set_tracks(tracks)
-        assert len(w._timelines) == 2
-        assert len(w._labels) == 2
+        assert len(w._lanes) == 2
+        assert len(w._headers) == 2
 
-    def test_set_tracks_labels_have_person_colors(self, qapp):
+    def test_set_tracks_headers_have_person_colors(self, qapp):
         w = TrackOverview()
         tracks = {0: np.ones(10) * 0.9}
         w.set_tracks(tracks)
-        label = w._labels[0]
-        assert PERSON_COLORS[0] in label.styleSheet()
+        header = w._headers[0]
+        assert PERSON_COLORS[0] in header._label.styleSheet()
 
     def test_set_current_frame(self, qapp):
         w = TrackOverview()
@@ -438,11 +438,11 @@ class TestTrackOverview:
     def test_clear_on_new_tracks(self, qapp):
         w = TrackOverview()
         w.set_tracks({0: np.ones(10), 1: np.ones(10)})
-        assert len(w._timelines) == 2
+        assert len(w._lanes) == 2
 
         w.set_tracks({0: np.ones(5)})
-        assert len(w._timelines) == 1
-        assert len(w._labels) == 1
+        assert len(w._lanes) == 1
+        assert len(w._headers) == 1
 
     def test_person_clicked_signal(self, qapp):
         w = TrackOverview()
@@ -450,8 +450,8 @@ class TestTrackOverview:
         w.person_clicked.connect(lambda pid, f: received.append((pid, f)))
         tracks = {0: np.ones(10)}
         w.set_tracks(tracks)
-        # Simulate a click via the underlying timeline
-        w._timelines[0].frame_clicked.emit(5)
+        # Simulate a click via the underlying timeline view
+        w._view.frame_clicked.emit(0, 5)
         assert received == [(0, 5)]
 
     def test_person_colors_length(self):

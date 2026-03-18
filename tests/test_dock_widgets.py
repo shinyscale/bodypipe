@@ -158,12 +158,12 @@ class TestTrackOverviewDock:
         dock = TrackOverviewDock(to)
         assert dock.track_overview is to
 
-    def test_has_scroll_area(self, qapp):
-        from PySide6.QtWidgets import QScrollArea
+    def test_widget_is_track_overview(self, qapp):
         from views.track_overview import TrackOverview
 
-        dock = TrackOverviewDock(TrackOverview())
-        assert isinstance(dock.widget(), QScrollArea)
+        to = TrackOverview()
+        dock = TrackOverviewDock(to)
+        assert dock.widget() is to
 
 
 # ===========================================================================
