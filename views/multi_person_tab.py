@@ -42,6 +42,7 @@ from views.identity_inspector import IdentityInspector
 from views.single_person_tab import _DropArea, VIDEO_EXTENSIONS
 from views.bbox_overlay import render_bbox_overlay, render_edit_preview
 from workers.pipeline_orchestrator import MultiPersonWorker
+from workers.reprocess_worker import ReprocessWorker
 
 
 # Colors for up to 8 tracked persons — consistent palette across the app
@@ -106,6 +107,7 @@ class MultiPersonTab(QWidget):
         self._gvhmr_root = gvhmr_root
         self._video_path: Path | None = None
         self._worker: MultiPersonWorker | None = None
+        self._reprocess_worker: ReprocessWorker | None = None
         self._running = False
         self._show_all_tracks = False
         self._edit_preview: dict | None = None
@@ -294,6 +296,7 @@ class MultiPersonTab(QWidget):
         self._identity_panel.bbox_overlay_changed.connect(self._on_bbox_overlay_changed)
         self._identity_panel.keyframe_changed.connect(self._on_keyframe_changed)
         self._identity_panel.track_modified.connect(self._on_tracks_modified)
+        self._identity_panel.reprocess_requested.connect(self._on_reprocess_requested)
 
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
@@ -350,6 +353,77 @@ class MultiPersonTab(QWidget):
             if self._edit_preview:
                 composited = render_edit_preview(composited, self._edit_preview)
             self._video_player.set_frame(composited)
+
+    # ------------------------------------------------------------------
+    # Reprocess
+    # ------------------------------------------------------------------
+
+    def _on_reprocess_requested(self, person_ids: list):
+        """Launch ReprocessWorker for dirty persons."""
+        if self._reprocess_worker is not None:
+            self.status_message.emit("Reprocess already running")
+            return
+
+        self._reprocess_worker = ReprocessWorker(
+            session=self._session,
+            person_ids=person_ids,
+        )
+        self._reprocess_worker.progress.connect(self._on_reprocess_progress)
+        self._reprocess_worker.person_done.connect(self._on_reprocess_person_done)
+        self._reprocess_worker.finished.connect(self._on_reprocess_finished)
+        self._reprocess_worker.error.connect(self._on_reprocess_error)
+        self._reprocess_worker.start()
+
+        self._progress_bar.show()
+        self._progress_label.show()
+        self.status_message.emit(
+            f"Reprocessing {len(person_ids)} person(s)..."
+        )
+        self.log_message.emit(
+            f"Reprocess started for persons: {person_ids}", "info"
+        )
+
+    def _on_reprocess_progress(self, fraction: float, stage: str):
+        self._progress_bar.setValue(int(fraction * 1000))
+        self._progress_label.setText(stage)
+        self.status_message.emit(f"{stage} ({fraction:.0%})")
+
+    def _on_reprocess_person_done(self, person_id: int):
+        """Handle completion of a single person reprocess."""
+        self._session.dirty_persons.discard(person_id)
+        self._identity_panel.update_reprocess_button()
+        self.log_message.emit(f"Person {person_id} reprocessed", "info")
+
+    def _on_reprocess_finished(self, result: dict):
+        """Handle reprocess worker completion — refresh all UI."""
+        self._reprocess_worker = None
+        self._progress_bar.hide()
+        self._progress_label.hide()
+        self._progress_bar.setValue(0)
+
+        reprocessed = result.get("reprocessed", [])
+        self._session.dirty_persons -= set(reprocessed)
+
+        self._populate_tracks()
+        self._identity_panel.refresh()
+        self._show_frame(self._session.current_frame)
+
+        self.status_message.emit(
+            f"Reprocess complete: {len(reprocessed)} person(s) updated"
+        )
+        self.log_message.emit(
+            f"Reprocess finished: {reprocessed}", "info"
+        )
+
+    def _on_reprocess_error(self, message: str):
+        """Handle reprocess worker error."""
+        self._reprocess_worker = None
+        self._progress_bar.hide()
+        self._progress_label.hide()
+        self._progress_bar.setValue(0)
+
+        self.status_message.emit(f"Reprocess error: {message}")
+        self.log_message.emit(f"Reprocess error: {message}", "error")
 
     # ------------------------------------------------------------------
     # Video loading

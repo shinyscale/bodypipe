@@ -1,9 +1,10 @@
 """Identity Inspector panel — person selection, confidence visualization,
-keyframe management, bbox editing, and identity verification.
+keyframe management, bbox editing, review scanning, and identity verification.
 
 Why: The identity inspector is the primary tool for verifying and correcting
 multi-person tracking results. It provides per-person confidence visualization,
-keyframe-based annotation, two-click bbox editing with interpolation, and CRUD
+keyframe-based annotation, two-click bbox editing with interpolation, review
+scanning for automated issue detection, reprocessing of dirty persons, and CRUD
 operations for managing tracked identities. All state flows through
 Session.person_tracks — no module-level dicts.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +61,153 @@ PERSON_COLORS = [
 ]
 
 
+@dataclass
+class ReviewIssue:
+    """A flagged issue found by the review scanner.
+
+    Why: Automated scanning catches problems that are tedious to find manually —
+    low-confidence spans, potential identity swaps from high overlap, shape drift,
+    and gaps in detection. The scanner prioritizes issues by severity so the user
+    reviews the most critical problems first.
+    """
+
+    frame: int
+    person_id: int
+    issue_type: str  # "low_confidence", "potential_swap", "shape_drift", "track_gap"
+    description: str
+    severity: float  # 0-1, higher = more urgent
+
+
+def compute_review_issues(
+    session: Session,
+    low_conf_threshold: float = 0.4,
+    gap_threshold: int = 30,
+) -> list[ReviewIssue]:
+    """Scan all active persons for issues that need human review.
+
+    Detects four issue types:
+    - low_confidence: spans of >= 5 frames where overall confidence < threshold
+    - potential_swap: high bbox overlap (> 0.5) suggesting identity switch
+    - shape_drift: low shape confidence (< 0.4) suggesting body changed
+    - track_gap: detection gaps of >= gap_threshold consecutive zero-bbox frames
+
+    Returns issues sorted by frame number.
+    """
+    issues: list[ReviewIssue] = []
+
+    for pid, track in session.person_tracks.items():
+        if pid in session.inactive_tracks:
+            continue
+
+        confs = track.confidences
+        if not confs:
+            continue
+
+        num_frames = len(confs)
+
+        # --- Low confidence spans (>= 5 frames below threshold) ---
+        span_start: int | None = None
+        for f in range(num_frames):
+            if confs[f] < low_conf_threshold:
+                if span_start is None:
+                    span_start = f
+            else:
+                if span_start is not None and f - span_start >= 5:
+                    mid = (span_start + f) // 2
+                    issues.append(ReviewIssue(
+                        frame=mid,
+                        person_id=pid,
+                        issue_type="low_confidence",
+                        description=(
+                            f"Low confidence span frames {span_start}-{f - 1} "
+                            f"({f - span_start} frames)"
+                        ),
+                        severity=0.7,
+                    ))
+                span_start = None
+        if span_start is not None and num_frames - span_start >= 5:
+            mid = (span_start + num_frames) // 2
+            issues.append(ReviewIssue(
+                frame=mid,
+                person_id=pid,
+                issue_type="low_confidence",
+                description=(
+                    f"Low confidence span frames {span_start}-{num_frames - 1}"
+                ),
+                severity=0.7,
+            ))
+
+        # --- Potential swap (high bbox overlap) ---
+        if track.confidence_breakdown and "overlap" in track.confidence_breakdown:
+            overlaps = track.confidence_breakdown["overlap"]
+            for f in range(len(overlaps)):
+                if overlaps[f] > 0.5:
+                    if f == 0 or overlaps[f - 1] <= 0.5:
+                        issues.append(ReviewIssue(
+                            frame=f,
+                            person_id=pid,
+                            issue_type="potential_swap",
+                            description=(
+                                f"High bbox overlap ({overlaps[f]:.2f}) "
+                                f"— possible identity swap"
+                            ),
+                            severity=0.9,
+                        ))
+
+        # --- Shape drift (low shape confidence) ---
+        if track.confidence_breakdown and "shape" in track.confidence_breakdown:
+            shapes = track.confidence_breakdown["shape"]
+            for f in range(len(shapes)):
+                if shapes[f] < 0.4:
+                    if f == 0 or shapes[f - 1] >= 0.4:
+                        issues.append(ReviewIssue(
+                            frame=f,
+                            person_id=pid,
+                            issue_type="shape_drift",
+                            description=(
+                                f"Shape confidence low ({shapes[f]:.2f}) "
+                                f"— body shape may have changed"
+                            ),
+                            severity=0.6,
+                        ))
+
+        # --- Track gaps (zero bboxes for >= gap_threshold frames) ---
+        if track.bboxes is not None:
+            gap_start: int | None = None
+            for f in range(len(track.bboxes)):
+                if np.all(track.bboxes[f] == 0):
+                    if gap_start is None:
+                        gap_start = f
+                else:
+                    if gap_start is not None and f - gap_start >= gap_threshold:
+                        mid = (gap_start + f) // 2
+                        issues.append(ReviewIssue(
+                            frame=mid,
+                            person_id=pid,
+                            issue_type="track_gap",
+                            description=(
+                                f"Detection gap frames {gap_start}-{f - 1} "
+                                f"({f - gap_start} frames)"
+                            ),
+                            severity=0.5,
+                        ))
+                    gap_start = None
+            if gap_start is not None and len(track.bboxes) - gap_start >= gap_threshold:
+                mid = (gap_start + len(track.bboxes)) // 2
+                issues.append(ReviewIssue(
+                    frame=mid,
+                    person_id=pid,
+                    issue_type="track_gap",
+                    description=(
+                        f"Detection gap frames {gap_start}-{len(track.bboxes) - 1}"
+                    ),
+                    severity=0.5,
+                ))
+
+    issues.sort(key=lambda i: i.frame)
+    return issues
+
+
 def _confidence_color(value: float) -> str:
     """Return CSS color string based on confidence value."""
     if value > 0.8:
@@ -100,6 +249,10 @@ class IdentityInspector(QWidget):
 
         # Crossing span two-click state
         self._crossing_start_frame: int | None = None
+
+        # Review scanner state
+        self._review_issues: list[ReviewIssue] = []
+        self._review_issue_idx: int = 0
 
         self._setup_ui()
         self._connect_signals()
@@ -316,6 +469,59 @@ class IdentityInspector(QWidget):
 
         layout.addWidget(track_ops_group)
 
+        # ---- Review Scanner ----
+        scanner_group = QGroupBox("Review Scanner")
+        scanner_layout = QVBoxLayout(scanner_group)
+
+        scanner_btn_row = QHBoxLayout()
+        self._scan_btn = QPushButton("Scan")
+        self._scan_btn.setToolTip(
+            "Auto-detect issues: low confidence, overlaps, shape drift, gaps"
+        )
+        scanner_btn_row.addWidget(self._scan_btn)
+
+        self._prev_issue_btn = QPushButton("\u25c4 Prev")
+        self._prev_issue_btn.setToolTip("Navigate to previous issue")
+        self._prev_issue_btn.setEnabled(False)
+        scanner_btn_row.addWidget(self._prev_issue_btn)
+
+        self._next_issue_btn = QPushButton("\u25ba Next")
+        self._next_issue_btn.setToolTip("Navigate to next issue")
+        self._next_issue_btn.setEnabled(False)
+        scanner_btn_row.addWidget(self._next_issue_btn)
+        scanner_layout.addLayout(scanner_btn_row)
+
+        self._issues_label = QLabel("No scan performed")
+        self._issues_label.setStyleSheet("font-style: italic;")
+        scanner_layout.addWidget(self._issues_label)
+
+        self._issues_table = QTableWidget(0, 4)
+        self._issues_table.setHorizontalHeaderLabels(
+            ["Frame", "Person", "Type", "Description"]
+        )
+        self._issues_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._issues_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._issues_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._issues_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._issues_table.verticalHeader().hide()
+        self._issues_table.setMaximumHeight(140)
+        scanner_layout.addWidget(self._issues_table)
+
+        layout.addWidget(scanner_group)
+
+        # ---- Reprocess ----
+        self._reprocess_btn = QPushButton("Reprocess (0 dirty)")
+        self._reprocess_btn.setToolTip(
+            "Reprocess all persons with pending bbox corrections"
+        )
+        self._reprocess_btn.setEnabled(False)
+        self._reprocess_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 8px; }"
+        )
+        layout.addWidget(self._reprocess_btn)
+
         layout.addStretch()
 
     def _connect_signals(self):
@@ -337,6 +543,12 @@ class IdentityInspector(QWidget):
         self._merge_btn.clicked.connect(self._on_merge_track)
         self._crossing_start_btn.clicked.connect(self._on_crossing_start)
         self._crossing_end_btn.clicked.connect(self._on_crossing_end)
+        self._scan_btn.clicked.connect(self._on_scan_issues)
+        self._prev_issue_btn.clicked.connect(self._on_prev_issue)
+        self._next_issue_btn.clicked.connect(self._on_next_issue)
+        self._issues_table.cellDoubleClicked.connect(self._on_issue_double_clicked)
+        self._reprocess_btn.clicked.connect(self._on_reprocess)
+        self.person_dirty.connect(lambda _: self.update_reprocess_button())
 
     # ------------------------------------------------------------------
     # Public API
@@ -373,6 +585,7 @@ class IdentityInspector(QWidget):
         self._update_merge_combo()
         if self._current_person_id >= 0:
             self._refresh_for_person()
+        self.update_reprocess_button()
 
     def on_frame_click(self, x_norm: float, y_norm: float):
         """Handle click on video frame during bbox editing.
@@ -1151,6 +1364,125 @@ class IdentityInspector(QWidget):
             if not self._session.crossing_spans[person_id]:
                 del self._session.crossing_spans[person_id]
         self._update_crossing_table()
+
+    # ------------------------------------------------------------------
+    # Review scanner
+    # ------------------------------------------------------------------
+
+    def _on_scan_issues(self):
+        """Run the review scanner across all active tracks.
+
+        Why: Automated scanning catches common tracking problems (confidence
+        drops, identity swaps, shape changes, detection gaps) that would take
+        a human minutes to find manually. Issues are sorted by frame so the
+        user can step through them sequentially.
+        """
+        self._review_issues = compute_review_issues(self._session)
+        self._review_issue_idx = 0
+
+        n = len(self._review_issues)
+        self._update_issues_table()
+
+        if n == 0:
+            self._issues_label.setText("No issues found.")
+            self._issues_label.setStyleSheet("font-style: italic; color: #4ecca3;")
+        else:
+            self._issues_label.setText(
+                f"Found {n} issue{'s' if n != 1 else ''}. Use Next/Prev to navigate."
+            )
+            self._issues_label.setStyleSheet("font-style: italic; color: #ffd93d;")
+            # Navigate to first issue
+            self._navigate_to_issue(0)
+
+        has_issues = n > 0
+        self._prev_issue_btn.setEnabled(has_issues)
+        self._next_issue_btn.setEnabled(has_issues)
+
+        log.info("Review scan complete: %d issues found", n)
+
+    def _on_next_issue(self):
+        """Navigate to the next review issue (wraps around)."""
+        if not self._review_issues:
+            return
+        self._review_issue_idx = (
+            (self._review_issue_idx + 1) % len(self._review_issues)
+        )
+        self._navigate_to_issue(self._review_issue_idx)
+
+    def _on_prev_issue(self):
+        """Navigate to the previous review issue (wraps around)."""
+        if not self._review_issues:
+            return
+        self._review_issue_idx = (
+            (self._review_issue_idx - 1) % len(self._review_issues)
+        )
+        self._navigate_to_issue(self._review_issue_idx)
+
+    def _navigate_to_issue(self, idx: int):
+        """Seek to an issue's frame and update the status label."""
+        issue = self._review_issues[idx]
+        n = len(self._review_issues)
+        self._issues_label.setText(
+            f"[{idx + 1}/{n}] ID {issue.person_id}: {issue.description}"
+        )
+        # Select the issue's person if different
+        if issue.person_id != self._current_person_id:
+            self.set_person(issue.person_id)
+            self.person_changed.emit(issue.person_id)
+        # Seek to the issue's frame
+        self.frame_requested.emit(issue.frame)
+        # Highlight row in issues table
+        self._issues_table.selectRow(idx)
+
+    def _on_issue_double_clicked(self, row: int, col: int):
+        """Navigate to an issue when double-clicking its table row."""
+        if 0 <= row < len(self._review_issues):
+            self._review_issue_idx = row
+            self._navigate_to_issue(row)
+
+    def _update_issues_table(self):
+        """Rebuild the issues table from current scan results."""
+        self._issues_table.setRowCount(0)
+        self._issues_table.setRowCount(len(self._review_issues))
+
+        for row, issue in enumerate(self._review_issues):
+            frame_item = QTableWidgetItem(str(issue.frame))
+            frame_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 0, frame_item)
+
+            person_item = QTableWidgetItem(f"Person {issue.person_id}")
+            person_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 1, person_item)
+
+            type_item = QTableWidgetItem(issue.issue_type)
+            type_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 2, type_item)
+
+            desc_item = QTableWidgetItem(issue.description)
+            self._issues_table.setItem(row, 3, desc_item)
+
+    # ------------------------------------------------------------------
+    # Reprocess
+    # ------------------------------------------------------------------
+
+    def _on_reprocess(self):
+        """Emit signal to reprocess all dirty persons.
+
+        Why: After bbox corrections, the GVHMR pipeline must re-run for
+        affected persons to produce updated pose parameters. This button
+        triggers ReprocessWorker for every person in session.dirty_persons.
+        """
+        dirty = sorted(self._session.dirty_persons)
+        if not dirty:
+            return
+        log.info("Reprocess requested for %d dirty persons: %s", len(dirty), dirty)
+        self.reprocess_requested.emit(dirty)
+
+    def update_reprocess_button(self):
+        """Update reprocess button label and enabled state from session.dirty_persons."""
+        n = len(self._session.dirty_persons)
+        self._reprocess_btn.setText(f"Reprocess ({n} dirty)")
+        self._reprocess_btn.setEnabled(n > 0)
 
     # ------------------------------------------------------------------
     # Track operations helpers
