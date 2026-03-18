@@ -445,6 +445,9 @@ class MultiPersonTab(QWidget):
         self._viewport_stack.setCurrentIndex(1)
         self._mesh_mode_btn.setChecked(True)
         self._video_mode_btn.setChecked(False)
+        # Pass current video frame for in-camera composite background
+        frame = self._video_player.get_raw_frame(self._session.current_frame)
+        self._main_mesh_viewport.set_video_frame(frame)
 
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
@@ -452,6 +455,9 @@ class MultiPersonTab(QWidget):
         self._track_overview.set_current_frame(frame_idx)
         self._identity_panel.set_frame(frame_idx)
         self._pose_corrector.on_frame_changed(frame_idx)
+        # Pass raw video frame for in-camera composite background
+        raw = self._video_player.get_raw_frame(frame_idx)
+        self._main_mesh_viewport.set_video_frame(raw)
         self._main_mesh_viewport.on_frame_changed(frame_idx)
         self._show_frame(frame_idx)
         self.frame_changed.emit(frame_idx)

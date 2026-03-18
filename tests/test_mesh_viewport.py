@@ -2084,3 +2084,77 @@ class TestMeshViewportJointLabels:
         w = MeshViewport()
         assert hasattr(w, "_draw_joint_labels")
         assert callable(w._draw_joint_labels)
+
+
+class TestVideoFrameComposite:
+    """Verify in-camera video frame background compositing.
+
+    Why: The spec requires the in-camera 3D viewport to show the mesh
+    overlaid on the video frame — a critical feature for verifying that
+    the SMPL-X pose aligns with the actual footage. Without this, users
+    can't visually compare the reconstructed mesh to the original video.
+    """
+
+    def test_set_video_frame_stores_copy(self, qapp):
+        """set_video_frame should store a copy of the input array."""
+        w = MeshViewport()
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        w.set_video_frame(frame)
+        assert w._video_frame is not None
+        assert w._video_frame is not frame  # must be a copy
+        np.testing.assert_array_equal(w._video_frame, frame)
+
+    def test_set_video_frame_none_clears(self, qapp):
+        """set_video_frame(None) should clear the stored frame."""
+        w = MeshViewport()
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        w.set_video_frame(frame)
+        assert w._video_frame is not None
+        w.set_video_frame(None)
+        assert w._video_frame is None
+
+    def test_initial_video_frame_is_none(self, qapp):
+        """Video frame should be None by default."""
+        w = MeshViewport()
+        assert w._video_frame is None
+
+    def test_set_video_frame_mutating_original_no_effect(self, qapp):
+        """Modifying the original array after set_video_frame should not
+        affect the stored frame (copy isolation)."""
+        w = MeshViewport()
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        w.set_video_frame(frame)
+        frame[0, 0, 0] = 255
+        assert w._video_frame[0, 0, 0] == 0
+
+    def test_set_video_frame_different_sizes(self, qapp):
+        """set_video_frame should accept different frame sizes."""
+        w = MeshViewport()
+        for h, wd in [(240, 320), (480, 640), (1080, 1920)]:
+            frame = np.random.randint(0, 255, (h, wd, 3), dtype=np.uint8)
+            w.set_video_frame(frame)
+            assert w._video_frame.shape == (h, wd, 3)
+
+    def test_has_set_video_frame_method(self, qapp):
+        """Public API: set_video_frame must exist."""
+        w = MeshViewport()
+        assert hasattr(w, "set_video_frame")
+        assert callable(w.set_video_frame)
+
+    def test_video_frame_only_in_incam_mode(self, qapp):
+        """Video frame should be stored regardless of camera mode, but the
+        background rendering logic checks camera mode internally."""
+        w = MeshViewport()
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        w.set_camera_mode("orbit")
+        w.set_video_frame(frame)
+        assert w._video_frame is not None  # stored, just not rendered
+
+    def test_set_video_frame_updates_triggers_repaint(self, qapp):
+        """set_video_frame should store the frame even without GL context."""
+        w = MeshViewport()
+        frame = np.ones((100, 200, 3), dtype=np.uint8) * 128
+        w.set_video_frame(frame)
+        assert w._video_frame is not None
+        assert w._video_frame.shape == (100, 200, 3)
+        np.testing.assert_array_equal(w._video_frame, 128)

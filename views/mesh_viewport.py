@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Signal, Qt, QSize
-from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics
+from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from models.session import Session
@@ -889,6 +889,9 @@ class MeshViewport(_BaseWidget):
         self._show_grid: bool = True  # visible by default in orbit mode
         self._grid_y: float = 0.0  # Y level of the grid in GL space
 
+        # Video frame background for in-camera composite
+        self._video_frame: np.ndarray | None = None  # RGB (H, W, 3) uint8
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -992,6 +995,20 @@ class MeshViewport(_BaseWidget):
         if show == self._show_grid:
             return
         self._show_grid = show
+        if _HAS_GL:
+            self.update()
+
+    def set_video_frame(self, frame: np.ndarray | None):
+        """Set the video frame to render as background in in-camera mode.
+
+        Parameters
+        ----------
+        frame : (H, W, 3) uint8 RGB array, or None to clear.
+        """
+        if frame is not None:
+            self._video_frame = frame.copy()
+        else:
+            self._video_frame = None
         if _HAS_GL:
             self.update()
 
@@ -1477,9 +1494,29 @@ class MeshViewport(_BaseWidget):
         # beginNativePainting() brackets the raw GL calls; after
         # endNativePainting() we draw joint labels with QPainter.
         painter = QPainter(self)
+
+        # Draw video frame background in in-camera mode (before GL rendering)
+        _has_bg = (
+            self._camera_mode == "incam"
+            and self._video_frame is not None
+        )
+        if _has_bg:
+            fh, fw = self._video_frame.shape[:2]
+            bpl = fw * 3  # bytes per line for RGB888
+            qimg = QImage(
+                self._video_frame.data, fw, fh, bpl,
+                QImage.Format.Format_RGB888,
+            )
+            painter.drawImage(self.rect(), qimg)
+
         painter.beginNativePainting()
 
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        # When compositing over a video frame, only clear depth so the
+        # QPainter-drawn background is preserved.
+        if _has_bg:
+            gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
+        else:
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
         # Grid floor (orbit mode only, drawn first so mesh occludes it)
         if self._show_grid and self._camera_mode == "orbit":

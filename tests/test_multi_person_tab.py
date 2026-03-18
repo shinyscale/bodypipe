@@ -834,6 +834,61 @@ class TestMeshViewportSignalWiring:
 
 
 # ---------------------------------------------------------------------------
+# Video frame composite wiring
+# ---------------------------------------------------------------------------
+
+
+class TestVideoFrameCompositeWiring:
+    """Verify that MultiPersonTab passes video frames to main mesh viewport.
+
+    Why: The spec requires in-camera 3D viewport to composite the mesh
+    over the video frame. The tab must wire frame data from the video
+    player to the mesh viewport so the background shows the actual footage.
+    """
+
+    def test_frame_change_passes_frame_to_mesh_viewport(self, qapp):
+        """_on_frame_changed should pass raw frame to main_mesh_viewport."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        # Mock the video player's get_raw_frame to return a known frame
+        dummy_frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        tab._video_player.get_raw_frame = MagicMock(return_value=dummy_frame)
+        tab._on_frame_changed(5)
+        tab._video_player.get_raw_frame.assert_called_with(5)
+        assert tab._main_mesh_viewport._video_frame is not None
+        np.testing.assert_array_equal(
+            tab._main_mesh_viewport._video_frame, dummy_frame
+        )
+
+    def test_frame_change_none_frame_clears_viewport(self, qapp):
+        """When no video is loaded, get_raw_frame returns None — viewport
+        should clear its video frame."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        # Set a frame first
+        tab._main_mesh_viewport._video_frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        tab._video_player.get_raw_frame = MagicMock(return_value=None)
+        tab._on_frame_changed(0)
+        assert tab._main_mesh_viewport._video_frame is None
+
+    def test_switch_to_mesh_passes_current_frame(self, qapp):
+        """Switching to mesh mode should set the video frame from current frame."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        dummy_frame = np.ones((100, 200, 3), dtype=np.uint8) * 128
+        tab._video_player.get_raw_frame = MagicMock(return_value=dummy_frame)
+        tab._switch_to_mesh()
+        assert tab._main_mesh_viewport._video_frame is not None
+
+    def test_mesh_viewport_has_set_video_frame_method(self, qapp):
+        """Main mesh viewport must expose set_video_frame."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert hasattr(tab._main_mesh_viewport, "set_video_frame")
+        assert callable(tab._main_mesh_viewport.set_video_frame)
+
+
+# ---------------------------------------------------------------------------
 # PERSON_COLORS constant
 # ---------------------------------------------------------------------------
 
