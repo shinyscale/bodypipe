@@ -125,11 +125,16 @@ Full spec: `spec/ux-overhaul.md`
 
 ## Independent Viewport Improvements (can interleave with Phase 1)
 
-### Phase 4: Joint Chain Highlighting *(1 commit, ~80 LOC)*
+### Phase 4: Joint Chain Highlighting *(DONE)*
 
-- [ ] On `joint_clicked`, walk `JOINT_PARENTS` from selected joint to root
-- [ ] Highlight chain bones in accent amber, selected joint brighter
-- [ ] Right-click context menu: Select Chain, Select Siblings, Select Opposite, Select Region
+- [x] On `joint_clicked`, walk `JOINT_PARENTS` from selected joint to root
+- [x] Highlight chain bones in accent amber (thicker lines), selected joint brighter
+- [x] Right-click context menu: Select Chain, Select Siblings, Select Opposite, Select Region
+- [x] Pure helpers: `get_joint_chain`, `get_joint_chain_bones`, `get_joint_siblings`, `get_opposite_joint`, `get_joint_region`
+- [x] Constants: `_SELECTED_ACCENT_COLOR`, `_CHAIN_BONE_COLOR`, `_CHAIN_JOINT_COLOR`, `_CHAIN_JOINT_POINT_SIZE`, `_CHAIN_BONE_LINE_WIDTH`
+- [x] Data: `_LR_PAIRS`, `_JOINT_REGIONS`, `_JOINT_TO_REGION`
+- [x] 39 new tests in `tests/test_mesh_viewport.py`
+- [x] All 1281 tests pass (1242 original + 39 new)
 
 **File:** `views/mesh_viewport.py`
 

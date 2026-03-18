@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Signal, Qt, QSize
 from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics, QImage
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QMenu
 
 from models.session import Session
 from theme import COLORS
@@ -221,6 +221,15 @@ _JOINT_PICK_THRESHOLD = 20.0
 # Accent color for selected joint highlight (matches app theme — amber)
 _ACCENT_COLOR = np.array([0.792, 0.584, 0.180], dtype=np.float32)  # #ca952e
 
+# Brighter accent for the selected joint itself (within the chain)
+_SELECTED_ACCENT_COLOR = np.array([1.0, 0.78, 0.25], dtype=np.float32)  # brighter amber
+
+# Chain bone color (amber, same as accent — distinguishes chain from non-chain)
+_CHAIN_BONE_COLOR = np.array([0.792, 0.584, 0.180], dtype=np.float32)
+
+# Chain joint color (slightly dimmer than selected, brighter than default)
+_CHAIN_JOINT_COLOR = np.array([0.85, 0.65, 0.22], dtype=np.float32)
+
 # Bone color (light gray)
 _BONE_COLOR = np.array([0.7, 0.7, 0.7], dtype=np.float32)
 
@@ -231,7 +240,9 @@ _HAND_JOINT_COLOR = np.array([0.6, 0.6, 0.6], dtype=np.float32)
 # GL point/line sizes for skeleton rendering
 _JOINT_POINT_SIZE = 6.0
 _SELECTED_JOINT_POINT_SIZE = 12.0
+_CHAIN_JOINT_POINT_SIZE = 8.0
 _BONE_LINE_WIDTH = 2.0
+_CHAIN_BONE_LINE_WIDTH = 3.0
 
 # Joint label rendering constants
 _LABEL_FONT_SIZE = 9
@@ -450,6 +461,116 @@ def find_nearest_joint(
     if dists[min_idx] <= threshold:
         return min_idx
     return None
+
+
+# ---------------------------------------------------------------------------
+# Joint chain / region helpers (pure functions — no Qt/GL dependency)
+# ---------------------------------------------------------------------------
+
+# Left↔Right joint index mapping for body joints (0-21).
+# Hand joints (22-36 ↔ 37-51) are offset by 15.
+_LR_PAIRS = {
+    1: 2, 2: 1,       # L_Hip ↔ R_Hip
+    4: 5, 5: 4,       # L_Knee ↔ R_Knee
+    7: 8, 8: 7,       # L_Ankle ↔ R_Ankle
+    10: 11, 11: 10,   # L_Foot ↔ R_Foot
+    13: 14, 14: 13,   # L_Collar ↔ R_Collar
+    16: 17, 17: 16,   # L_Shoulder ↔ R_Shoulder
+    18: 19, 19: 18,   # L_Elbow ↔ R_Elbow
+    20: 21, 21: 20,   # L_Wrist ↔ R_Wrist
+}
+
+# Body regions — groups of joint indices sharing a kinematic purpose.
+_JOINT_REGIONS = {
+    "spine": [0, 3, 6, 9, 12, 15],
+    "left_leg": [1, 4, 7, 10],
+    "right_leg": [2, 5, 8, 11],
+    "left_arm": [13, 16, 18, 20],
+    "right_arm": [14, 17, 19, 21],
+    "left_hand": list(range(22, 37)),
+    "right_hand": list(range(37, 52)),
+}
+
+# Reverse lookup: joint index → region name
+_JOINT_TO_REGION: dict[int, str] = {}
+for _region_name, _region_joints in _JOINT_REGIONS.items():
+    for _j in _region_joints:
+        _JOINT_TO_REGION[_j] = _region_name
+
+
+def get_joint_chain(joint_idx: int) -> list[int]:
+    """Walk JOINT_PARENTS from *joint_idx* to the root, returning the chain.
+
+    The returned list starts with *joint_idx* and ends with the root (Pelvis=0).
+    Returns an empty list if *joint_idx* is out of range.
+    """
+    if joint_idx < 0 or joint_idx >= len(JOINT_PARENTS):
+        return []
+    chain = [joint_idx]
+    current = joint_idx
+    while JOINT_PARENTS[current] >= 0:
+        current = JOINT_PARENTS[current]
+        chain.append(current)
+    return chain
+
+
+def get_joint_chain_bones(joint_idx: int) -> set[tuple[int, int]]:
+    """Return the set of (parent, child) bone pairs along the chain to root.
+
+    Each pair is ordered (parent, child) matching BONE_CONNECTIONS convention.
+    """
+    chain = get_joint_chain(joint_idx)
+    bones = set()
+    for i in range(len(chain) - 1):
+        child = chain[i]
+        parent = chain[i + 1]
+        # Normalize to (min, max) for easy lookup against BONE_CONNECTIONS
+        bones.add((min(parent, child), max(parent, child)))
+    return bones
+
+
+def get_joint_siblings(joint_idx: int) -> list[int]:
+    """Return joints sharing the same parent as *joint_idx* (excluding self).
+
+    Returns an empty list for the root or out-of-range indices.
+    """
+    if joint_idx < 0 or joint_idx >= len(JOINT_PARENTS):
+        return []
+    parent = JOINT_PARENTS[joint_idx]
+    if parent < 0:
+        return []
+    siblings = []
+    for j, p in enumerate(JOINT_PARENTS):
+        if p == parent and j != joint_idx:
+            siblings.append(j)
+    return siblings
+
+
+def get_opposite_joint(joint_idx: int) -> int | None:
+    """Return the left↔right mirror of *joint_idx*, or None for center joints.
+
+    Body joints use _LR_PAIRS; hand joints map 22+i ↔ 37+i.
+    """
+    if joint_idx in _LR_PAIRS:
+        return _LR_PAIRS[joint_idx]
+    # Hand joints: left 22-36 ↔ right 37-51
+    if 22 <= joint_idx <= 36:
+        return joint_idx + 15
+    if 37 <= joint_idx <= 51:
+        return joint_idx - 15
+    return None
+
+
+def get_joint_region(joint_idx: int) -> list[int]:
+    """Return all joints in the same body region as *joint_idx*.
+
+    Regions: spine, left_leg, right_leg, left_arm, right_arm, left_hand, right_hand.
+    Returns an empty list if the joint is not in any defined region.
+    """
+    region = _JOINT_TO_REGION.get(joint_idx)
+    if region is None:
+        return []
+    return list(_JOINT_REGIONS[region])
 
 
 def encode_joint_id(joint_idx: int) -> tuple[int, int, int]:
@@ -1284,6 +1405,76 @@ class MeshViewport(_BaseWidget):
             return
         super().mouseDoubleClickEvent(event)
 
+    def contextMenuEvent(self, event):
+        """Right-click context menu for joint selection shortcuts.
+
+        Offers Select Chain, Select Siblings, Select Opposite, Select Region
+        based on the joint nearest to the click position.
+        """
+        # Find the joint under or nearest to the right-click
+        target = self._pick_joint(event.pos().x(), event.pos().y())
+        if target is None:
+            # No joint near click — use currently selected joint
+            target = self._selected_joint
+        if target < 0 or target >= len(JOINT_NAMES):
+            super().contextMenuEvent(event)
+            return
+
+        joint_name = JOINT_NAMES[target]
+        menu = QMenu(self)
+
+        # Select Chain — highlight the chain from this joint to root
+        chain = get_joint_chain(target)
+        chain_names = " → ".join(JOINT_NAMES[j] for j in chain[:4])
+        if len(chain) > 4:
+            chain_names += " → …"
+        act_chain = menu.addAction(f"Select Chain ({chain_names})")
+
+        # Select Siblings — joints sharing same parent
+        siblings = get_joint_siblings(target)
+        act_siblings = None
+        if siblings:
+            sib_names = ", ".join(JOINT_NAMES[s] for s in siblings)
+            act_siblings = menu.addAction(f"Select Siblings ({sib_names})")
+
+        # Select Opposite — L↔R mirror
+        opposite = get_opposite_joint(target)
+        act_opposite = None
+        if opposite is not None:
+            act_opposite = menu.addAction(f"Select Opposite ({JOINT_NAMES[opposite]})")
+
+        # Select Region — all joints in same body region
+        region = get_joint_region(target)
+        act_region = None
+        if region:
+            region_name = _JOINT_TO_REGION.get(target, "")
+            act_region = menu.addAction(f"Select Region ({region_name})")
+
+        action = menu.exec_(event.globalPos())
+        if action is None:
+            return
+
+        if action == act_chain:
+            # Select the root of the chain — visually highlights the full path
+            # (The chain is highlighted via _draw_skeleton whenever the
+            # selected joint is set; selecting the tip highlights the whole chain.)
+            self._selected_joint = target
+            self.joint_clicked.emit(target)
+        elif action == act_siblings and siblings:
+            # Select the first sibling (user can right-click again to pick others)
+            self._selected_joint = siblings[0]
+            self.joint_clicked.emit(siblings[0])
+        elif action == act_opposite and opposite is not None:
+            self._selected_joint = opposite
+            self.joint_clicked.emit(opposite)
+        elif action == act_region and region:
+            # Select first joint in region (chain will highlight from there)
+            self._selected_joint = target
+            self.joint_clicked.emit(target)
+
+        if _HAS_GL:
+            self.update()
+
     # ------------------------------------------------------------------
     # Skeleton: joint computation + joint picking
     # ------------------------------------------------------------------
@@ -1779,6 +1970,10 @@ class MeshViewport(_BaseWidget):
 
         Uses legacy-ish immediate-mode via temporary VBOs for simplicity,
         reusing the mesh shader with ambient=1 so the skeleton is unlit.
+
+        When a joint is selected, the chain from that joint to root is
+        highlighted in accent amber with thicker lines; the selected joint
+        itself gets a brighter accent color and larger point size.
         """
         if not _HAS_GL or not self._gl_ready:
             return
@@ -1801,45 +1996,86 @@ class MeshViewport(_BaseWidget):
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
 
-        # --- Draw bones as GL_LINES ---
+        # Compute chain highlight set when a joint is selected
+        chain_set: set[int] = set()
+        chain_bones: set[tuple[int, int]] = set()
+        if 0 <= self._selected_joint < len(joints):
+            chain_set = set(get_joint_chain(self._selected_joint))
+            chain_bones = get_joint_chain_bones(self._selected_joint)
+
+        # --- Draw non-chain bones as GL_LINES (normal width) ---
         bone_verts = []
         bone_colors = []
+        chain_bone_verts = []
+        chain_bone_colors = []
         for a, b in BONE_CONNECTIONS:
             if a < len(joints) and b < len(joints):
-                bone_verts.append(joints[a])
-                bone_verts.append(joints[b])
-                bone_colors.append(_BONE_COLOR)
-                bone_colors.append(_BONE_COLOR)
+                key = (min(a, b), max(a, b))
+                if key in chain_bones:
+                    chain_bone_verts.append(joints[a])
+                    chain_bone_verts.append(joints[b])
+                    chain_bone_colors.append(_CHAIN_BONE_COLOR)
+                    chain_bone_colors.append(_CHAIN_BONE_COLOR)
+                else:
+                    bone_verts.append(joints[a])
+                    bone_verts.append(joints[b])
+                    bone_colors.append(_BONE_COLOR)
+                    bone_colors.append(_BONE_COLOR)
 
         if bone_verts:
             bv = np.array(bone_verts, dtype=np.float32)
             bc = np.array(bone_colors, dtype=np.float32)
-            bn = np.zeros_like(bv)  # normals not used (unlit)
-
+            bn = np.zeros_like(bv)
             self._draw_primitive(gl.GL_LINES, bv, bn, bc, _BONE_LINE_WIDTH)
+
+        # --- Draw chain bones thicker in accent amber ---
+        if chain_bone_verts:
+            cbv = np.array(chain_bone_verts, dtype=np.float32)
+            cbc = np.array(chain_bone_colors, dtype=np.float32)
+            cbn = np.zeros_like(cbv)
+            self._draw_primitive(gl.GL_LINES, cbv, cbn, cbc, _CHAIN_BONE_LINE_WIDTH)
 
         # --- Draw joints as GL_POINTS ---
         jv = joints.astype(np.float32)
         jn = np.zeros_like(jv)
         jc = np.zeros((len(joints), 3), dtype=np.float32)
+        jp = np.full(len(joints), _JOINT_POINT_SIZE, dtype=np.float32)
 
         for i in range(len(joints)):
             if i == self._selected_joint:
-                jc[i] = _ACCENT_COLOR
+                jc[i] = _SELECTED_ACCENT_COLOR
+                jp[i] = _SELECTED_JOINT_POINT_SIZE
+            elif i in chain_set:
+                jc[i] = _CHAIN_JOINT_COLOR
+                jp[i] = _CHAIN_JOINT_POINT_SIZE
             elif i < _N_BODY_JOINTS:
                 jc[i] = _BODY_JOINT_COLOR
             else:
                 jc[i] = _HAND_JOINT_COLOR
 
-        # Draw non-selected joints at normal size
-        mask = np.arange(len(joints)) != self._selected_joint
-        if np.any(mask):
+        # Draw non-selected, non-chain joints at normal size
+        normal_mask = np.array([
+            i != self._selected_joint and i not in chain_set
+            for i in range(len(joints))
+        ])
+        if np.any(normal_mask):
             self._draw_primitive(
-                gl.GL_POINTS, jv[mask], jn[mask], jc[mask],
+                gl.GL_POINTS, jv[normal_mask], jn[normal_mask], jc[normal_mask],
                 point_size=_JOINT_POINT_SIZE,
             )
 
-        # Draw selected joint larger
+        # Draw chain joints (excluding selected) at chain size
+        chain_mask = np.array([
+            i in chain_set and i != self._selected_joint
+            for i in range(len(joints))
+        ])
+        if np.any(chain_mask):
+            self._draw_primitive(
+                gl.GL_POINTS, jv[chain_mask], jn[chain_mask], jc[chain_mask],
+                point_size=_CHAIN_JOINT_POINT_SIZE,
+            )
+
+        # Draw selected joint largest
         if 0 <= self._selected_joint < len(joints):
             si = self._selected_joint
             self._draw_primitive(

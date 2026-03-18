@@ -33,6 +33,11 @@ from views.mesh_viewport import (
     find_nearest_joint,
     encode_joint_id,
     decode_joint_id,
+    get_joint_chain,
+    get_joint_chain_bones,
+    get_joint_siblings,
+    get_opposite_joint,
+    get_joint_region,
     JOINT_NAMES,
     JOINT_PARENTS,
     DEFAULT_OFFSETS,
@@ -42,12 +47,17 @@ from views.mesh_viewport import (
     _N_BODY_JOINTS,
     _JOINT_PICK_THRESHOLD,
     _ACCENT_COLOR,
+    _SELECTED_ACCENT_COLOR,
+    _CHAIN_BONE_COLOR,
+    _CHAIN_JOINT_COLOR,
     _BONE_COLOR,
     _BODY_JOINT_COLOR,
     _HAND_JOINT_COLOR,
     _JOINT_POINT_SIZE,
     _SELECTED_JOINT_POINT_SIZE,
+    _CHAIN_JOINT_POINT_SIZE,
     _BONE_LINE_WIDTH,
+    _CHAIN_BONE_LINE_WIDTH,
     _ORBIT_DEFAULT_YAW,
     _ORBIT_DEFAULT_PITCH,
     _ORBIT_DEFAULT_DISTANCE,
@@ -62,6 +72,9 @@ from views.mesh_viewport import (
     _GRID_COLOR,
     _GRID_AXIS_COLOR,
     _LABEL_MARGIN,
+    _LR_PAIRS,
+    _JOINT_REGIONS,
+    _JOINT_TO_REGION,
 )
 
 
@@ -2345,3 +2358,260 @@ class TestMeshViewportFboPicking:
         w = MeshViewport()
         assert hasattr(w, "_ensure_pick_fbo")
         assert callable(w._ensure_pick_fbo)
+
+
+# ======================================================================
+# Phase 4: Joint chain highlighting — pure function tests
+# ======================================================================
+
+
+class TestGetJointChain:
+    """get_joint_chain: walk JOINT_PARENTS from joint to root."""
+
+    def test_root_returns_self(self):
+        """Pelvis (root, idx 0) chain is just [0]."""
+        chain = get_joint_chain(0)
+        assert chain == [0]
+
+    def test_leaf_body_joint(self):
+        """L_Foot (idx 10): L_Foot → L_Ankle → L_Knee → L_Hip → Pelvis."""
+        chain = get_joint_chain(10)
+        assert chain == [10, 7, 4, 1, 0]
+
+    def test_head_chain(self):
+        """Head (idx 15): Head → Neck → Spine3 → Spine2 → Spine1 → Pelvis."""
+        chain = get_joint_chain(15)
+        assert chain == [15, 12, 9, 6, 3, 0]
+
+    def test_wrist_chain(self):
+        """L_Wrist (idx 20): L_Wrist → L_Elbow → L_Shoulder → L_Collar → Spine3 → ..."""
+        chain = get_joint_chain(20)
+        assert chain[0] == 20
+        assert chain[-1] == 0  # always ends at root
+        assert 18 in chain  # L_Elbow
+        assert 16 in chain  # L_Shoulder
+        assert 13 in chain  # L_Collar
+
+    def test_hand_joint_chain(self):
+        """L_Index3 (idx 24): L_Index3 → L_Index2 → L_Index1 → L_Wrist → ..."""
+        chain = get_joint_chain(24)
+        assert chain[0] == 24
+        assert chain[1] == 23  # L_Index2
+        assert chain[2] == 22  # L_Index1
+        assert chain[3] == 20  # L_Wrist
+        assert chain[-1] == 0
+
+    def test_right_hand_joint(self):
+        """R_Thumb3 (idx 51): chain ends at root."""
+        chain = get_joint_chain(51)
+        assert chain[0] == 51
+        assert chain[-1] == 0
+        assert 21 in chain  # R_Wrist
+
+    def test_out_of_range_negative(self):
+        assert get_joint_chain(-1) == []
+
+    def test_out_of_range_too_large(self):
+        assert get_joint_chain(999) == []
+
+    def test_chain_always_ends_at_root(self):
+        """Every valid joint's chain ends at Pelvis (0)."""
+        for i in range(len(JOINT_PARENTS)):
+            chain = get_joint_chain(i)
+            assert chain[-1] == 0, f"Joint {i} ({JOINT_NAMES[i]}) chain doesn't end at root"
+
+    def test_chain_is_monotonically_connected(self):
+        """Each successive joint in the chain is the parent of the previous."""
+        for i in range(len(JOINT_PARENTS)):
+            chain = get_joint_chain(i)
+            for k in range(len(chain) - 1):
+                assert JOINT_PARENTS[chain[k]] == chain[k + 1]
+
+
+class TestGetJointChainBones:
+    """get_joint_chain_bones: set of (parent, child) bone tuples along chain."""
+
+    def test_root_no_bones(self):
+        """Root has no parent → no bones in chain."""
+        bones = get_joint_chain_bones(0)
+        assert bones == set()
+
+    def test_l_knee_bones(self):
+        """L_Knee (4): bones are (1,4) and (0,1)."""
+        bones = get_joint_chain_bones(4)
+        assert (1, 4) in bones
+        assert (0, 1) in bones
+        assert len(bones) == 2
+
+    def test_head_bones(self):
+        """Head (15) chain has 5 bones."""
+        bones = get_joint_chain_bones(15)
+        assert len(bones) == 5
+        assert (12, 15) in bones  # Neck → Head
+        assert (9, 12) in bones   # Spine3 → Neck
+        assert (0, 3) in bones    # Pelvis → Spine1
+
+    def test_normalized_ordering(self):
+        """All bone tuples should be (min, max) for consistent lookup."""
+        for i in range(len(JOINT_PARENTS)):
+            bones = get_joint_chain_bones(i)
+            for a, b in bones:
+                assert a < b, f"Bone ({a}, {b}) not normalized for joint {i}"
+
+
+class TestGetJointSiblings:
+    """get_joint_siblings: joints sharing same parent."""
+
+    def test_root_no_siblings(self):
+        """Root (Pelvis) has no parent → no siblings."""
+        assert get_joint_siblings(0) == []
+
+    def test_hip_siblings(self):
+        """L_Hip (1) parent=Pelvis: siblings are R_Hip(2) and Spine1(3)."""
+        siblings = get_joint_siblings(1)
+        assert 2 in siblings  # R_Hip
+        assert 3 in siblings  # Spine1
+        assert 1 not in siblings  # excludes self
+
+    def test_spine2_no_siblings(self):
+        """Spine2 (6) parent=Spine1(3): only child of Spine1 → no siblings."""
+        siblings = get_joint_siblings(6)
+        assert siblings == []
+
+    def test_head_no_siblings(self):
+        """Head (15) parent=Neck(12): check siblings."""
+        siblings = get_joint_siblings(15)
+        # Neck's children include Head, L_Collar, R_Collar
+        # Wait — let me check: JOINT_PARENTS[13]=9, JOINT_PARENTS[14]=9
+        # JOINT_PARENTS[15]=12 (Neck). Only Head has parent Neck.
+        # So siblings should be empty.
+        # Actually let me check: Neck(12) parent is Spine3(9),
+        # L_Collar(13) parent is Spine3(9), R_Collar(14) parent is Spine3(9).
+        # Head(15) parent is Neck(12). So Head has parent Neck, which
+        # has no other children → no siblings.
+        assert siblings == []
+
+    def test_out_of_range(self):
+        assert get_joint_siblings(-1) == []
+        assert get_joint_siblings(999) == []
+
+    def test_finger_siblings(self):
+        """L_Index1 (22) parent=L_Wrist(20): siblings are all finger bases."""
+        siblings = get_joint_siblings(22)
+        # Other finger bases from left hand with parent=20:
+        # L_Middle1(25), L_Pinky1(28), L_Ring1(31), L_Thumb1(34)
+        assert 25 in siblings  # L_Middle1
+        assert 28 in siblings  # L_Pinky1
+        assert 31 in siblings  # L_Ring1
+        assert 34 in siblings  # L_Thumb1
+        assert 22 not in siblings  # excludes self
+
+
+class TestGetOppositeJoint:
+    """get_opposite_joint: L↔R mirror mapping."""
+
+    def test_center_joints_no_opposite(self):
+        """Pelvis, Spine1, Spine2, Spine3, Neck, Head have no opposite."""
+        for idx in [0, 3, 6, 9, 12, 15]:
+            assert get_opposite_joint(idx) is None
+
+    def test_body_lr_pairs(self):
+        """All body L↔R pairs are symmetric."""
+        for left, right in [(1, 2), (4, 5), (7, 8), (10, 11),
+                            (13, 14), (16, 17), (18, 19), (20, 21)]:
+            assert get_opposite_joint(left) == right
+            assert get_opposite_joint(right) == left
+
+    def test_hand_joints(self):
+        """Left hand joints 22-36 ↔ right hand joints 37-51."""
+        for i in range(15):
+            assert get_opposite_joint(22 + i) == 37 + i
+            assert get_opposite_joint(37 + i) == 22 + i
+
+    def test_symmetry(self):
+        """Applying opposite twice returns to original."""
+        for i in range(len(JOINT_NAMES)):
+            opp = get_opposite_joint(i)
+            if opp is not None:
+                assert get_opposite_joint(opp) == i
+
+
+class TestGetJointRegion:
+    """get_joint_region: all joints in same body region."""
+
+    def test_spine_region(self):
+        region = get_joint_region(0)  # Pelvis
+        assert region == [0, 3, 6, 9, 12, 15]
+
+    def test_left_leg_region(self):
+        region = get_joint_region(4)  # L_Knee
+        assert region == [1, 4, 7, 10]
+
+    def test_right_arm_region(self):
+        region = get_joint_region(17)  # R_Shoulder
+        assert region == [14, 17, 19, 21]
+
+    def test_left_hand_region(self):
+        region = get_joint_region(22)  # L_Index1
+        assert len(region) == 15
+        assert all(22 <= j <= 36 for j in region)
+
+    def test_right_hand_region(self):
+        region = get_joint_region(37)  # R_Index1
+        assert len(region) == 15
+        assert all(37 <= j <= 51 for j in region)
+
+    def test_region_contains_self(self):
+        """The queried joint should always be in its own region."""
+        for i in range(len(JOINT_NAMES)):
+            region = get_joint_region(i)
+            if region:
+                assert i in region
+
+    def test_all_joints_have_region(self):
+        """Every joint 0-51 should belong to a region."""
+        for i in range(52):
+            region = get_joint_region(i)
+            assert len(region) > 0, f"Joint {i} ({JOINT_NAMES[i]}) has no region"
+
+
+class TestJointChainConstants:
+    """Verify new chain highlighting constants."""
+
+    def test_selected_accent_brighter_than_accent(self):
+        """Selected accent should be brighter (higher luminance) than chain accent."""
+        assert np.sum(_SELECTED_ACCENT_COLOR) > np.sum(_ACCENT_COLOR)
+
+    def test_chain_bone_color_matches_accent(self):
+        np.testing.assert_array_equal(_CHAIN_BONE_COLOR, _ACCENT_COLOR)
+
+    def test_chain_joint_size_between_normal_and_selected(self):
+        assert _JOINT_POINT_SIZE < _CHAIN_JOINT_POINT_SIZE < _SELECTED_JOINT_POINT_SIZE
+
+    def test_chain_bone_line_width_thicker_than_normal(self):
+        assert _CHAIN_BONE_LINE_WIDTH > _BONE_LINE_WIDTH
+
+    def test_lr_pairs_symmetric(self):
+        """Every entry in _LR_PAIRS has its inverse."""
+        for a, b in _LR_PAIRS.items():
+            assert _LR_PAIRS[b] == a
+
+    def test_all_joints_in_region_map(self):
+        """_JOINT_TO_REGION covers all 52 joints."""
+        for i in range(52):
+            assert i in _JOINT_TO_REGION, f"Joint {i} not in _JOINT_TO_REGION"
+
+    def test_region_names(self):
+        """All expected region names exist."""
+        expected = {"spine", "left_leg", "right_leg", "left_arm", "right_arm",
+                    "left_hand", "right_hand"}
+        assert set(_JOINT_REGIONS.keys()) == expected
+
+
+class TestContextMenuExists:
+    """MeshViewport should have a contextMenuEvent for joint selection."""
+
+    def test_has_context_menu(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "contextMenuEvent")
+        assert callable(w.contextMenuEvent)
