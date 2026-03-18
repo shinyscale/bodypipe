@@ -19,11 +19,27 @@ from models.session import Session
 @pytest.fixture
 def app_window(qapp):
     """Create an AppWindow instance for testing."""
+    # Clear persisted settings before construction so each test
+    # starts with clean defaults (prevents test ordering pollution).
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("GVHMR", "bodypipe")
+    settings.remove("recent_sessions")
+    settings.remove("pipeline_config/single")
+    settings.remove("pipeline_config/perf")
+    settings.remove("pipeline_config/multi")
+    settings.sync()
+
     window = AppWindow()
-    # Clear any persisted recent sessions from prior test runs
-    window._settings.remove("recent_sessions")
-    window._update_recent_menu()
     yield window
+    # Force immediate destruction to prevent resource accumulation.
+    # deleteLater() alone doesn't reclaim resources fast enough,
+    # causing exponential slowdown after ~20 AppWindow instances.
+    import shiboken6
+
+    window.close()
+    if shiboken6.isValid(window):
+        shiboken6.delete(window)
 
 
 @pytest.fixture
@@ -721,3 +737,13 @@ class TestPipelineConfigPersistence:
         w2._settings.remove("pipeline_config/single")
         w2._settings.remove("pipeline_config/perf")
         w2._settings.remove("pipeline_config/multi")
+
+        # Force immediate destruction to avoid resource accumulation
+        import shiboken6
+
+        w1.close()
+        if shiboken6.isValid(w1):
+            shiboken6.delete(w1)
+        w2.close()
+        if shiboken6.isValid(w2):
+            shiboken6.delete(w2)
