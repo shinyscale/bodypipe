@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QVBoxLayout,
     QFileDialog,
+    QMessageBox,
+    QMenu,
 )
 from PySide6.QtCore import Signal, QSettings, Qt, QByteArray
 from PySide6.QtGui import QAction, QPalette, QColor
@@ -182,9 +184,12 @@ class AppWindow(QMainWindow):
     session_saved = Signal(Path)
     tab_changed = Signal(int)
 
+    MAX_RECENT = 5
+
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
         self._session = Session()
+        self._session_path: Path | None = None
         self._settings = QSettings("GVHMR", "bodypipe")
         self._gvhmr_root = gvhmr_root or Path(__file__).resolve().parent.parent / "GVHMR"
 
@@ -196,6 +201,7 @@ class AppWindow(QMainWindow):
         self._setup_ui()
         self._setup_menu()
         self._setup_status_bar()
+        self._setup_status_bar_toggle()
         self._setup_log_panel()
         self._restore_geometry()
         self._connect_tab_signals()
@@ -234,11 +240,19 @@ class AppWindow(QMainWindow):
 
         open_session_action = QAction("Open &Session...", self)
         open_session_action.setShortcut("Ctrl+Shift+O")
+        open_session_action.triggered.connect(self._on_open_session)
         file_menu.addAction(open_session_action)
 
         save_session_action = QAction("&Save Session", self)
         save_session_action.setShortcut("Ctrl+S")
+        save_session_action.triggered.connect(self._on_save_session)
         file_menu.addAction(save_session_action)
+
+        file_menu.addSeparator()
+
+        self._recent_menu = QMenu("Recent Sessions", self)
+        file_menu.addMenu(self._recent_menu)
+        self._update_recent_menu()
 
         file_menu.addSeparator()
 
@@ -261,6 +275,11 @@ class AppWindow(QMainWindow):
         # View menu
         view_menu = menubar.addMenu("&View")
 
+        self._toggle_statusbar_action = QAction("Toggle &Status Bar", self)
+        self._toggle_statusbar_action.setCheckable(True)
+        self._toggle_statusbar_action.setChecked(True)
+        view_menu.addAction(self._toggle_statusbar_action)
+
         self._toggle_log_action = QAction("Toggle &Log Panel", self)
         self._toggle_log_action.setShortcut("Ctrl+L")
         self._toggle_log_action.setCheckable(True)
@@ -271,6 +290,7 @@ class AppWindow(QMainWindow):
         help_menu = menubar.addMenu("&Help")
 
         about_action = QAction("&About", self)
+        about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
     def _setup_status_bar(self):
@@ -285,6 +305,10 @@ class AppWindow(QMainWindow):
         self._status_bar.addWidget(self._status_label, 1)
         self._status_bar.addPermanentWidget(self._frame_label)
         self._status_bar.addPermanentWidget(self._fps_label)
+
+    def _setup_status_bar_toggle(self):
+        """Wire status bar toggle after both status bar and menu are created."""
+        self._toggle_statusbar_action.toggled.connect(self._status_bar.setVisible)
 
     def _setup_log_panel(self):
         """Create collapsible log dock widget."""
@@ -353,3 +377,126 @@ class AppWindow(QMainWindow):
 
     def set_fps_info(self, fps: float):
         self._fps_label.setText(f"{fps:.1f} FPS")
+
+    # --- Session I/O ---
+
+    def _on_save_session(self):
+        """Save session to JSON — auto-path if output_dir exists, else prompt."""
+        if self._session_path:
+            save_path = self._session_path
+        elif self._session.output_dir:
+            save_path = self._session.output_dir / "bodypipe_session.json"
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Session", "", "Session Files (*.json);;All Files (*)"
+            )
+            if not path:
+                return
+            save_path = Path(path)
+
+        try:
+            self._session.save(save_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Failed to save session:\n{e}")
+            return
+
+        self._session_path = save_path
+        self._add_recent(save_path)
+        self.set_status(f"Session saved to {save_path.name}")
+        self.session_saved.emit(save_path)
+
+    def _on_open_session(self):
+        """Open session from JSON file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Session", "", "Session Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        self._load_session(Path(path))
+
+    def _load_session(self, session_path: Path):
+        """Load session from path, update shared session, refresh UI."""
+        try:
+            loaded = Session.load(session_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Load Error", f"Failed to load session:\n{e}")
+            return
+
+        # Copy all fields to shared session object (tabs hold a reference)
+        for attr in vars(loaded):
+            setattr(self._session, attr, getattr(loaded, attr))
+
+        self._session_path = session_path
+        self._add_recent(session_path)
+
+        # If video exists, load into current tab to set up the UI
+        if self._session.video_path and self._session.video_path.is_file():
+            current = self._tabs.currentWidget()
+            if hasattr(current, "_load_video"):
+                current._load_video(str(self._session.video_path))
+
+        self.set_status(f"Session loaded from {session_path.name}")
+        self.session_loaded.emit(self._session)
+
+    # --- Recent Sessions ---
+
+    def _get_recent(self) -> list[str]:
+        """Get recent session paths from QSettings."""
+        val = self._settings.value("recent_sessions", [])
+        if isinstance(val, str):
+            return [val] if val else []
+        return list(val) if val else []
+
+    def _add_recent(self, path: Path):
+        """Add path to recent sessions list."""
+        recent = self._get_recent()
+        path_str = str(path)
+        if path_str in recent:
+            recent.remove(path_str)
+        recent.insert(0, path_str)
+        recent = recent[: self.MAX_RECENT]
+        self._settings.setValue("recent_sessions", recent)
+        self._update_recent_menu()
+
+    def _update_recent_menu(self):
+        """Rebuild the Recent Sessions submenu from QSettings."""
+        self._recent_menu.clear()
+        recent = self._get_recent()
+        if not recent:
+            action = self._recent_menu.addAction("(No recent sessions)")
+            action.setEnabled(False)
+            return
+        for path_str in recent:
+            action = self._recent_menu.addAction(Path(path_str).name)
+            action.setData(path_str)
+            action.triggered.connect(
+                lambda checked, p=path_str: self._open_recent(p)
+            )
+
+    def _open_recent(self, path_str: str):
+        """Open a session from the recent sessions list."""
+        path = Path(path_str)
+        if not path.is_file():
+            QMessageBox.warning(
+                self, "File Not Found", f"Session file not found:\n{path}"
+            )
+            recent = self._get_recent()
+            if path_str in recent:
+                recent.remove(path_str)
+                self._settings.setValue("recent_sessions", recent)
+                self._update_recent_menu()
+            return
+        self._load_session(path)
+
+    # --- About ---
+
+    def _on_about(self):
+        """Show About dialog."""
+        QMessageBox.about(
+            self,
+            "About bodypipe",
+            "<h3>bodypipe — Motion Capture Studio</h3>"
+            "<p>PySide6 interface for GVHMR body, hand, and face capture.</p>"
+            "<p>Multi-person tracking with identity verification "
+            "and pose correction.</p>",
+        )
