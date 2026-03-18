@@ -28,8 +28,24 @@ from views.mesh_viewport import (
     estimate_K,
     compute_orbit_view,
     perspective_fov,
+    forward_kinematics,
+    project_joints_to_screen,
+    find_nearest_joint,
+    JOINT_NAMES,
+    JOINT_PARENTS,
+    DEFAULT_OFFSETS,
+    BONE_CONNECTIONS,
     _CV_TO_GL,
     _HAS_GL,
+    _N_BODY_JOINTS,
+    _JOINT_PICK_THRESHOLD,
+    _ACCENT_COLOR,
+    _BONE_COLOR,
+    _BODY_JOINT_COLOR,
+    _HAND_JOINT_COLOR,
+    _JOINT_POINT_SIZE,
+    _SELECTED_JOINT_POINT_SIZE,
+    _BONE_LINE_WIDTH,
     _ORBIT_DEFAULT_YAW,
     _ORBIT_DEFAULT_PITCH,
     _ORBIT_DEFAULT_DISTANCE,
@@ -1086,3 +1102,425 @@ class TestOrbitMouseInteraction:
 
         assert len(received) >= 1
         assert received[-1]["mode"] == "orbit"
+
+
+# ======================================================================
+# Skeleton data tests (Phase 3.3)
+# ======================================================================
+
+
+class TestSkeletonData:
+    """JOINT_NAMES, JOINT_PARENTS, DEFAULT_OFFSETS, BONE_CONNECTIONS."""
+
+    def test_joint_names_length(self):
+        assert len(JOINT_NAMES) == 52
+
+    def test_joint_parents_length(self):
+        assert len(JOINT_PARENTS) == 52
+
+    def test_root_has_no_parent(self):
+        assert JOINT_PARENTS[0] == -1
+
+    def test_all_parents_valid(self):
+        for i, p in enumerate(JOINT_PARENTS):
+            if i == 0:
+                assert p == -1
+            else:
+                assert 0 <= p < i, f"joint {i} has invalid parent {p}"
+
+    def test_default_offsets_has_all_joints(self):
+        for name in JOINT_NAMES:
+            assert name in DEFAULT_OFFSETS, f"missing offset for {name}"
+
+    def test_default_offsets_are_3d(self):
+        for name, off in DEFAULT_OFFSETS.items():
+            assert len(off) == 3, f"offset for {name} is not 3D"
+
+    def test_bone_connections_body(self):
+        """Body bones (first 20) should all reference joints 0-21."""
+        body_bones = [
+            (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
+            (0, 1), (1, 4), (4, 7), (7, 10),
+            (0, 2), (2, 5), (5, 8), (8, 11),
+            (9, 13), (13, 16), (16, 18), (18, 20),
+            (9, 14), (14, 17), (17, 19), (19, 21),
+        ]
+        for bone in body_bones:
+            assert bone in BONE_CONNECTIONS
+
+    def test_bone_connections_has_hand_bones(self):
+        """Should have 30 hand bone connections (15 per hand, 3 per finger × 5 fingers)."""
+        hand_bones = [b for b in BONE_CONNECTIONS if b[0] >= 20 or b[1] >= 22]
+        assert len(hand_bones) == 30
+
+    def test_bone_connections_all_valid(self):
+        """All bone connections should reference valid joint indices."""
+        for a, b in BONE_CONNECTIONS:
+            assert 0 <= a < 52
+            assert 0 <= b < 52
+
+    def test_n_body_joints(self):
+        assert _N_BODY_JOINTS == 22
+
+    def test_joint_names_start_with_pelvis(self):
+        assert JOINT_NAMES[0] == "Pelvis"
+
+    def test_joint_names_body_count(self):
+        """First 22 joints are body joints."""
+        body = JOINT_NAMES[:22]
+        assert body[0] == "Pelvis"
+        assert body[15] == "Head"
+        assert body[20] == "L_Wrist"
+        assert body[21] == "R_Wrist"
+
+
+# ======================================================================
+# forward_kinematics tests (Phase 3.3)
+# ======================================================================
+
+
+class TestForwardKinematics:
+    """forward_kinematics: params dict → (52, 3) joint positions."""
+
+    def _make_params(self, n_frames=10):
+        """Create minimal params dict with zero rotations."""
+        return {
+            "global_orient": np.zeros((n_frames, 3)),
+            "body_pose": np.zeros((n_frames, 21, 3)),
+            "transl": np.zeros((n_frames, 3)),
+        }
+
+    def test_output_shape(self):
+        params = self._make_params()
+        joints = forward_kinematics(params, 0)
+        assert joints.shape == (52, 3)
+
+    def test_root_at_origin(self):
+        params = self._make_params()
+        joints = forward_kinematics(params, 0)
+        np.testing.assert_allclose(joints[0], [0, 0, 0], atol=1e-6)
+
+    def test_root_with_translation(self):
+        params = self._make_params()
+        params["transl"][3] = [1.0, 2.0, 3.0]
+        joints = forward_kinematics(params, 3)
+        np.testing.assert_allclose(joints[0], [1.0, 2.0, 3.0], atol=1e-6)
+
+    def test_children_offset_from_root(self):
+        """With zero rotations, child joints should be offset from root by DEFAULT_OFFSETS."""
+        params = self._make_params()
+        joints = forward_kinematics(params, 0)
+        # Spine1 (idx 3) is child of Pelvis (idx 0)
+        expected_spine1 = np.array(DEFAULT_OFFSETS["Spine1"])
+        np.testing.assert_allclose(joints[3], expected_spine1, atol=1e-5)
+
+    def test_different_frames_give_different_results(self):
+        params = self._make_params()
+        params["transl"][0] = [0, 0, 0]
+        params["transl"][5] = [5, 5, 5]
+        j0 = forward_kinematics(params, 0)
+        j5 = forward_kinematics(params, 5)
+        assert not np.allclose(j0, j5)
+
+    def test_missing_params_returns_zeros(self):
+        """Missing global_orient/body_pose returns zero positions."""
+        joints = forward_kinematics({}, 0)
+        np.testing.assert_allclose(joints, 0.0)
+
+    def test_flat_body_pose(self):
+        """Should handle flat (N, 63) body_pose."""
+        params = self._make_params()
+        params["body_pose"] = np.zeros((10, 63))
+        joints = forward_kinematics(params, 0)
+        assert joints.shape == (52, 3)
+
+    def test_with_hand_pose(self):
+        """Hand joints should be offset from wrist when hand_pose is provided."""
+        params = self._make_params()
+        params["left_hand_pose"] = np.zeros((10, 15, 3))
+        params["right_hand_pose"] = np.zeros((10, 15, 3))
+        joints = forward_kinematics(params, 0)
+        # L_Index1 (22) should be offset from L_Wrist (20)
+        wrist_pos = joints[20]
+        index1_pos = joints[22]
+        assert not np.allclose(wrist_pos, index1_pos)
+
+    def test_rotation_affects_children(self):
+        """Rotating the root should move all children."""
+        params = self._make_params()
+        j_rest = forward_kinematics(params, 0).copy()
+        params["global_orient"][0] = [0, np.pi / 2, 0]  # 90° yaw
+        j_rotated = forward_kinematics(params, 0)
+        # Root stays at origin
+        np.testing.assert_allclose(j_rest[0], j_rotated[0], atol=1e-6)
+        # Other joints should move
+        assert not np.allclose(j_rest[3], j_rotated[3], atol=1e-3)
+
+
+# ======================================================================
+# project_joints_to_screen tests (Phase 3.3)
+# ======================================================================
+
+
+class TestProjectJointsToScreen:
+    """project_joints_to_screen: 3D joints → 2D screen pixels."""
+
+    def test_output_shape(self):
+        joints = np.zeros((52, 3))
+        mvp = np.eye(4)
+        screen = project_joints_to_screen(joints, mvp, 640, 480)
+        assert screen.shape == (52, 2)
+
+    def test_origin_projects_to_center(self):
+        """A point at origin with identity MVP should project to screen center."""
+        joints = np.array([[0, 0, 0]], dtype=np.float64)
+        mvp = np.eye(4)
+        screen = project_joints_to_screen(joints, mvp, 640, 480)
+        np.testing.assert_allclose(screen[0, 0], 320, atol=1)
+        np.testing.assert_allclose(screen[0, 1], 240, atol=1)
+
+    def test_right_is_positive_x(self):
+        """Points to the right in NDC should have larger screen x."""
+        joints = np.array([[0, 0, 0], [0.5, 0, 0]], dtype=np.float64)
+        mvp = np.eye(4)
+        screen = project_joints_to_screen(joints, mvp, 640, 480)
+        assert screen[1, 0] > screen[0, 0]
+
+    def test_up_is_negative_y(self):
+        """Points up in NDC (+Y) should have smaller screen y (screen Y is flipped)."""
+        joints = np.array([[0, 0, 0], [0, 0.5, 0]], dtype=np.float64)
+        mvp = np.eye(4)
+        screen = project_joints_to_screen(joints, mvp, 640, 480)
+        assert screen[1, 1] < screen[0, 1]
+
+    def test_perspective_division(self):
+        """Points further away should project closer to center."""
+        mvp = perspective_fov(45.0, 640 / 480)
+        # Two points at same X but different Z
+        j = np.array([[0.5, 0, -2], [0.5, 0, -10]], dtype=np.float64)
+        screen = project_joints_to_screen(j, mvp, 640, 480)
+        # Closer point should be further from center than far point
+        center_x = 320
+        assert abs(screen[0, 0] - center_x) > abs(screen[1, 0] - center_x)
+
+
+# ======================================================================
+# find_nearest_joint tests (Phase 3.3)
+# ======================================================================
+
+
+class TestFindNearestJoint:
+    """find_nearest_joint: click position → joint index or None."""
+
+    def _make_joints_2d(self):
+        """Create 52 joints spread across screen."""
+        joints = np.zeros((52, 2))
+        for i in range(52):
+            joints[i] = [50 + i * 10, 100 + (i % 5) * 20]
+        return joints
+
+    def test_exact_hit(self):
+        joints = self._make_joints_2d()
+        result = find_nearest_joint(50.0, 100.0, joints)
+        assert result == 0
+
+    def test_within_threshold(self):
+        joints = self._make_joints_2d()
+        # Click 15px away from joint 5 (x=100, y=100)
+        result = find_nearest_joint(115.0, 100.0, joints)
+        assert result == 5  # joint at (100, 100), 15px away
+
+    def test_beyond_threshold(self):
+        """Click far from any joint should return None."""
+        joints = self._make_joints_2d()
+        result = find_nearest_joint(1000.0, 1000.0, joints)
+        assert result is None
+
+    def test_only_body_joints(self):
+        """Default max_joint=22 means hand joints are ignored."""
+        joints = np.zeros((52, 2))
+        joints[30] = [100, 100]  # A hand joint right at click position
+        result = find_nearest_joint(100.0, 100.0, joints, max_joint=22)
+        # All body joints are at (0,0), ~141px from (100,100) → beyond threshold
+        assert result is None
+
+    def test_custom_threshold(self):
+        joints = np.zeros((52, 2))
+        joints[5] = [100, 100]
+        # 50px away
+        result = find_nearest_joint(150.0, 100.0, joints, threshold=60.0)
+        assert result == 5
+        result = find_nearest_joint(150.0, 100.0, joints, threshold=10.0)
+        assert result is None
+
+    def test_custom_max_joint(self):
+        """With max_joint=52, hand joints are also pickable."""
+        joints = np.zeros((52, 2))
+        joints[40] = [100, 100]  # R_Middle1
+        result = find_nearest_joint(100.0, 100.0, joints, max_joint=52)
+        assert result == 40
+
+    def test_returns_nearest(self):
+        """When multiple joints are within threshold, returns the nearest."""
+        joints = np.zeros((52, 2))
+        joints[0] = [100, 100]
+        joints[1] = [108, 100]  # 8px from click
+        joints[2] = [95, 100]   # 5px from click
+        result = find_nearest_joint(100.0, 100.0, joints)
+        assert result == 0  # exactly at click
+
+
+# ======================================================================
+# Widget skeleton tests (Phase 3.3)
+# ======================================================================
+
+
+class TestMeshViewportSkeleton:
+    """MeshViewport skeleton overlay state and joint picking."""
+
+    def test_initial_joint_state(self, qapp):
+        w = MeshViewport()
+        assert w._selected_joint == -1
+        assert w._joint_positions is None
+        assert w._show_skeleton is True
+
+    def test_highlight_joint(self, qapp):
+        w = MeshViewport()
+        w.highlight_joint(5)
+        assert w._selected_joint == 5
+
+    def test_highlight_joint_same_noop(self, qapp):
+        w = MeshViewport()
+        w.highlight_joint(5)
+        w.highlight_joint(5)  # no change
+        assert w._selected_joint == 5
+
+    def test_highlight_joint_change(self, qapp):
+        w = MeshViewport()
+        w.highlight_joint(5)
+        w.highlight_joint(10)
+        assert w._selected_joint == 10
+
+    def test_set_show_skeleton(self, qapp):
+        w = MeshViewport()
+        w.set_show_skeleton(False)
+        assert w._show_skeleton is False
+        w.set_show_skeleton(True)
+        assert w._show_skeleton is True
+
+    def test_joint_clicked_signal_exists(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "joint_clicked")
+
+    def test_joint_clicked_emitted_on_pick(self, qapp, session):
+        """joint_clicked should be emitted when a joint is picked."""
+        w = MeshViewport()
+        # Set up fake joint positions
+        w._joint_positions = np.zeros((52, 3))
+        w._joint_positions[5] = [0, 0, -2]  # Some position
+
+        # Mock _pick_joint to return a hit
+        w._pick_joint = MagicMock(return_value=5)
+
+        received = []
+        w.joint_clicked.connect(lambda j: received.append(j))
+
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(100, 100), QPointF(100, 100),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        w.mousePressEvent(press)
+
+        assert len(received) == 1
+        assert received[0] == 5
+        assert w._selected_joint == 5
+
+    def test_no_emit_on_miss(self, qapp):
+        """No signal when click doesn't hit any joint."""
+        w = MeshViewport()
+        w._pick_joint = MagicMock(return_value=None)
+
+        received = []
+        w.joint_clicked.connect(lambda j: received.append(j))
+
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(100, 100), QPointF(100, 100),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        w.mousePressEvent(press)
+
+        assert len(received) == 0
+
+    def test_pick_joint_returns_none_no_joints(self, qapp):
+        """_pick_joint returns None when no joint positions exist."""
+        w = MeshViewport()
+        assert w._pick_joint(100, 100) is None
+
+    def test_compute_joints_no_session(self, qapp):
+        w = MeshViewport()
+        assert w._compute_joints() is None
+
+    def test_compute_joints_no_track(self, qapp, session):
+        w = MeshViewport()
+        w.set_session(session)
+        w._person_id = 99
+        assert w._compute_joints() is None
+
+    def test_compute_joints_no_params(self, qapp, session):
+        """Should return None when smplx_params is None."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(person_id=0)
+        w.set_session(session)
+        w._person_id = 0
+        result = w._compute_joints()
+        assert result is None
+
+    def test_compute_joints_with_params(self, qapp, session):
+        """Should return (52,3) joint positions when params are set."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((10, 3)),
+                "body_pose": np.zeros((10, 21, 3)),
+                "transl": np.tile([0, 0, 2], (10, 1)).astype(float),
+            },
+        )
+        w.set_session(session)
+        w._person_id = 0
+        result = w._compute_joints()
+        assert result is not None
+        assert result.shape == (52, 3)
+        # Root should be at translation
+        np.testing.assert_allclose(result[0], [0, 0, 2], atol=1e-6)
+
+    def test_refresh_mesh_computes_joints(self, qapp, session):
+        """_refresh_mesh should also compute _joint_positions."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((10, 3)),
+                "body_pose": np.zeros((10, 21, 3)),
+                "transl": np.zeros((10, 3)),
+            },
+        )
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = -1  # force refresh
+        w.on_frame_changed(0)
+        # Joint positions should have been computed
+        assert w._joint_positions is not None
+        assert w._joint_positions.shape == (52, 3)

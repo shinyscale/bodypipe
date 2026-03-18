@@ -1,10 +1,13 @@
-"""SMPL-X mesh viewport — QOpenGLWidget with Phong shading.
+"""SMPL-X mesh viewport — QOpenGLWidget with Phong shading + skeleton overlay.
 
 Renders the SMPL-X body mesh for the selected person at the current frame.
 The body model is loaded once; vertices are recomputed per frame from the
 session's SMPL-X parameters (torch forward pass → numpy), uploaded to
 dynamic VBOs, and rendered with Phong shading matching shaders/mesh.vert
 and shaders/mesh.frag.
+
+Phase 3.3 adds skeleton overlay (bones as GL_LINES, joints as GL_POINTS)
+and click-to-select joint picking via screen-space distance.
 """
 
 from __future__ import annotations
@@ -93,6 +96,137 @@ def _load_shader_source(name: str, fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Skeleton data — 52-joint SMPL-X hierarchy (from smplx_to_bvh.py)
+# ---------------------------------------------------------------------------
+
+JOINT_NAMES = [
+    # Body (0-21)
+    "Pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee",
+    "Spine2", "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot",
+    "Neck", "L_Collar", "R_Collar", "Head", "L_Shoulder", "R_Shoulder",
+    "L_Elbow", "R_Elbow", "L_Wrist", "R_Wrist",
+    # Left hand (22-36)
+    "L_Index1", "L_Index2", "L_Index3",
+    "L_Middle1", "L_Middle2", "L_Middle3",
+    "L_Pinky1", "L_Pinky2", "L_Pinky3",
+    "L_Ring1", "L_Ring2", "L_Ring3",
+    "L_Thumb1", "L_Thumb2", "L_Thumb3",
+    # Right hand (37-51)
+    "R_Index1", "R_Index2", "R_Index3",
+    "R_Middle1", "R_Middle2", "R_Middle3",
+    "R_Pinky1", "R_Pinky2", "R_Pinky3",
+    "R_Ring1", "R_Ring2", "R_Ring3",
+    "R_Thumb1", "R_Thumb2", "R_Thumb3",
+]
+
+JOINT_PARENTS = [
+    -1,  # 0  Pelvis (root)
+    0, 0, 0,       # 1 L_Hip, 2 R_Hip, 3 Spine1
+    1, 2, 3,       # 4 L_Knee, 5 R_Knee, 6 Spine2
+    4, 5, 6,       # 7 L_Ankle, 8 R_Ankle, 9 Spine3
+    7, 8,          # 10 L_Foot, 11 R_Foot
+    9, 9, 9,       # 12 Neck, 13 L_Collar, 14 R_Collar
+    12,            # 15 Head
+    13, 14,        # 16 L_Shoulder, 17 R_Shoulder
+    16, 17,        # 18 L_Elbow, 19 R_Elbow
+    18, 19,        # 20 L_Wrist, 21 R_Wrist
+    # Left hand: finger_base→wrist, then chain
+    20, 22, 23,    # L_Index 1,2,3
+    20, 25, 26,    # L_Middle 1,2,3
+    20, 28, 29,    # L_Pinky 1,2,3
+    20, 31, 32,    # L_Ring 1,2,3
+    20, 34, 35,    # L_Thumb 1,2,3
+    # Right hand
+    21, 37, 38,    # R_Index 1,2,3
+    21, 40, 41,    # R_Middle 1,2,3
+    21, 43, 44,    # R_Pinky 1,2,3
+    21, 46, 47,    # R_Ring 1,2,3
+    21, 49, 50,    # R_Thumb 1,2,3
+]
+
+DEFAULT_OFFSETS = {
+    "Pelvis": [0.003, -0.351, 0.012],
+    "L_Hip": [0.058, -0.093, -0.026], "R_Hip": [-0.063, -0.104, -0.021],
+    "Spine1": [-0.003, 0.110, -0.028],
+    "L_Knee": [0.055, -0.379, -0.009], "R_Knee": [-0.044, -0.362, -0.017],
+    "Spine2": [0.009, 0.132, -0.006],
+    "L_Ankle": [-0.043, -0.403, -0.032], "R_Ankle": [0.015, -0.411, -0.020],
+    "Spine3": [-0.011, 0.052, 0.028],
+    "L_Foot": [0.047, -0.058, 0.118], "R_Foot": [-0.039, -0.058, 0.119],
+    "Neck": [-0.012, 0.165, -0.032],
+    "L_Collar": [0.046, 0.085, -0.007], "R_Collar": [-0.048, 0.084, -0.013],
+    "Head": [0.025, 0.160, 0.021],
+    "L_Shoulder": [0.119, 0.058, -0.015], "R_Shoulder": [-0.103, 0.054, -0.013],
+    "L_Elbow": [0.254, -0.072, -0.042], "R_Elbow": [-0.271, -0.036, -0.026],
+    "L_Wrist": [0.252, 0.023, -0.002], "R_Wrist": [-0.249, -0.005, -0.015],
+    # Left hand
+    "L_Index1": [0.102, -0.009, 0.019], "L_Index2": [0.032, 0.002, 0.003],
+    "L_Index3": [0.023, -0.002, 0.000],
+    "L_Middle1": [0.109, -0.006, -0.004], "L_Middle2": [0.031, 0.001, -0.004],
+    "L_Middle3": [0.024, -0.002, -0.004],
+    "L_Pinky1": [0.084, -0.015, -0.044], "L_Pinky2": [0.015, -0.001, -0.012],
+    "L_Pinky3": [0.016, -0.002, -0.011],
+    "L_Ring1": [0.097, -0.009, -0.027], "L_Ring2": [0.028, 0.001, -0.005],
+    "L_Ring3": [0.023, -0.001, -0.007],
+    "L_Thumb1": [0.041, -0.018, 0.026], "L_Thumb2": [0.017, 0.001, 0.025],
+    "L_Thumb3": [0.021, -0.005, 0.016],
+    # Right hand
+    "R_Index1": [-0.100, -0.012, 0.020], "R_Index2": [-0.032, 0.002, 0.003],
+    "R_Index3": [-0.023, -0.002, 0.000],
+    "R_Middle1": [-0.107, -0.009, -0.004], "R_Middle2": [-0.031, 0.001, -0.004],
+    "R_Middle3": [-0.024, -0.002, -0.004],
+    "R_Pinky1": [-0.082, -0.018, -0.044], "R_Pinky2": [-0.015, -0.001, -0.012],
+    "R_Pinky3": [-0.016, -0.002, -0.011],
+    "R_Ring1": [-0.095, -0.012, -0.027], "R_Ring2": [-0.028, 0.001, -0.005],
+    "R_Ring3": [-0.023, -0.001, -0.007],
+    "R_Thumb1": [-0.039, -0.021, 0.026], "R_Thumb2": [-0.017, 0.001, 0.025],
+    "R_Thumb3": [-0.021, -0.005, 0.016],
+}
+
+# Body bone connections (indices 0-21 only — hand bones omitted for clarity)
+BONE_CONNECTIONS = [
+    # Spine chain
+    (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
+    # Left leg
+    (0, 1), (1, 4), (4, 7), (7, 10),
+    # Right leg
+    (0, 2), (2, 5), (5, 8), (8, 11),
+    # Left arm
+    (9, 13), (13, 16), (16, 18), (18, 20),
+    # Right arm
+    (9, 14), (14, 17), (17, 19), (19, 21),
+]
+
+# Add hand bones
+for _wrist, _start_idx in [(20, 22), (21, 37)]:
+    for _finger_base in range(_start_idx, _start_idx + 15, 3):
+        BONE_CONNECTIONS.append((_wrist, _finger_base))
+        BONE_CONNECTIONS.append((_finger_base, _finger_base + 1))
+        BONE_CONNECTIONS.append((_finger_base + 1, _finger_base + 2))
+
+# Number of body joints (for joint picking — only pick body, not hand joints)
+_N_BODY_JOINTS = 22
+
+# Joint picking threshold in pixels
+_JOINT_PICK_THRESHOLD = 20.0
+
+# Accent color for selected joint highlight (matches app theme)
+_ACCENT_COLOR = np.array([0.914, 0.271, 0.376], dtype=np.float32)  # #e94560
+
+# Bone color (light gray)
+_BONE_COLOR = np.array([0.7, 0.7, 0.7], dtype=np.float32)
+
+# Joint colors: body joints = white, hand joints = slightly dimmer
+_BODY_JOINT_COLOR = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+_HAND_JOINT_COLOR = np.array([0.6, 0.6, 0.6], dtype=np.float32)
+
+# GL point/line sizes for skeleton rendering
+_JOINT_POINT_SIZE = 6.0
+_SELECTED_JOINT_POINT_SIZE = 12.0
+_BONE_LINE_WIDTH = 2.0
+
+
+# ---------------------------------------------------------------------------
 # Pure helper functions (testable without OpenGL)
 # ---------------------------------------------------------------------------
 
@@ -123,6 +257,152 @@ def compute_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     lengths = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
     lengths = np.maximum(lengths, 1e-8)
     return (vertex_normals / lengths).astype(np.float32)
+
+
+def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
+    """Compute 3D joint positions in camera space for one frame.
+
+    Uses DEFAULT_OFFSETS (model-derived rest-pose, not shape-dependent).
+    Mirrors ``visualize_skeleton.py:forward_kinematics``.
+
+    Parameters
+    ----------
+    params : dict with keys global_orient (N,3), body_pose (N,21*3 or N,21,3),
+             transl (N,3). Optional: left_hand_pose (N,15,3), right_hand_pose (N,15,3).
+    frame_idx : which frame to compute
+
+    Returns
+    -------
+    positions : (52, 3) float64 — joint positions in camera space
+    """
+    from scipy.spatial.transform import Rotation
+
+    n_joints = len(JOINT_NAMES)
+    positions = np.zeros((n_joints, 3))
+    accumulated_R = np.zeros((n_joints, 3, 3))
+
+    offsets = np.zeros((n_joints, 3))
+    for i, name in enumerate(JOINT_NAMES):
+        offsets[i] = DEFAULT_OFFSETS.get(name, [0, 0, 0])
+
+    def _get_array(key):
+        v = params.get(key)
+        if v is None:
+            return None
+        return np.asarray(v) if not isinstance(v, np.ndarray) else v
+
+    go = _get_array("global_orient")
+    bp = _get_array("body_pose")
+    tr = _get_array("transl")
+    lh = _get_array("left_hand_pose")
+    rh = _get_array("right_hand_pose")
+
+    if go is None or bp is None:
+        return positions
+
+    # Root
+    go_frame = go[frame_idx] if go.ndim >= 2 else go
+    accumulated_R[0] = Rotation.from_rotvec(go_frame.ravel()[:3]).as_matrix()
+    positions[0] = tr[frame_idx] if tr is not None and tr.ndim >= 2 else (tr if tr is not None else np.zeros(3))
+
+    # Reshape body_pose to (N, 21, 3) if flat
+    if bp.ndim == 2 and bp.shape[-1] != 3:
+        bp = bp.reshape(bp.shape[0], -1, 3)
+
+    for j in range(1, n_joints):
+        parent = JOINT_PARENTS[j]
+
+        if 1 <= j <= 21:
+            if bp.ndim >= 3 and frame_idx < bp.shape[0]:
+                rot_aa = bp[frame_idx, j - 1]
+            elif bp.ndim == 2:
+                rot_aa = bp[j - 1]
+            else:
+                rot_aa = np.zeros(3)
+        elif 22 <= j <= 36:
+            if lh is not None:
+                if lh.ndim == 3 and frame_idx < lh.shape[0]:
+                    rot_aa = lh[frame_idx, j - 22]
+                elif lh.ndim == 2:
+                    lh_r = lh.reshape(-1, 15, 3) if lh.shape[-1] != 3 else lh
+                    rot_aa = lh_r[frame_idx, j - 22] if lh_r.ndim == 3 else np.zeros(3)
+                else:
+                    rot_aa = np.zeros(3)
+            else:
+                rot_aa = np.zeros(3)
+        elif 37 <= j <= 51:
+            if rh is not None:
+                if rh.ndim == 3 and frame_idx < rh.shape[0]:
+                    rot_aa = rh[frame_idx, j - 37]
+                elif rh.ndim == 2:
+                    rh_r = rh.reshape(-1, 15, 3) if rh.shape[-1] != 3 else rh
+                    rot_aa = rh_r[frame_idx, j - 37] if rh_r.ndim == 3 else np.zeros(3)
+                else:
+                    rot_aa = np.zeros(3)
+            else:
+                rot_aa = np.zeros(3)
+        else:
+            rot_aa = np.zeros(3)
+
+        R_local = Rotation.from_rotvec(np.asarray(rot_aa).ravel()[:3]).as_matrix()
+        accumulated_R[j] = accumulated_R[parent] @ R_local
+        positions[j] = positions[parent] + accumulated_R[parent] @ offsets[j]
+
+    return positions
+
+
+def project_joints_to_screen(
+    joints_3d: np.ndarray,
+    mvp: np.ndarray,
+    viewport_w: int,
+    viewport_h: int,
+) -> np.ndarray:
+    """Project 3D joint positions to 2D screen coordinates.
+
+    Parameters
+    ----------
+    joints_3d : (N, 3) joint positions in model/camera space
+    mvp : (4, 4) model-view-projection matrix
+    viewport_w, viewport_h : widget pixel dimensions
+
+    Returns
+    -------
+    screen : (N, 2) float64 — pixel coordinates (x, y) with origin at top-left
+    """
+    N = joints_3d.shape[0]
+    # Homogeneous coordinates
+    pts = np.hstack([joints_3d, np.ones((N, 1))])  # (N, 4)
+    clip = (mvp @ pts.T).T  # (N, 4)
+
+    # Perspective divide (avoid division by zero)
+    w = clip[:, 3:4]
+    w = np.where(np.abs(w) < 1e-8, 1e-8, w)
+    ndc = clip[:, :3] / w  # (N, 3) in [-1, 1]
+
+    # NDC → screen (OpenGL: x right, y up; screen: y down)
+    screen = np.zeros((N, 2))
+    screen[:, 0] = (ndc[:, 0] + 1.0) * 0.5 * viewport_w
+    screen[:, 1] = (1.0 - ndc[:, 1]) * 0.5 * viewport_h
+    return screen
+
+
+def find_nearest_joint(
+    click_x: float,
+    click_y: float,
+    joints_2d: np.ndarray,
+    threshold: float = _JOINT_PICK_THRESHOLD,
+    max_joint: int = _N_BODY_JOINTS,
+) -> int | None:
+    """Hit-test: return body joint index nearest to click, within threshold px.
+
+    Only considers joints 0..max_joint-1 (body joints by default).
+    """
+    body = joints_2d[:max_joint]
+    dists = np.sqrt((body[:, 0] - click_x) ** 2 + (body[:, 1] - click_y) ** 2)
+    min_idx = int(np.argmin(dists))
+    if dists[min_idx] <= threshold:
+        return min_idx
+    return None
 
 
 def k_to_projection(
@@ -361,6 +641,11 @@ class MeshViewport(_BaseWidget):
         # Mouse tracking for orbit interaction
         self._mouse_last_pos: tuple[int, int] | None = None
 
+        # Skeleton state (Phase 3.3)
+        self._joint_positions: np.ndarray | None = None  # (52, 3) camera-space
+        self._selected_joint: int = -1  # -1 = no selection
+        self._show_skeleton: bool = True  # whether to draw skeleton overlay
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -428,10 +713,23 @@ class MeshViewport(_BaseWidget):
         self.camera_changed.emit(self._camera_state())
 
     def set_color_mode(self, mode: str):
-        """Set vertex color mode ('solid', 'joint', 'confidence'). Stub for Phase 3.3."""
+        """Set vertex color mode ('solid', 'joint', 'confidence'). Stub."""
 
     def highlight_joint(self, joint_idx: int):
-        """Highlight a joint in accent color. Stub for Phase 3.3."""
+        """Highlight a joint in accent color and trigger repaint."""
+        if joint_idx == self._selected_joint:
+            return
+        self._selected_joint = joint_idx
+        if _HAS_GL:
+            self.update()
+
+    def set_show_skeleton(self, show: bool):
+        """Toggle skeleton overlay visibility."""
+        if show == self._show_skeleton:
+            return
+        self._show_skeleton = show
+        if _HAS_GL:
+            self.update()
 
     # ------------------------------------------------------------------
     # Camera modes & mouse interaction
@@ -497,7 +795,16 @@ class MeshViewport(_BaseWidget):
         self._orbit_auto_centered = True
 
     def mousePressEvent(self, event):
-        """Begin orbit/pan drag in orbit mode."""
+        """Joint picking on left-click, orbit drag on left-drag in orbit mode."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Try joint picking first
+            hit = self._pick_joint(event.position().x(), event.position().y())
+            if hit is not None:
+                self._selected_joint = hit
+                self.joint_clicked.emit(hit)
+                if _HAS_GL:
+                    self.update()
+
         if self._camera_mode == "orbit":
             self._mouse_last_pos = (event.position().x(), event.position().y())
         super().mousePressEvent(event)
@@ -572,6 +879,37 @@ class MeshViewport(_BaseWidget):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    # ------------------------------------------------------------------
+    # Skeleton: joint computation + joint picking
+    # ------------------------------------------------------------------
+
+    def _compute_joints(self) -> np.ndarray | None:
+        """Compute 3D joint positions for current person/frame.
+
+        Returns (52, 3) array in camera space, or None if params unavailable.
+        """
+        if self._session is None or self._person_id < 0:
+            return None
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None or track.smplx_params is None:
+            return None
+        try:
+            return forward_kinematics(track.smplx_params, self._current_frame)
+        except Exception as e:
+            logger.warning("FK failed (pid=%d, f=%d): %s",
+                           self._person_id, self._current_frame, e)
+            return None
+
+    def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
+        """Screen-space joint picking: project joints, find nearest within threshold."""
+        if self._joint_positions is None:
+            return None
+        w = self.width() if self.width() > 0 else 200
+        h = self.height() if self.height() > 0 else 150
+        mvp = self._projection @ self._view @ self._model_mat
+        screen = project_joints_to_screen(self._joint_positions, mvp, w, h)
+        return find_nearest_joint(screen_x, screen_y, screen)
 
     # ------------------------------------------------------------------
     # SMPL-X model loading
@@ -791,12 +1129,150 @@ class MeshViewport(_BaseWidget):
 
         self._shader.release()
 
+        # Skeleton overlay (drawn on top of mesh)
+        if self._show_skeleton and self._joint_positions is not None:
+            self._draw_skeleton()
+
+    # ------------------------------------------------------------------
+    # Skeleton GL rendering
+    # ------------------------------------------------------------------
+
+    def _draw_skeleton(self):
+        """Draw skeleton overlay: bones as GL_LINES, joints as GL_POINTS.
+
+        Uses legacy-ish immediate-mode via temporary VBOs for simplicity,
+        reusing the mesh shader with ambient=1 so the skeleton is unlit.
+        """
+        if not _HAS_GL or not self._gl_ready:
+            return
+
+        joints = self._joint_positions  # (52, 3) camera space
+        if joints is None:
+            return
+
+        self._shader.bind()
+
+        # Set uniforms — use full-bright ambient so skeleton is unlit
+        self._set_mat4("model", self._model_mat)
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        # Disable depth test so skeleton renders on top
+        gl.glDisable(gl.GL_DEPTH_TEST)
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        # --- Draw bones as GL_LINES ---
+        bone_verts = []
+        bone_colors = []
+        for a, b in BONE_CONNECTIONS:
+            if a < len(joints) and b < len(joints):
+                bone_verts.append(joints[a])
+                bone_verts.append(joints[b])
+                bone_colors.append(_BONE_COLOR)
+                bone_colors.append(_BONE_COLOR)
+
+        if bone_verts:
+            bv = np.array(bone_verts, dtype=np.float32)
+            bc = np.array(bone_colors, dtype=np.float32)
+            bn = np.zeros_like(bv)  # normals not used (unlit)
+
+            self._draw_primitive(gl.GL_LINES, bv, bn, bc, _BONE_LINE_WIDTH)
+
+        # --- Draw joints as GL_POINTS ---
+        jv = joints.astype(np.float32)
+        jn = np.zeros_like(jv)
+        jc = np.zeros((len(joints), 3), dtype=np.float32)
+
+        for i in range(len(joints)):
+            if i == self._selected_joint:
+                jc[i] = _ACCENT_COLOR
+            elif i < _N_BODY_JOINTS:
+                jc[i] = _BODY_JOINT_COLOR
+            else:
+                jc[i] = _HAND_JOINT_COLOR
+
+        # Draw non-selected joints at normal size
+        mask = np.arange(len(joints)) != self._selected_joint
+        if np.any(mask):
+            self._draw_primitive(
+                gl.GL_POINTS, jv[mask], jn[mask], jc[mask],
+                point_size=_JOINT_POINT_SIZE,
+            )
+
+        # Draw selected joint larger
+        if 0 <= self._selected_joint < len(joints):
+            si = self._selected_joint
+            self._draw_primitive(
+                gl.GL_POINTS,
+                jv[si:si + 1], jn[si:si + 1], jc[si:si + 1],
+                point_size=_SELECTED_JOINT_POINT_SIZE,
+            )
+
+        # Restore state
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glEnable(gl.GL_CULL_FACE)
+
+        self._shader.release()
+
+    def _draw_primitive(
+        self,
+        mode,
+        positions: np.ndarray,
+        normals: np.ndarray,
+        colors: np.ndarray,
+        line_width: float = 1.0,
+        point_size: float = 1.0,
+    ):
+        """Draw a GL primitive using temporary buffer uploads.
+
+        Reuses the mesh shader (position/normal/color layout).
+        """
+        if not _HAS_GL or len(positions) == 0:
+            return
+
+        vao = gl.glGenVertexArrays(1)
+        vbo_p, vbo_n, vbo_c = gl.glGenBuffers(3)
+
+        gl.glBindVertexArray(vao)
+
+        # Position (location 0)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo_p)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, positions.nbytes, positions, gl.GL_STREAM_DRAW)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        gl.glEnableVertexAttribArray(0)
+
+        # Normal (location 1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo_n)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, normals.nbytes, normals, gl.GL_STREAM_DRAW)
+        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        gl.glEnableVertexAttribArray(1)
+
+        # Color (location 2)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo_c)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, colors.nbytes, colors, gl.GL_STREAM_DRAW)
+        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        gl.glEnableVertexAttribArray(2)
+
+        if mode == gl.GL_LINES:
+            gl.glLineWidth(line_width)
+        elif mode == gl.GL_POINTS:
+            gl.glPointSize(point_size)
+
+        gl.glDrawArrays(mode, 0, len(positions))
+
+        gl.glBindVertexArray(0)
+        gl.glDeleteVertexArrays(1, [vao])
+        gl.glDeleteBuffers(3, [vbo_p, vbo_n, vbo_c])
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _refresh_mesh(self):
-        """Recompute vertices for current person/frame and trigger repaint."""
+        """Recompute vertices + joints for current person/frame and trigger repaint."""
         result = self._compute_vertices(self._person_id, self._current_frame)
         if result is not None:
             self._vertices, self._normals = result
@@ -811,6 +1287,10 @@ class MeshViewport(_BaseWidget):
             self._vertices = None
             self._normals = None
             self._n_indices = 0
+
+        # Recompute skeleton joint positions
+        self._joint_positions = self._compute_joints()
+
         if _HAS_GL:
             self.update()
 
