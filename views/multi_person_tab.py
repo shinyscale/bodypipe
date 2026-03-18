@@ -299,6 +299,9 @@ class MultiPersonTab(QWidget):
         self._identity_panel.track_modified.connect(self._on_tracks_modified)
         self._identity_panel.reprocess_requested.connect(self._on_reprocess_requested)
 
+        # Pose corrector → video player seek
+        self._pose_corrector.frame_requested.connect(self._video_player.seek)
+
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
         self._session.current_frame = frame_idx

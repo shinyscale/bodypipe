@@ -35,9 +35,13 @@ from views.pose_corrector_panel import (
     get_joint_euler,
     _get_joint_axis_angle,
     _safe_import_pose_correction,
+    _safe_import_quick_fix,
     axis_angle_to_euler_deg_fallback,
     euler_deg_to_axis_angle_fallback,
+    flip_global_orient_fallback,
+    mirror_lr_pose_fallback,
     _N_BODY_JOINTS,
+    _LR_SWAP_PAIRS,
 )
 
 
@@ -912,3 +916,652 @@ class TestMultiPersonTabIntegration:
         from views.multi_person_tab import MultiPersonTab
         tab = MultiPersonTab(session=session, gvhmr_root=Path("/tmp/gvhmr"))
         assert tab._mesh_viewport is tab._pose_corrector.mesh_viewport
+
+    def test_frame_requested_wired(self, qapp, session):
+        """Pose corrector frame_requested should be connected to video player."""
+        from views.multi_person_tab import MultiPersonTab
+        tab = MultiPersonTab(session=session, gvhmr_root=Path("/tmp/gvhmr"))
+        # Verify signal exists and is connected
+        assert hasattr(tab._pose_corrector, "frame_requested")
+        # Emit should not raise (connected to video_player.seek)
+        tab._pose_corrector.frame_requested.emit(0)
+
+
+# ======================================================================
+# Phase 3.5: Quick-fix button + corrections table tests
+# ======================================================================
+
+
+class TestQuickFixButtonPresence:
+    """Quick-fix buttons should be present in the panel."""
+
+    def test_has_flip_btn(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_flip_btn")
+        assert panel._flip_btn.text() == "Flip Body"
+
+    def test_has_invert_btn(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_invert_btn")
+        assert panel._invert_btn.text() == "Invert"
+
+    def test_has_mirror_btn(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_mirror_btn")
+        assert panel._mirror_btn.text() == "Mirror L/R"
+
+    def test_has_copy_from_btn(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_copy_from_btn")
+        assert panel._copy_from_btn.text() == "Copy From"
+
+    def test_has_frame_requested_signal(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "frame_requested")
+
+
+class TestCorrectionsTablePresence:
+    """Corrections table should be present and configured correctly."""
+
+    def test_has_corrections_table(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_corrections_table")
+
+    def test_table_columns(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._corrections_table.columnCount() == 5
+
+    def test_table_headers(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        headers = []
+        for col in range(panel._corrections_table.columnCount()):
+            item = panel._corrections_table.horizontalHeaderItem(col)
+            if item:
+                headers.append(item.text())
+        assert headers == ["Frame", "Type", "Joint", "Go", "Del"]
+
+    def test_table_initially_empty(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._corrections_table.rowCount() == 0
+
+
+# ======================================================================
+# Quick-fix fallback function tests (pure, no Qt)
+# ======================================================================
+
+
+class TestFlipGlobalOrientFallback:
+    """flip_global_orient_fallback: 180° rotation of global_orient."""
+
+    def test_yaw_flip(self):
+        params = {
+            "global_orient": np.zeros((10, 3), dtype=np.float32),
+        }
+        result = flip_global_orient_fallback(params, 0, "yaw")
+        assert result.shape == (3,)
+        assert result.dtype == np.float32
+        # 180° yaw on identity → should have non-trivial rotation
+        # (pi * [0,1,0] = [0, pi, 0] in axis-angle)
+        assert np.linalg.norm(result) > 2.0  # ~pi
+
+    def test_pitch_flip(self):
+        params = {
+            "global_orient": np.zeros((10, 3), dtype=np.float32),
+        }
+        result = flip_global_orient_fallback(params, 0, "pitch")
+        assert result.shape == (3,)
+        assert np.linalg.norm(result) > 2.0
+
+    def test_roll_flip(self):
+        params = {
+            "global_orient": np.zeros((10, 3), dtype=np.float32),
+        }
+        result = flip_global_orient_fallback(params, 0, "roll")
+        assert result.shape == (3,)
+        assert np.linalg.norm(result) > 2.0
+
+    def test_nonzero_input(self):
+        params = {
+            "global_orient": np.array([[0.5, 0.3, -0.2]], dtype=np.float32),
+        }
+        result = flip_global_orient_fallback(params, 0, "yaw")
+        assert result.shape == (3,)
+        # Should differ from original
+        assert not np.allclose(result, params["global_orient"][0], atol=0.1)
+
+    def test_double_flip_returns_to_original(self):
+        """Flipping twice should return to approximately the original pose."""
+        orig = np.array([0.5, 0.3, -0.2], dtype=np.float32)
+        params = {"global_orient": orig.reshape(1, 3)}
+        first = flip_global_orient_fallback(params, 0, "yaw")
+        params2 = {"global_orient": first.reshape(1, 3)}
+        second = flip_global_orient_fallback(params2, 0, "yaw")
+        np.testing.assert_allclose(second, orig, atol=1e-4)
+
+
+class TestMirrorLrPoseFallback:
+    """mirror_lr_pose_fallback: swap left/right body joints."""
+
+    def test_basic_mirror(self):
+        params = {
+            "body_pose": np.zeros((10, 21, 3), dtype=np.float32),
+        }
+        # Set L_Hip (idx 0) and R_Hip (idx 1) to different values
+        params["body_pose"][0, 0] = [1.0, 0.0, 0.0]  # L_Hip (joint 1, bp 0)
+        params["body_pose"][0, 1] = [0.0, 1.0, 0.0]  # R_Hip (joint 2, bp 1)
+
+        mirrored = mirror_lr_pose_fallback(params, 0)
+        # L_Hip should have R_Hip's value and vice versa
+        np.testing.assert_allclose(mirrored[0], [0.0, 1.0, 0.0])
+        np.testing.assert_allclose(mirrored[1], [1.0, 0.0, 0.0])
+
+    def test_all_pairs_swapped(self):
+        """All L/R swap pairs should be present in the result."""
+        params = {
+            "body_pose": np.random.randn(10, 21, 3).astype(np.float32),
+        }
+        mirrored = mirror_lr_pose_fallback(params, 0)
+        for l_idx, r_idx in _LR_SWAP_PAIRS:
+            l_bp, r_bp = l_idx - 1, r_idx - 1
+            assert l_bp in mirrored
+            assert r_bp in mirrored
+
+    def test_returns_sparse_dict(self):
+        params = {
+            "body_pose": np.zeros((10, 21, 3), dtype=np.float32),
+        }
+        mirrored = mirror_lr_pose_fallback(params, 0)
+        assert isinstance(mirrored, dict)
+        # Should have 16 entries (8 pairs × 2)
+        assert len(mirrored) == 16
+
+    def test_flat_body_pose(self):
+        """Should handle (N, 63) shaped body_pose."""
+        params = {
+            "body_pose": np.zeros((10, 63), dtype=np.float32),
+        }
+        params["body_pose"][0, 0:3] = [1.0, 0.0, 0.0]  # bp idx 0
+        params["body_pose"][0, 3:6] = [0.0, 1.0, 0.0]  # bp idx 1
+        mirrored = mirror_lr_pose_fallback(params, 0)
+        assert len(mirrored) > 0
+        np.testing.assert_allclose(mirrored[0], [0.0, 1.0, 0.0])
+
+
+class TestSafeImportQuickFix:
+    """_safe_import_quick_fix: graceful backend import."""
+
+    def test_returns_tuple(self):
+        result = _safe_import_quick_fix()
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+
+
+# ======================================================================
+# Quick-fix handler tests (require QApplication + backend)
+# ======================================================================
+
+
+class TestFlipBodyHandler:
+    """_on_flip_body: handler for flip body button."""
+
+    def test_flip_creates_correction(self, qapp):
+        """Flip body should create a global_orient correction."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+
+        # Mock the QInputDialog to avoid modal dialog
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getItem",
+            return_value=("Yaw (Y-axis)", True),
+        ):
+            panel._on_flip_body()
+
+        assert 0 in session.correction_tracks
+        ct = session.correction_tracks[0]
+        corr = ct.get_correction(0)
+        assert corr is not None
+        assert corr.global_orient is not None
+        assert corr.correction_type == "flip"
+
+    def test_flip_emits_signal(self, qapp):
+        """Flip should emit correction_applied signal."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 5
+
+        received = []
+        panel.correction_applied.connect(lambda p, f: received.append((p, f)))
+
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getItem",
+            return_value=("Pitch (X-axis)", True),
+        ):
+            panel._on_flip_body()
+
+        assert (0, 5) in received
+
+    def test_flip_cancelled(self, qapp):
+        """Cancelling the dialog should not create a correction."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getItem",
+            return_value=("Yaw (Y-axis)", False),
+        ):
+            panel._on_flip_body()
+
+        assert len(session.correction_tracks) == 0
+
+    def test_flip_no_person_noop(self, qapp):
+        """Flip with no person selected should be a no-op."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_flip_body()
+        assert len(session.correction_tracks) == 0
+
+
+class TestInvertUprightHandler:
+    """_on_invert_upright: handler for invert button."""
+
+    def test_invert_creates_correction(self, qapp):
+        """Invert should create a pitch-flip correction."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+
+        panel._on_invert_upright()
+
+        assert 0 in session.correction_tracks
+        corr = session.correction_tracks[0].get_correction(0)
+        assert corr is not None
+        assert corr.global_orient is not None
+        assert corr.correction_type == "invert"
+
+    def test_invert_no_person_noop(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_invert_upright()
+        assert len(session.correction_tracks) == 0
+
+
+class TestMirrorLrHandler:
+    """_on_mirror_lr: handler for mirror L/R button."""
+
+    def test_mirror_creates_body_pose_correction(self, qapp):
+        """Mirror should create body_pose corrections for L/R pairs."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+
+        panel._on_mirror_lr()
+
+        assert 0 in session.correction_tracks
+        corr = session.correction_tracks[0].get_correction(0)
+        assert corr is not None
+        assert corr.body_pose is not None
+        assert corr.correction_type == "mirror"
+        # Should have swapped L/R pairs
+        assert len(corr.body_pose) >= 2
+
+    def test_mirror_swaps_values(self, qapp):
+        """Mirror should swap L_Hip ↔ R_Hip values."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        # Set distinct L/R hip values
+        session.person_tracks[0].smplx_params["body_pose"][0, 0] = [1.0, 0.0, 0.0]
+        session.person_tracks[0].smplx_params["body_pose"][0, 1] = [0.0, 2.0, 0.0]
+
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+
+        panel._on_mirror_lr()
+
+        corr = session.correction_tracks[0].get_correction(0)
+        # bp idx 0 (L_Hip) should now have R_Hip's value
+        np.testing.assert_allclose(corr.body_pose[0], [0.0, 2.0, 0.0], atol=1e-5)
+        np.testing.assert_allclose(corr.body_pose[1], [1.0, 0.0, 0.0], atol=1e-5)
+
+    def test_mirror_no_person_noop(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_mirror_lr()
+        assert len(session.correction_tracks) == 0
+
+
+class TestCopyFromFrameHandler:
+    """_on_copy_from_frame: handler for copy from frame button."""
+
+    def test_copy_creates_full_correction(self, qapp):
+        """Copy from frame should create correction with global_orient + body_pose."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 10
+
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getInt",
+            return_value=(0, True),
+        ):
+            panel._on_copy_from_frame()
+
+        assert 0 in session.correction_tracks
+        corr = session.correction_tracks[0].get_correction(10)
+        assert corr is not None
+        assert corr.correction_type == "copy_from_frame"
+        assert corr.global_orient is not None
+        # Should have copied body_pose from frame 0
+        assert corr.body_pose is not None
+        assert len(corr.body_pose) == 21  # all body joints
+
+    def test_copy_uses_source_frame_values(self, qapp):
+        """Copied correction should have the source frame's rotation values."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        # Source frame 0 has global_orient = [0.1, 0.2, 0.3]
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 50
+
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getInt",
+            return_value=(0, True),
+        ):
+            panel._on_copy_from_frame()
+
+        corr = session.correction_tracks[0].get_correction(50)
+        np.testing.assert_allclose(corr.global_orient, [0.1, 0.2, 0.3], atol=1e-5)
+
+    def test_copy_cancelled(self, qapp):
+        """Cancelling the dialog should not create a correction."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        with patch(
+            "views.pose_corrector_panel.QInputDialog.getInt",
+            return_value=(0, False),
+        ):
+            panel._on_copy_from_frame()
+
+        assert len(session.correction_tracks) == 0
+
+
+# ======================================================================
+# Corrections table interaction tests
+# ======================================================================
+
+
+class TestCorrectionsTablePopulation:
+    """Corrections table should populate from CorrectionTrack."""
+
+    def test_table_populated_after_apply(self, qapp):
+        """Table should show corrections after they are applied."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+        panel._current_joint = 1
+
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+
+        assert panel._corrections_table.rowCount() == 1
+        assert panel._corrections_table.item(0, 0).text() == "0"  # frame
+
+    def test_table_shows_multiple_corrections(self, qapp):
+        """Table should show all corrections for the person."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        # Apply at frame 0
+        panel._current_frame = 0
+        panel._current_joint = 1
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+
+        # Apply at frame 10
+        panel.on_frame_changed(10)
+        panel._current_joint = 4
+        panel._euler_y.setValue(30.0)
+        panel._on_apply()
+
+        assert panel._corrections_table.rowCount() == 2
+        # Should be sorted by frame
+        assert panel._corrections_table.item(0, 0).text() == "0"
+        assert panel._corrections_table.item(1, 0).text() == "10"
+
+    def test_table_updates_on_person_change(self, qapp):
+        """Changing person should refresh the corrections table."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel.refresh()  # populate dropdown
+
+        # Apply correction for person 0
+        panel._current_person = 0
+        panel._current_frame = 0
+        panel._current_joint = 1
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+        assert panel._corrections_table.rowCount() == 1
+
+        # Switch to person 1 (no corrections)
+        panel.set_person(1)
+        assert panel._corrections_table.rowCount() == 0
+
+    def test_table_clears_after_reset_all(self, qapp):
+        """Reset all should clear the table when only one correction exists."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+        panel._current_joint = 1
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+        assert panel._corrections_table.rowCount() == 1
+
+        panel._on_reset_all()
+        assert panel._corrections_table.rowCount() == 0
+
+
+class TestCorrectionsTableGo:
+    """Corrections table Go button emits frame_requested."""
+
+    def test_go_emits_frame_requested(self, qapp):
+        """Go button should emit frame_requested with the frame index."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+
+        received = []
+        panel.frame_requested.connect(received.append)
+        panel._on_correction_go(42)
+
+        assert 42 in received
+
+
+class TestCorrectionsTableDelete:
+    """Corrections table Delete button removes corrections."""
+
+    def test_delete_removes_correction(self, qapp):
+        """Delete should remove the correction at the given frame."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 0
+        panel._current_joint = 1
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+        assert panel._corrections_table.rowCount() == 1
+
+        panel._on_correction_delete(0)
+        assert panel._corrections_table.rowCount() == 0
+
+        ct = session.correction_tracks[0]
+        assert ct.get_correction(0) is None
+
+    def test_delete_preserves_other_corrections(self, qapp):
+        """Deleting one correction should not affect others."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        # Two corrections
+        panel._current_frame = 0
+        panel._current_joint = 1
+        panel._euler_x.setValue(15.0)
+        panel._on_apply()
+
+        panel.on_frame_changed(20)
+        panel._current_joint = 4
+        panel._euler_y.setValue(30.0)
+        panel._on_apply()
+
+        assert panel._corrections_table.rowCount() == 2
+
+        panel._on_correction_delete(0)
+        assert panel._corrections_table.rowCount() == 1
+        assert panel._corrections_table.item(0, 0).text() == "20"
+
+
+class TestDescribeCorrectionJoints:
+    """_describe_correction_joints: readable joint description."""
+
+    def test_global_orient_only(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        corr = MagicMock()
+        corr.global_orient = np.array([1, 0, 0])
+        corr.body_pose = None
+        result = panel._describe_correction_joints(corr)
+        assert "Global" in result
+
+    def test_body_pose_joints(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        corr = MagicMock()
+        corr.global_orient = None
+        corr.body_pose = {0: np.array([1, 0, 0])}  # bp idx 0 → joint 1 = L_Hip
+        result = panel._describe_correction_joints(corr)
+        assert "L_Hip" in result
+
+    def test_truncation_with_many_joints(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        corr = MagicMock()
+        corr.global_orient = np.array([1, 0, 0])
+        corr.body_pose = {i: np.zeros(3) for i in range(10)}
+        result = panel._describe_correction_joints(corr)
+        assert "…" in result
+
+    def test_empty_correction(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        corr = MagicMock()
+        corr.global_orient = None
+        corr.body_pose = None
+        result = panel._describe_correction_joints(corr)
+        assert "—" in result
+
+
+class TestQuickFixTableIntegration:
+    """Quick-fix operations should update the corrections table."""
+
+    def test_invert_updates_table(self, qapp):
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 5
+
+        panel._on_invert_upright()
+        assert panel._corrections_table.rowCount() == 1
+        assert panel._corrections_table.item(0, 0).text() == "5"
+        assert panel._corrections_table.item(0, 1).text() == "invert"
+
+    def test_mirror_updates_table(self, qapp):
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._current_frame = 3
+
+        panel._on_mirror_lr()
+        assert panel._corrections_table.rowCount() == 1
+        assert panel._corrections_table.item(0, 1).text() == "mirror"

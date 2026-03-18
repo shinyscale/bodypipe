@@ -1,14 +1,18 @@
-"""Pose Corrector panel — joint selection, euler sliders, real-time preview.
+"""Pose Corrector panel — joint selection, euler sliders, quick-fix buttons,
+corrections table, and real-time preview.
 
 Why: The pose corrector enables interactive correction of bad GVHMR poses
 (flipped orientations, impossible limb positions during lifts). Users select
 a joint via viewport click or dropdown, adjust rotation with euler sliders
 (real-time mesh preview), then commit corrections to a CorrectionTrack.
-Corrections are interpolated between keyframes via SLERP and re-exported
-to BVH/FBX.
+Quick-fix buttons handle common operations: flip body 180° on an axis,
+invert upside-down poses, mirror L/R joints, or copy pose from another frame.
+The corrections table shows all keyframes for the current person with
+Go/Delete actions. Corrections are interpolated between keyframes via SLERP
+and re-exported to BVH/FBX.
 
 Phase 3.4: Person selector, joint selector, euler sliders, apply, reset.
-Phase 3.5 will add quick-fix buttons and corrections table.
+Phase 3.5: Quick-fix buttons (flip, invert, mirror, copy) + corrections table.
 Phase 3.6 will add space overrides and BVH/FBX export.
 """
 
@@ -29,6 +33,10 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSlider,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QInputDialog,
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -39,6 +47,18 @@ log = logging.getLogger(__name__)
 
 # Number of body joints (0-21); hand joints are 22-51
 _N_BODY_JOINTS = 22
+
+# Left/Right body joint swap pairs for mirroring (joint indices, not body_pose indices)
+_LR_SWAP_PAIRS = [
+    (1, 2),    # L_Hip <-> R_Hip
+    (4, 5),    # L_Knee <-> R_Knee
+    (7, 8),    # L_Ankle <-> R_Ankle
+    (10, 11),  # L_Foot <-> R_Foot
+    (13, 14),  # L_Collar <-> R_Collar
+    (16, 17),  # L_Shoulder <-> R_Shoulder
+    (18, 19),  # L_Elbow <-> R_Elbow
+    (20, 21),  # L_Wrist <-> R_Wrist
+]
 
 
 def _safe_import_pose_correction():
@@ -74,6 +94,61 @@ def euler_deg_to_axis_angle_fallback(euler_deg: np.ndarray) -> np.ndarray:
         return Rotation.from_euler("XYZ", euler_deg, degrees=True).as_rotvec().astype(np.float32)
     except ImportError:
         return np.zeros(3, dtype=np.float32)
+
+
+def _safe_import_quick_fix():
+    """Lazily import quick-fix functions from GVHMR backend.
+
+    Returns (flip_global_orient, mirror_lr_pose, copy_pose_from_frame)
+    or (None, None, None) when backend is unavailable.
+    """
+    try:
+        from pose_correction import (
+            flip_global_orient,
+            mirror_lr_pose,
+            copy_pose_from_frame,
+        )
+        return flip_global_orient, mirror_lr_pose, copy_pose_from_frame
+    except ImportError:
+        return None, None, None
+
+
+def flip_global_orient_fallback(
+    params: dict, frame: int, axis: str = "yaw",
+) -> np.ndarray:
+    """Fallback 180° flip when GVHMR backend is unavailable."""
+    from scipy.spatial.transform import Rotation
+
+    go = np.asarray(params["global_orient"], dtype=np.float32)
+    if go.ndim >= 2 and frame < go.shape[0]:
+        go_vec = go[frame].copy()
+    else:
+        go_vec = go.ravel()[:3].copy()
+    R_orig = Rotation.from_rotvec(go_vec.astype(np.float64))
+    axis_map = {"pitch": [1, 0, 0], "yaw": [0, 1, 0], "roll": [0, 0, 1]}
+    flip_axis = axis_map.get(axis, [0, 1, 0])
+    R_flip = Rotation.from_rotvec(np.array(flip_axis, dtype=np.float64) * np.pi)
+    R_new = R_flip * R_orig
+    return R_new.as_rotvec().astype(np.float32)
+
+
+def mirror_lr_pose_fallback(params: dict, frame: int) -> dict[int, np.ndarray]:
+    """Fallback L/R mirror when GVHMR backend is unavailable."""
+    bp = np.asarray(params["body_pose"], dtype=np.float32)
+    if bp.ndim == 2 and bp.shape[-1] != 3:
+        bp = bp.reshape(bp.shape[0], -1, 3)
+    if bp.ndim >= 3 and frame < bp.shape[0]:
+        bp_frame = bp[frame].copy()
+    else:
+        return {}
+    mirrored: dict[int, np.ndarray] = {}
+    for l_idx, r_idx in _LR_SWAP_PAIRS:
+        l_bp = l_idx - 1
+        r_bp = r_idx - 1
+        if 0 <= l_bp < bp_frame.shape[0] and 0 <= r_bp < bp_frame.shape[0]:
+            mirrored[l_bp] = bp_frame[r_bp].copy()
+            mirrored[r_bp] = bp_frame[l_bp].copy()
+    return mirrored
 
 
 def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
@@ -167,6 +242,7 @@ class PoseCorrectorPanel(QWidget):
 
     joint_selected = Signal(int)
     correction_applied = Signal(int, int)
+    frame_requested = Signal(int)  # corrections table "Go" → seek to frame
 
     def __init__(self, session: Session, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
@@ -215,6 +291,22 @@ class PoseCorrectorPanel(QWidget):
         mode_row.addWidget(self._color_combo)
         mode_row.addStretch()
         vp_layout.addLayout(mode_row)
+
+        # Corrections table
+        corr_group = QGroupBox("Corrections")
+        corr_layout = QVBoxLayout(corr_group)
+        self._corrections_table = QTableWidget(0, 5)
+        self._corrections_table.setHorizontalHeaderLabels(
+            ["Frame", "Type", "Joint", "Go", "Del"]
+        )
+        self._corrections_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self._corrections_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._corrections_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._corrections_table.setMaximumHeight(160)
+        corr_layout.addWidget(self._corrections_table)
+        vp_layout.addWidget(corr_group)
 
         splitter.addWidget(viewport_widget)
 
@@ -269,6 +361,30 @@ class PoseCorrectorPanel(QWidget):
         btn_row.addWidget(self._reset_all_btn)
 
         ctrl_layout.addLayout(btn_row)
+
+        # Quick Fix group
+        qf_group = QGroupBox("Quick Fix")
+        qf_layout = QVBoxLayout(qf_group)
+
+        qf_row1 = QHBoxLayout()
+        self._flip_btn = QPushButton("Flip Body")
+        self._flip_btn.setToolTip("180° rotation on selected axis (yaw/pitch/roll)")
+        qf_row1.addWidget(self._flip_btn)
+        self._invert_btn = QPushButton("Invert")
+        self._invert_btn.setToolTip("Flip upside-down pose (180° pitch)")
+        qf_row1.addWidget(self._invert_btn)
+        qf_layout.addLayout(qf_row1)
+
+        qf_row2 = QHBoxLayout()
+        self._mirror_btn = QPushButton("Mirror L/R")
+        self._mirror_btn.setToolTip("Swap left/right joint pairs")
+        qf_row2.addWidget(self._mirror_btn)
+        self._copy_from_btn = QPushButton("Copy From")
+        self._copy_from_btn.setToolTip("Copy pose from another frame")
+        qf_row2.addWidget(self._copy_from_btn)
+        qf_layout.addLayout(qf_row2)
+
+        ctrl_layout.addWidget(qf_group)
 
         ctrl_layout.addStretch()
 
@@ -347,6 +463,12 @@ class PoseCorrectorPanel(QWidget):
         self._reset_joint_btn.clicked.connect(self._on_reset_joint)
         self._reset_all_btn.clicked.connect(self._on_reset_all)
 
+        # Quick fix buttons
+        self._flip_btn.clicked.connect(self._on_flip_body)
+        self._invert_btn.clicked.connect(self._on_invert_upright)
+        self._mirror_btn.clicked.connect(self._on_mirror_lr)
+        self._copy_from_btn.clicked.connect(self._on_copy_from_frame)
+
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
     # ------------------------------------------------------------------
@@ -355,6 +477,7 @@ class PoseCorrectorPanel(QWidget):
         """Bind session data source."""
         self._session = session
         self._viewport.set_session(session)
+        self._refresh_corrections_table()
 
     def set_person(self, person_id: int):
         """Select person externally (e.g., from identity inspector)."""
@@ -370,6 +493,7 @@ class PoseCorrectorPanel(QWidget):
                 break
         self._person_combo.blockSignals(False)
         self._update_sliders()
+        self._refresh_corrections_table()
 
     def on_frame_changed(self, frame_idx: int):
         """Update frame externally."""
@@ -382,6 +506,7 @@ class PoseCorrectorPanel(QWidget):
     def refresh(self):
         """Refresh person list from session."""
         self._update_person_dropdown()
+        self._refresh_corrections_table()
 
     # ------------------------------------------------------------------
     # Dropdown handlers
@@ -420,6 +545,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.set_person(person_id)
         self._viewport.set_pose_override(None)
         self._update_sliders()
+        self._refresh_corrections_table()
 
     def _on_camera_mode_changed(self, idx: int):
         """Handle camera mode dropdown change."""
@@ -560,6 +686,8 @@ class PoseCorrectorPanel(QWidget):
         # Persist to file
         self._save_correction_track(pid)
 
+        self._refresh_corrections_table()
+
         log.info("Correction applied: person=%d, frame=%d, joint=%d",
                  pid, frame, self._current_joint)
         self.correction_applied.emit(pid, frame)
@@ -597,6 +725,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.invalidate_cache(pid, frame)
         self._viewport._refresh_mesh()
         self._update_sliders()
+        self._refresh_corrections_table()
 
     def _on_reset_all(self):
         """Remove all corrections at current frame."""
@@ -616,6 +745,271 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.invalidate_cache(pid, frame)
         self._viewport._refresh_mesh()
         self._update_sliders()
+        self._refresh_corrections_table()
+
+    # ------------------------------------------------------------------
+    # Quick-fix handlers
+    # ------------------------------------------------------------------
+
+    def _on_flip_body(self):
+        """Flip body 180° on user-selected axis."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        items = ["Yaw (Y-axis)", "Pitch (X-axis)", "Roll (Z-axis)"]
+        item, ok = QInputDialog.getItem(
+            self, "Flip Body", "Rotation axis:", items, 0, False,
+        )
+        if not ok:
+            return
+
+        axis_map = {
+            "Yaw (Y-axis)": "yaw",
+            "Pitch (X-axis)": "pitch",
+            "Roll (Z-axis)": "roll",
+        }
+        axis = axis_map[item]
+
+        flip_fn, _, _ = _safe_import_quick_fix()
+        if flip_fn is not None:
+            new_go = flip_fn(track.smplx_params, self._current_frame, axis)
+        else:
+            new_go = flip_global_orient_fallback(
+                track.smplx_params, self._current_frame, axis,
+            )
+
+        self._apply_quick_fix(global_orient=new_go, correction_type="flip")
+
+    def _on_invert_upright(self):
+        """Flip global_orient 180° about pitch (fix upside-down)."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        flip_fn, _, _ = _safe_import_quick_fix()
+        if flip_fn is not None:
+            new_go = flip_fn(track.smplx_params, self._current_frame, "pitch")
+        else:
+            new_go = flip_global_orient_fallback(
+                track.smplx_params, self._current_frame, "pitch",
+            )
+
+        self._apply_quick_fix(global_orient=new_go, correction_type="invert")
+
+    def _on_mirror_lr(self):
+        """Swap left/right body joint pairs."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        _, mirror_fn, _ = _safe_import_quick_fix()
+        if mirror_fn is not None:
+            mirrored = mirror_fn(track.smplx_params, self._current_frame)
+        else:
+            mirrored = mirror_lr_pose_fallback(
+                track.smplx_params, self._current_frame,
+            )
+
+        if not mirrored:
+            return
+
+        self._apply_quick_fix(body_pose=mirrored, correction_type="mirror")
+
+    def _on_copy_from_frame(self):
+        """Copy full pose from a source frame."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        max_frame = max(0, self._session.num_frames - 1)
+        src_frame, ok = QInputDialog.getInt(
+            self, "Copy From Frame", "Source frame:", 0, 0, max_frame, 1,
+        )
+        if not ok:
+            return
+
+        params = track.smplx_params
+        go = np.asarray(params["global_orient"], dtype=np.float32)
+        bp = np.asarray(params["body_pose"], dtype=np.float32)
+        if bp.ndim == 2 and bp.shape[-1] != 3:
+            bp = bp.reshape(bp.shape[0], -1, 3)
+
+        sf = max(0, min(src_frame, go.shape[0] - 1))
+        new_go = go[sf].copy()
+        sparse_bp = None
+        if bp.ndim >= 3 and sf < bp.shape[0]:
+            bp_frame = bp[sf].copy()
+            sparse_bp = {j: bp_frame[j].copy() for j in range(bp_frame.shape[0])}
+
+        self._apply_quick_fix(
+            global_orient=new_go,
+            body_pose=sparse_bp,
+            correction_type="copy_from_frame",
+            source_frame=src_frame,
+        )
+
+    def _apply_quick_fix(
+        self,
+        global_orient: np.ndarray | None = None,
+        body_pose: dict[int, np.ndarray] | None = None,
+        correction_type: str = "quick_fix",
+        source_frame: int | None = None,
+    ):
+        """Apply a quick-fix correction (global_orient and/or body_pose)."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            log.warning("Cannot apply correction: backend unavailable")
+            return
+
+        pid = self._current_person
+        frame = self._current_frame
+
+        if pid not in self._session.correction_tracks:
+            self._session.correction_tracks[pid] = CorrectionTrack(person_id=pid)
+
+        ct = self._session.correction_tracks[pid]
+
+        # Merge with existing correction at this frame
+        existing = ct.get_correction(frame)
+        if existing is not None:
+            if global_orient is None:
+                global_orient = existing.global_orient
+            if body_pose is None:
+                body_pose = existing.body_pose
+            elif existing.body_pose is not None:
+                merged = dict(existing.body_pose)
+                merged.update(body_pose)
+                body_pose = merged
+
+        ct.add_correction(
+            frame_index=frame,
+            correction_type=correction_type,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            source_frame=source_frame,
+        )
+
+        # Apply to raw params
+        if global_orient is not None:
+            self._apply_to_raw_params(0, global_orient, frame)
+        if body_pose:
+            for bp_idx, aa in body_pose.items():
+                self._apply_to_raw_params(bp_idx + 1, aa, frame)
+
+        # Refresh viewport and UI
+        self._viewport.set_pose_override(None)
+        self._viewport.invalidate_cache(pid, frame)
+        self._viewport._refresh_mesh()
+        self._save_correction_track(pid)
+        self._update_sliders()
+        self._refresh_corrections_table()
+
+        log.info("Quick fix %s: person=%d, frame=%d", correction_type, pid, frame)
+        self.correction_applied.emit(pid, frame)
+
+    # ------------------------------------------------------------------
+    # Corrections table
+    # ------------------------------------------------------------------
+
+    def _refresh_corrections_table(self):
+        """Populate corrections table from current person's CorrectionTrack."""
+        self._corrections_table.setRowCount(0)
+
+        if self._current_person < 0:
+            return
+
+        ct = self._session.correction_tracks.get(self._current_person)
+        if ct is None or not ct.corrections:
+            return
+
+        corrections = sorted(ct.corrections, key=lambda c: c.frame_index)
+        self._corrections_table.setRowCount(len(corrections))
+
+        for row, corr in enumerate(corrections):
+            # Frame
+            self._corrections_table.setItem(
+                row, 0, QTableWidgetItem(str(corr.frame_index)),
+            )
+
+            # Type
+            self._corrections_table.setItem(
+                row, 1, QTableWidgetItem(corr.correction_type),
+            )
+
+            # Joint
+            joint_str = self._describe_correction_joints(corr)
+            self._corrections_table.setItem(
+                row, 2, QTableWidgetItem(joint_str),
+            )
+
+            # Go button
+            go_btn = QPushButton("Go")
+            go_btn.setFixedWidth(40)
+            go_btn.clicked.connect(
+                lambda checked, f=corr.frame_index: self._on_correction_go(f),
+            )
+            self._corrections_table.setCellWidget(row, 3, go_btn)
+
+            # Delete button
+            del_btn = QPushButton("Del")
+            del_btn.setFixedWidth(40)
+            del_btn.clicked.connect(
+                lambda checked, f=corr.frame_index: self._on_correction_delete(f),
+            )
+            self._corrections_table.setCellWidget(row, 4, del_btn)
+
+    def _describe_correction_joints(self, corr) -> str:
+        """Build a readable string describing which joints are corrected."""
+        parts: list[str] = []
+        if corr.global_orient is not None:
+            parts.append("Global")
+        if corr.body_pose:
+            for bp_idx in sorted(corr.body_pose.keys()):
+                joint_idx = bp_idx + 1
+                if joint_idx < len(JOINT_NAMES):
+                    parts.append(JOINT_NAMES[joint_idx])
+                else:
+                    parts.append(f"J{joint_idx}")
+        if not parts:
+            parts.append("—")
+        if len(parts) > 3:
+            return ", ".join(parts[:3]) + "…"
+        return ", ".join(parts)
+
+    def _on_correction_go(self, frame_idx: int):
+        """Navigate to correction frame."""
+        self.frame_requested.emit(frame_idx)
+
+    def _on_correction_delete(self, frame_idx: int):
+        """Delete correction at frame."""
+        if self._current_person < 0:
+            return
+
+        pid = self._current_person
+        ct = self._session.correction_tracks.get(pid)
+        if ct is None:
+            return
+
+        ct.remove_correction(frame_idx)
+        self._save_correction_track(pid)
+
+        self._viewport.invalidate_cache(pid, frame_idx)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+        self._refresh_corrections_table()
 
     # ------------------------------------------------------------------
     # Internal helpers
