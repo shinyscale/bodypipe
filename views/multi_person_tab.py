@@ -367,6 +367,7 @@ class MultiPersonTab(QWidget):
         self._browse_btn.clicked.connect(self._on_browse)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
+        self._static_cam.toggled.connect(self._on_static_cam_toggled)
 
         # Viewport mode switching
         self._video_mode_btn.clicked.connect(self._switch_to_video)
@@ -585,6 +586,12 @@ class MultiPersonTab(QWidget):
         self.status_message.emit(f"Reprocess error: {message}")
         self.log_message.emit(f"Reprocess error: {message}", "error")
 
+    def _on_static_cam_toggled(self, checked: bool):
+        """Disable and uncheck DPVO when static camera is enabled."""
+        if checked:
+            self._use_dpvo.setChecked(False)
+        self._use_dpvo.setEnabled(not checked and not self._running)
+
     # ------------------------------------------------------------------
     # Video loading
     # ------------------------------------------------------------------
@@ -682,7 +689,8 @@ class MultiPersonTab(QWidget):
         self._progress_label.setVisible(running)
         self._browse_btn.setEnabled(not running)
         self._static_cam.setEnabled(not running)
-        self._use_dpvo.setEnabled(not running)
+        # DPVO is only enabled when not running AND static_cam is unchecked
+        self._use_dpvo.setEnabled(not running and not self._static_cam.isChecked())
         self._focal_mm.setEnabled(not running)
         self._max_persons.setEnabled(not running)
         self._confidence_threshold.setEnabled(not running)

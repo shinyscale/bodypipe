@@ -83,6 +83,30 @@ class TestPerfCaptureTabConstruction:
 
 
 # ---------------------------------------------------------------------------
+# Static cam → DPVO auto-disable (inherited from SinglePersonTab)
+# ---------------------------------------------------------------------------
+
+
+class TestStaticCamDpvoInterlock:
+    """PerfCaptureTab inherits DPVO interlock from SinglePersonTab."""
+
+    def test_dpvo_disabled_when_static_cam_default(self, qapp):
+        session = Session()
+        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
+        assert tab._static_cam.isChecked() is True
+        assert not tab._use_dpvo.isEnabled()
+
+    def test_toggle_static_cam_toggles_dpvo(self, qapp):
+        session = Session()
+        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
+        tab._static_cam.setChecked(False)
+        assert tab._use_dpvo.isEnabled()
+        tab._static_cam.setChecked(True)
+        assert not tab._use_dpvo.isEnabled()
+        assert tab._use_dpvo.isChecked() is False
+
+
+# ---------------------------------------------------------------------------
 # Default settings
 # ---------------------------------------------------------------------------
 

@@ -269,6 +269,45 @@ class TestMultiPersonSettings:
 
 
 # ---------------------------------------------------------------------------
+# Static cam → DPVO auto-disable
+# ---------------------------------------------------------------------------
+
+
+class TestStaticCamDpvoInterlock:
+    """DPVO must be disabled and unchecked when static camera is enabled."""
+
+    def test_dpvo_disabled_by_default(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._static_cam.isChecked() is True
+        assert tab._use_dpvo.isChecked() is False
+        assert not tab._use_dpvo.isEnabled()
+
+    def test_uncheck_static_cam_enables_dpvo(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._static_cam.setChecked(False)
+        assert tab._use_dpvo.isEnabled()
+
+    def test_check_static_cam_disables_and_unchecks_dpvo(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._static_cam.setChecked(False)
+        tab._use_dpvo.setChecked(True)
+        tab._static_cam.setChecked(True)
+        assert tab._use_dpvo.isChecked() is False
+        assert not tab._use_dpvo.isEnabled()
+
+    def test_dpvo_stays_disabled_after_run_with_static_cam(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._video_path = Path("/tmp/test.mp4")
+        tab._set_running(True)
+        tab._set_running(False)
+        assert not tab._use_dpvo.isEnabled()
+
+
+# ---------------------------------------------------------------------------
 # Video loading
 # ---------------------------------------------------------------------------
 
@@ -392,7 +431,8 @@ class TestRunningState:
         assert tab._progress_label.isHidden()
         assert tab._browse_btn.isEnabled()
         assert tab._static_cam.isEnabled()
-        assert tab._use_dpvo.isEnabled()
+        # DPVO stays disabled when static_cam is checked (default True)
+        assert not tab._use_dpvo.isEnabled()
         assert tab._focal_mm.isEnabled()
         assert tab._max_persons.isEnabled()
         assert tab._confidence_threshold.isEnabled()

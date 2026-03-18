@@ -229,6 +229,13 @@ class SinglePersonTab(QWidget):
         self._file_list.itemDoubleClicked.connect(self._on_file_double_click)
         self._file_list.customContextMenuRequested.connect(self._on_file_context_menu)
         self._open_folder_btn.clicked.connect(self._on_open_folder)
+        self._static_cam.toggled.connect(self._on_static_cam_toggled)
+
+    def _on_static_cam_toggled(self, checked: bool):
+        """Disable and uncheck DPVO when static camera is enabled."""
+        if checked:
+            self._use_dpvo.setChecked(False)
+        self._use_dpvo.setEnabled(not checked and not self._running)
 
     # ------------------------------------------------------------------
     # Video loading
@@ -337,7 +344,8 @@ class SinglePersonTab(QWidget):
         self._progress_label.setVisible(running)
         self._browse_btn.setEnabled(not running)
         self._static_cam.setEnabled(not running)
-        self._use_dpvo.setEnabled(not running)
+        # DPVO is only enabled when not running AND static_cam is unchecked
+        self._use_dpvo.setEnabled(not running and not self._static_cam.isChecked())
         self._focal_mm.setEnabled(not running)
         if not running:
             self._progress_bar.setValue(0)
