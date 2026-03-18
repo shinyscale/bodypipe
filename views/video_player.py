@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
     QToolButton,
     QHBoxLayout,
     QVBoxLayout,
+    QMenu,
+    QFileDialog,
+    QApplication,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent
@@ -77,9 +80,13 @@ class FrameDisplay(QLabel):
         self.setMinimumSize(320, 240)
         self.setStyleSheet("background-color: #0a0a1a;")
         self._pixmap_size = None
+        self._current_frame: np.ndarray | None = None
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
     def set_frame(self, frame: np.ndarray):
         """Display an RGB numpy array."""
+        self._current_frame = frame.copy()
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -87,6 +94,48 @@ class FrameDisplay(QLabel):
         scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._pixmap_size = (scaled.width(), scaled.height())
         self.setPixmap(scaled)
+
+    def _frame_to_pixmap(self) -> QPixmap | None:
+        """Convert stored frame to full-resolution QPixmap."""
+        if self._current_frame is None:
+            return None
+        h, w, ch = self._current_frame.shape
+        bytes_per_line = ch * w
+        qimg = QImage(
+            self._current_frame.data, w, h, bytes_per_line, QImage.Format_RGB888
+        )
+        return QPixmap.fromImage(qimg)
+
+    def _show_context_menu(self, pos):
+        if self._current_frame is None:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy Frame")
+        save_action = menu.addAction("Save Frame As...")
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == copy_action:
+            self._copy_frame()
+        elif action == save_action:
+            self._save_frame()
+
+    def _copy_frame(self):
+        pixmap = self._frame_to_pixmap()
+        if pixmap:
+            QApplication.clipboard().setPixmap(pixmap)
+
+    def _save_frame(self):
+        if self._current_frame is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Frame As",
+            "",
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;All Files (*)",
+        )
+        if path:
+            pixmap = self._frame_to_pixmap()
+            if pixmap:
+                pixmap.save(path)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton and self._pixmap_size:
