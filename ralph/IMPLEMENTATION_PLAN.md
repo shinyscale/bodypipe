@@ -55,7 +55,7 @@ All spec-defined menu actions are wired and functional. Without session save/loa
 
 ### Known remaining spec gaps (lower priority)
 
-- [ ] Perf capture multi-stage progress display: Show stage number/name (1/4 Body, 2/4 Hands, etc.) instead of generic progress bar
+- [x] Perf capture multi-stage progress display: `views/perf_capture_tab.py` — Pure helper functions `compute_visible_stages()` (dynamic stage list based on hands/face config) and `map_stage_label()` (maps internal worker stage labels to user-visible names with disabled-stage handling). `PerfCaptureTab._on_progress()` override shows "Stage X/N: Name" format (e.g. "Stage 2/4: Hands") in progress label and status bar instead of raw internal labels. `_set_running(True)` initializes stage tracking with "Stage 1/N: Body". Stages are dynamic: Body (always), Hands (when enabled), Face (when enabled), Export (always). Sub-progress messages preserve current stage display. Tests in `tests/test_perf_capture_tab.py` (16 new: TestComputeVisibleStages 4, TestMapStageLabel 11, TestMultiStageProgress 14). (1088 total pass).
 - [ ] Video frame composite in in-camera 3D viewport: Render mesh overlaid on video frame background instead of dark solid color
 - [ ] FBO color-coded joint picking (deferred in spec): More accurate joint selection for overlapping joints
 

@@ -27,6 +27,53 @@ from models.session import Session
 from views.single_person_tab import SinglePersonTab
 from workers.pipeline_orchestrator import FullPipelineWorker
 
+# Mapping from internal FullPipelineWorker stage labels to user-visible names.
+_INTERNAL_TO_USER_STAGE: dict[str, str] = {
+    "Preprocessing": "Body",
+    "GVHMR body solve": "Body",
+    "SMPLest-X hand solve": "Hands",
+    "Merging body + hands": "Hands",
+    "Face pipeline": "Face",
+    "BVH/FBX conversion": "Export",
+    "Rendering": "Export",
+}
+
+
+def compute_visible_stages(use_hands: bool, use_face: bool) -> list[str]:
+    """Return ordered list of user-visible pipeline stage names.
+
+    Stages are dynamic — Hands and Face only appear when enabled.
+    Body and Export are always present.
+    """
+    stages = ["Body"]
+    if use_hands:
+        stages.append("Hands")
+    if use_face:
+        stages.append("Face")
+    stages.append("Export")
+    return stages
+
+
+def map_stage_label(
+    internal_label: str, use_hands: bool, use_face: bool
+) -> str | None:
+    """Map internal worker stage label to user-visible stage name.
+
+    Returns ``None`` when the label doesn't correspond to a stage
+    transition (sub-progress message or disabled-stage emission that
+    should be swallowed).
+    """
+    user_stage = _INTERNAL_TO_USER_STAGE.get(internal_label)
+    if user_stage is None:
+        return None
+    # When hands disabled, merge is instant GVHMR-only extraction → Export
+    if user_stage == "Hands" and not use_hands:
+        return "Export"
+    # When face disabled, the worker briefly emits "Face pipeline" then skips
+    if user_stage == "Face" and not use_face:
+        return None
+    return user_stage
+
 
 class PerfCaptureTab(SinglePersonTab):
     """Second tab — full body + hands + face performance capture."""
@@ -202,11 +249,41 @@ class PerfCaptureTab(SinglePersonTab):
         self.log_message.emit("Starting full performance capture pipeline...", "info")
 
     # ------------------------------------------------------------------
+    # Multi-stage progress display
+    # ------------------------------------------------------------------
+
+    def _on_progress(self, fraction: float, stage: str):
+        """Show stage number/name (e.g. 'Stage 2/4: Hands') per spec."""
+        self._progress_bar.setValue(int(fraction * 1000))
+
+        use_hands = self._use_hands.isChecked()
+        use_face = self._use_face.isChecked()
+
+        visible = map_stage_label(stage, use_hands, use_face)
+        if visible is not None:
+            self._current_stage = visible
+
+        stages = compute_visible_stages(use_hands, use_face)
+        current = getattr(self, "_current_stage", stages[0])
+        idx = stages.index(current) + 1 if current in stages else len(stages)
+        total = len(stages)
+
+        stage_text = f"Stage {idx}/{total}: {current}"
+        self._progress_label.setText(stage_text)
+        self.status_message.emit(f"{stage_text} ({fraction:.0%})")
+
+    # ------------------------------------------------------------------
     # Running state (extend to disable new controls)
     # ------------------------------------------------------------------
 
     def _set_running(self, running: bool):
         super()._set_running(running)
+        if running:
+            self._current_stage = "Body"
+            stages = compute_visible_stages(
+                self._use_hands.isChecked(), self._use_face.isChecked()
+            )
+            self._progress_label.setText(f"Stage 1/{len(stages)}: Body")
         self._use_hands.setEnabled(not running)
         self._use_face.setEnabled(not running)
         self._use_vitpose_face.setEnabled(not running)
