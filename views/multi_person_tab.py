@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QToolButton,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QByteArray, QSettings
 from PySide6.QtGui import QPixmap, QImage
 
 from models.pipeline_config import PipelineConfig
@@ -115,9 +115,12 @@ class MultiPersonTab(QWidget):
         self._show_all_tracks = False
         self._edit_preview: dict | None = None
 
+        self._settings = QSettings("bodypipe", "bodypipe")
+
         self._setup_ui()
         self._connect_signals()
         self._set_running(False)
+        self._restore_splitter_state()
 
     # ------------------------------------------------------------------
     # UI setup
@@ -127,7 +130,7 @@ class MultiPersonTab(QWidget):
         outer = QHBoxLayout(self)
 
         # Main horizontal splitter: sidebar | content
-        main_splitter = QSplitter(Qt.Horizontal)
+        self._main_splitter = QSplitter(Qt.Horizontal)
 
         # ---- Left sidebar ----
         sidebar = QWidget()
@@ -234,7 +237,7 @@ class MultiPersonTab(QWidget):
 
         sidebar_layout.addStretch()
 
-        main_splitter.addWidget(sidebar)
+        self._main_splitter.addWidget(sidebar)
 
         # ---- Content area ----
         content = QWidget()
@@ -307,12 +310,12 @@ class MultiPersonTab(QWidget):
         self._vert_splitter.setStretchFactor(1, 1)
 
         content_layout.addWidget(self._vert_splitter)
-        main_splitter.addWidget(content)
+        self._main_splitter.addWidget(content)
 
-        main_splitter.setStretchFactor(0, 0)  # sidebar fixed
-        main_splitter.setStretchFactor(1, 1)  # content stretches
+        self._main_splitter.setStretchFactor(0, 0)  # sidebar fixed
+        self._main_splitter.setStretchFactor(1, 1)  # content stretches
 
-        outer.addWidget(main_splitter)
+        outer.addWidget(self._main_splitter)
 
     @property
     def video_player(self) -> "VideoPlayer":
@@ -358,6 +361,41 @@ class MultiPersonTab(QWidget):
 
         # Pose corrector → video player seek
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
+
+        # Splitter layout persistence — save on any splitter move
+        self._main_splitter.splitterMoved.connect(self._save_splitter_state)
+        self._vert_splitter.splitterMoved.connect(self._save_splitter_state)
+        self._bottom_splitter.splitterMoved.connect(self._save_splitter_state)
+
+    # ------------------------------------------------------------------
+    # Splitter layout persistence
+    # ------------------------------------------------------------------
+
+    def _save_splitter_state(self):
+        """Persist all splitter sizes to QSettings."""
+        self._settings.setValue(
+            "multi_person/main_splitter", self._main_splitter.saveState()
+        )
+        self._settings.setValue(
+            "multi_person/vert_splitter", self._vert_splitter.saveState()
+        )
+        self._settings.setValue(
+            "multi_person/bottom_splitter", self._bottom_splitter.saveState()
+        )
+
+    def _restore_splitter_state(self):
+        """Restore splitter sizes from QSettings."""
+        state = self._settings.value("multi_person/main_splitter")
+        if state and isinstance(state, QByteArray):
+            self._main_splitter.restoreState(state)
+
+        state = self._settings.value("multi_person/vert_splitter")
+        if state and isinstance(state, QByteArray):
+            self._vert_splitter.restoreState(state)
+
+        state = self._settings.value("multi_person/bottom_splitter")
+        if state and isinstance(state, QByteArray):
+            self._bottom_splitter.restoreState(state)
 
     def _switch_to_video(self):
         """Switch main viewport to video + bbox overlay mode."""

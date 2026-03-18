@@ -815,6 +815,115 @@ class TestAppWindowIntegration:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Splitter layout persistence
+# ---------------------------------------------------------------------------
+
+
+class TestSplitterPersistence:
+    """Verify that splitter sizes persist across tab instances via QSettings.
+
+    Why: The multi-person spec requires 'Splitter layout persists across
+    sessions'. Users resize the identity inspector / pose corrector / viewport
+    panels and expect them to stay put on next launch. Without persistence,
+    every session starts with default ratios — especially frustrating when
+    the default doesn't match the user's monitor or workflow.
+    """
+
+    def test_has_settings_instance(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        from PySide6.QtCore import QSettings
+        assert isinstance(tab._settings, QSettings)
+
+    def test_has_main_splitter_as_attribute(self, qapp):
+        """main_splitter must be an instance attr for save/restore access."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        from PySide6.QtWidgets import QSplitter
+        assert isinstance(tab._main_splitter, QSplitter)
+
+    def test_save_splitter_state_writes_settings(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._save_splitter_state()
+
+        # All three keys should be set
+        assert tab._settings.value("multi_person/main_splitter") is not None
+        assert tab._settings.value("multi_person/vert_splitter") is not None
+        assert tab._settings.value("multi_person/bottom_splitter") is not None
+
+    def test_restore_splitter_state_round_trip(self, qapp):
+        """Save → create new tab → verify state is restored."""
+        session = Session()
+        tab1 = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        # Set specific sizes on vert_splitter (viewport : panels)
+        tab1._vert_splitter.setSizes([400, 200])
+        tab1._bottom_splitter.setSizes([300, 300])
+        tab1._save_splitter_state()
+
+        saved_vert = tab1._vert_splitter.saveState()
+        saved_bottom = tab1._bottom_splitter.saveState()
+
+        # New tab should restore from QSettings
+        tab2 = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        assert tab2._vert_splitter.saveState() == saved_vert
+        assert tab2._bottom_splitter.saveState() == saved_bottom
+
+    def test_restore_handles_missing_settings(self, qapp):
+        """Tab should construct fine when no prior splitter state exists."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        # Clear any saved state
+        tab._settings.remove("multi_person/main_splitter")
+        tab._settings.remove("multi_person/vert_splitter")
+        tab._settings.remove("multi_person/bottom_splitter")
+        # Restore should not raise
+        tab._restore_splitter_state()
+
+    def test_splitter_moved_triggers_save(self, qapp):
+        """Moving a splitter should auto-save state."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        # Clear saved state
+        tab._settings.remove("multi_person/vert_splitter")
+
+        # Emit splitterMoved signal (pos, index)
+        tab._vert_splitter.splitterMoved.emit(200, 0)
+
+        # State should now be saved
+        assert tab._settings.value("multi_person/vert_splitter") is not None
+
+    def test_all_three_splitters_connected(self, qapp):
+        """All three splitters must have splitterMoved wired to save."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+
+        # Clear all saved state
+        for key in ("main_splitter", "vert_splitter", "bottom_splitter"):
+            tab._settings.remove(f"multi_person/{key}")
+
+        # Fire splitterMoved on each
+        tab._main_splitter.splitterMoved.emit(100, 0)
+        assert tab._settings.value("multi_person/main_splitter") is not None
+
+        tab._settings.remove("multi_person/vert_splitter")
+        tab._vert_splitter.splitterMoved.emit(200, 0)
+        assert tab._settings.value("multi_person/vert_splitter") is not None
+
+        tab._settings.remove("multi_person/bottom_splitter")
+        tab._bottom_splitter.splitterMoved.emit(150, 0)
+        assert tab._settings.value("multi_person/bottom_splitter") is not None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _create_test_video(path: Path, frames: int = 5, size: tuple = (64, 48)) -> Path:
     """Create a minimal video file for testing."""
     import cv2
