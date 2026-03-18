@@ -40,6 +40,7 @@ from views.video_player import VideoPlayer
 from views.confidence_timeline import ConfidenceTimeline
 from views.identity_inspector import IdentityInspector
 from views.single_person_tab import _DropArea, VIDEO_EXTENSIONS
+from views.bbox_overlay import render_bbox_overlay
 from workers.pipeline_orchestrator import MultiPersonWorker
 
 
@@ -106,6 +107,7 @@ class MultiPersonTab(QWidget):
         self._video_path: Path | None = None
         self._worker: MultiPersonWorker | None = None
         self._running = False
+        self._show_all_tracks = False
 
         self._setup_ui()
         self._connect_signals()
@@ -282,9 +284,11 @@ class MultiPersonTab(QWidget):
         # Track overview → seek + select person
         self._track_overview.person_clicked.connect(self._on_track_clicked)
 
-        # Identity inspector → video player seek, person selection
+        # Identity inspector → video player seek, person selection, overlay refresh
         self._identity_panel.frame_requested.connect(self._video_player.seek)
         self._identity_panel.person_changed.connect(self._on_identity_person_changed)
+        self._identity_panel.bbox_overlay_changed.connect(self._on_bbox_overlay_changed)
+        self._identity_panel.keyframe_changed.connect(self._on_keyframe_changed)
 
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
@@ -303,15 +307,34 @@ class MultiPersonTab(QWidget):
         self.status_message.emit(f"Selected Person {person_id} at frame {frame_idx}")
 
     def _on_identity_person_changed(self, person_id: int):
-        """Handle person change from identity inspector."""
+        """Handle person change from identity inspector — redraw overlay."""
         self._session.selected_person = person_id
         self.person_selected.emit(person_id)
+        self._show_frame(self._session.current_frame)
+
+    def _on_bbox_overlay_changed(self, data: object):
+        """Handle show-all-tracks toggle or other overlay parameter changes."""
+        if isinstance(data, dict):
+            if "show_all" in data:
+                self._show_all_tracks = data["show_all"]
+        self._show_frame(self._session.current_frame)
+
+    def _on_keyframe_changed(self, person_id: int, frame_idx: int):
+        """Redraw overlay when keyframes change (may affect bbox corrections)."""
+        self._show_frame(self._session.current_frame)
 
     def _show_frame(self, frame_idx: int):
-        """Display the current frame (with overlays in future)."""
+        """Display the current frame with bbox overlays."""
         frame = self._video_player.get_raw_frame(frame_idx)
         if frame is not None:
-            self._video_player.set_frame(frame)
+            composited = render_bbox_overlay(
+                frame,
+                self._session,
+                frame_idx,
+                selected_person=self._session.selected_person,
+                show_all_tracks=self._show_all_tracks,
+            )
+            self._video_player.set_frame(composited)
 
     # ------------------------------------------------------------------
     # Video loading
