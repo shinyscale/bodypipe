@@ -537,18 +537,21 @@ class TestMultiPersonTabMeshIntegration:
         assert tab._mesh_viewport._session is s
 
     def test_mesh_viewport_in_splitter(self, qapp):
-        """MeshViewport should be in the bottom splitter."""
+        """MeshViewport should be in the bottom splitter (wrapped by PoseCorrectorPanel)."""
         from views.multi_person_tab import MultiPersonTab
 
         s = Session()
         tab = MultiPersonTab(s, Path("."))
         splitter = tab._bottom_splitter
+        # PoseCorrectorPanel wraps MeshViewport; the panel is in the splitter
         found = False
         for i in range(splitter.count()):
-            if splitter.widget(i) is tab._mesh_viewport:
+            if splitter.widget(i) is tab._pose_corrector:
                 found = True
                 break
-        assert found, "MeshViewport not found in bottom splitter"
+        assert found, "PoseCorrectorPanel not found in bottom splitter"
+        # MeshViewport is accessible through the pose corrector
+        assert tab._mesh_viewport is tab._pose_corrector.mesh_viewport
 
     def test_frame_change_updates_viewport(self, qapp):
         """Frame change handler should call mesh viewport."""

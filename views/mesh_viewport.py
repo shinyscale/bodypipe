@@ -646,6 +646,11 @@ class MeshViewport(_BaseWidget):
         self._selected_joint: int = -1  # -1 = no selection
         self._show_skeleton: bool = True  # whether to draw skeleton overlay
 
+        # Pose override for real-time preview (Phase 3.4)
+        # dict with keys: frame_idx (int), global_orient (3,) optional,
+        #                  body_pose {int: (3,)} optional
+        self._pose_override: dict | None = None
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -730,6 +735,71 @@ class MeshViewport(_BaseWidget):
         self._show_skeleton = show
         if _HAS_GL:
             self.update()
+
+    def set_pose_override(self, override: dict | None):
+        """Set temporary per-frame pose override for real-time preview.
+
+        Parameters
+        ----------
+        override : dict or None
+            If dict, keys are:
+                frame_idx (int) — which frame to override
+                global_orient (3,) ndarray — optional global orientation
+                body_pose (dict[int, (3,)]) — optional sparse body joint overrides
+            Pass None to clear all overrides.
+        """
+        self._pose_override = override
+        # Invalidate cache for affected frame to force recomputation
+        if override is not None and self._person_id >= 0:
+            frame_idx = override.get("frame_idx", self._current_frame)
+            self._vertex_cache.pop((self._person_id, frame_idx), None)
+        self._refresh_mesh()
+
+    def invalidate_cache(self, person_id: int | None = None, frame_idx: int | None = None):
+        """Invalidate vertex cache entries.
+
+        If both person_id and frame_idx are given, removes that single entry.
+        Otherwise clears the entire cache.
+        """
+        if person_id is not None and frame_idx is not None:
+            self._vertex_cache.pop((person_id, frame_idx), None)
+        else:
+            self._vertex_cache.clear()
+
+    def _apply_override_to_params(self, params: dict, frame_idx: int) -> dict:
+        """Create a modified copy of params with pose override applied.
+
+        Returns a shallow copy of params with overridden arrays replaced
+        by numpy copies. Non-overridden arrays are left as-is.
+        """
+        if self._pose_override is None:
+            return params
+
+        ov_frame = self._pose_override.get("frame_idx", self._current_frame)
+        if ov_frame != frame_idx:
+            return params
+
+        params = dict(params)
+
+        go_override = self._pose_override.get("global_orient")
+        bp_overrides = self._pose_override.get("body_pose")
+
+        if go_override is not None:
+            go = np.array(params["global_orient"], dtype=np.float32)
+            if go.ndim >= 2 and frame_idx < go.shape[0]:
+                go[frame_idx] = go_override
+            params["global_orient"] = go
+
+        if bp_overrides:
+            bp = np.array(params["body_pose"], dtype=np.float32)
+            if bp.ndim == 2 and bp.shape[-1] != 3:
+                bp = bp.reshape(bp.shape[0], -1, 3)
+            for j_idx, aa in bp_overrides.items():
+                if bp.ndim >= 3 and frame_idx < bp.shape[0] and j_idx < bp.shape[1]:
+                    bp[frame_idx, j_idx] = aa
+            params["body_pose"] = bp
+
+        return params
 
     # ------------------------------------------------------------------
     # Camera modes & mouse interaction
@@ -894,8 +964,17 @@ class MeshViewport(_BaseWidget):
         track = self._session.person_tracks.get(self._person_id)
         if track is None or track.smplx_params is None:
             return None
+
+        params = track.smplx_params
+
+        # Apply pose override for real-time preview
+        if self._pose_override is not None:
+            ov_frame = self._pose_override.get("frame_idx", self._current_frame)
+            if ov_frame == self._current_frame:
+                params = self._apply_override_to_params(params, self._current_frame)
+
         try:
-            return forward_kinematics(track.smplx_params, self._current_frame)
+            return forward_kinematics(params, self._current_frame)
         except Exception as e:
             logger.warning("FK failed (pid=%d, f=%d): %s",
                            self._person_id, self._current_frame, e)
@@ -964,7 +1043,14 @@ class MeshViewport(_BaseWidget):
         when the model / params are unavailable.
         """
         cache_key = (person_id, frame_idx)
-        if cache_key in self._vertex_cache:
+
+        # Skip cache when pose override is active for this frame
+        override_active = (
+            self._pose_override is not None
+            and self._pose_override.get("frame_idx", self._current_frame) == frame_idx
+        )
+
+        if not override_active and cache_key in self._vertex_cache:
             return self._vertex_cache[cache_key]
 
         if not self._load_model():
@@ -977,6 +1063,10 @@ class MeshViewport(_BaseWidget):
             return None
 
         params = track.smplx_params
+
+        # Apply pose override for real-time preview
+        if override_active:
+            params = self._apply_override_to_params(params, frame_idx)
 
         try:
             import torch
@@ -1030,12 +1120,14 @@ class MeshViewport(_BaseWidget):
                 vertices = verts[0].cpu().numpy().astype(np.float32)
                 normals = compute_normals(vertices, self._faces)
 
-                # Cache (evict oldest when full)
-                if len(self._vertex_cache) >= _CACHE_MAX:
-                    oldest = next(iter(self._vertex_cache))
-                    del self._vertex_cache[oldest]
                 result = (vertices, normals)
-                self._vertex_cache[cache_key] = result
+
+                # Only cache non-overridden results
+                if not override_active:
+                    if len(self._vertex_cache) >= _CACHE_MAX:
+                        oldest = next(iter(self._vertex_cache))
+                        del self._vertex_cache[oldest]
+                    self._vertex_cache[cache_key] = result
 
                 return result
         except Exception as e:

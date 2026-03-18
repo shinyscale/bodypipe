@@ -1,0 +1,708 @@
+"""Pose Corrector panel — joint selection, euler sliders, real-time preview.
+
+Why: The pose corrector enables interactive correction of bad GVHMR poses
+(flipped orientations, impossible limb positions during lifts). Users select
+a joint via viewport click or dropdown, adjust rotation with euler sliders
+(real-time mesh preview), then commit corrections to a CorrectionTrack.
+Corrections are interpolated between keyframes via SLERP and re-exported
+to BVH/FBX.
+
+Phase 3.4: Person selector, joint selector, euler sliders, apply, reset.
+Phase 3.5 will add quick-fix buttons and corrections table.
+Phase 3.6 will add space overrides and BVH/FBX export.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import numpy as np
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGroupBox,
+    QLabel,
+    QComboBox,
+    QPushButton,
+    QDoubleSpinBox,
+    QSlider,
+    QSplitter,
+)
+from PySide6.QtCore import Signal, Qt
+
+from models.session import Session
+from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
+
+log = logging.getLogger(__name__)
+
+# Number of body joints (0-21); hand joints are 22-51
+_N_BODY_JOINTS = 22
+
+
+def _safe_import_pose_correction():
+    """Lazily import pose_correction from GVHMR backend.
+
+    Returns (axis_angle_to_euler_deg, euler_deg_to_axis_angle, CorrectionTrack)
+    or (None, None, None) when backend is unavailable.
+    """
+    try:
+        from pose_correction import (
+            axis_angle_to_euler_deg,
+            euler_deg_to_axis_angle,
+            CorrectionTrack,
+        )
+        return axis_angle_to_euler_deg, euler_deg_to_axis_angle, CorrectionTrack
+    except ImportError:
+        return None, None, None
+
+
+def axis_angle_to_euler_deg_fallback(aa: np.ndarray) -> np.ndarray:
+    """Fallback euler conversion when GVHMR backend is unavailable."""
+    try:
+        from scipy.spatial.transform import Rotation
+        return Rotation.from_rotvec(aa).as_euler("XYZ", degrees=True).astype(np.float32)
+    except ImportError:
+        return np.zeros(3, dtype=np.float32)
+
+
+def euler_deg_to_axis_angle_fallback(euler_deg: np.ndarray) -> np.ndarray:
+    """Fallback axis-angle conversion when GVHMR backend is unavailable."""
+    try:
+        from scipy.spatial.transform import Rotation
+        return Rotation.from_euler("XYZ", euler_deg, degrees=True).as_rotvec().astype(np.float32)
+    except ImportError:
+        return np.zeros(3, dtype=np.float32)
+
+
+def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
+    """Get current XYZ euler angles (degrees) for a joint.
+
+    Checks CorrectionTrack first, then falls back to raw params.
+    Returns (3,) float32 array.
+    """
+    aa_to_euler, _, _ = _safe_import_pose_correction()
+    if aa_to_euler is None:
+        aa_to_euler = axis_angle_to_euler_deg_fallback
+
+    aa = _get_joint_axis_angle(session, person_id, frame_idx, joint_idx)
+    return aa_to_euler(aa)
+
+
+def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
+    """Get current axis-angle (3,) for a joint, including committed corrections."""
+    if session is None or person_id < 0:
+        return np.zeros(3, dtype=np.float32)
+
+    track = session.person_tracks.get(person_id)
+    if track is None or track.smplx_params is None:
+        return np.zeros(3, dtype=np.float32)
+
+    params = track.smplx_params
+
+    # Check for existing committed correction first
+    ct = session.correction_tracks.get(person_id)
+    if ct is not None:
+        corr = ct.get_correction(frame_idx)
+        if corr is not None:
+            if joint_idx == 0 and corr.global_orient is not None:
+                return np.asarray(corr.global_orient, dtype=np.float32).ravel()[:3]
+            elif joint_idx > 0 and corr.body_pose is not None:
+                bp_idx = joint_idx - 1
+                if bp_idx in corr.body_pose:
+                    return np.asarray(corr.body_pose[bp_idx], dtype=np.float32).ravel()[:3]
+
+    # Fall back to raw params
+    try:
+        if joint_idx == 0:
+            go = np.asarray(params["global_orient"], dtype=np.float32)
+            if go.ndim >= 2 and frame_idx < go.shape[0]:
+                return go[frame_idx].ravel()[:3]
+            elif go.ndim == 1:
+                return go.ravel()[:3]
+        elif 1 <= joint_idx <= 21:
+            bp = np.asarray(params["body_pose"], dtype=np.float32)
+            if bp.ndim == 2 and bp.shape[-1] != 3:
+                bp = bp.reshape(bp.shape[0], -1, 3)
+            bp_idx = joint_idx - 1
+            if bp.ndim >= 3 and frame_idx < bp.shape[0] and bp_idx < bp.shape[1]:
+                return bp[frame_idx, bp_idx].ravel()[:3]
+            elif bp.ndim == 2 and bp_idx < bp.shape[0]:
+                return bp[bp_idx].ravel()[:3]
+        elif 22 <= joint_idx <= 36:
+            lh = params.get("left_hand_pose")
+            if lh is not None:
+                lh = np.asarray(lh, dtype=np.float32)
+                if lh.ndim == 2 and lh.shape[-1] != 3:
+                    lh = lh.reshape(lh.shape[0], -1, 3)
+                hi = joint_idx - 22
+                if lh.ndim >= 3 and frame_idx < lh.shape[0] and hi < lh.shape[1]:
+                    return lh[frame_idx, hi].ravel()[:3]
+        elif 37 <= joint_idx <= 51:
+            rh = params.get("right_hand_pose")
+            if rh is not None:
+                rh = np.asarray(rh, dtype=np.float32)
+                if rh.ndim == 2 and rh.shape[-1] != 3:
+                    rh = rh.reshape(rh.shape[0], -1, 3)
+                hi = joint_idx - 37
+                if rh.ndim >= 3 and frame_idx < rh.shape[0] and hi < rh.shape[1]:
+                    return rh[frame_idx, hi].ravel()[:3]
+    except Exception:
+        pass
+
+    return np.zeros(3, dtype=np.float32)
+
+
+class PoseCorrectorPanel(QWidget):
+    """Pose correction panel with embedded 3D viewport and joint controls.
+
+    Signals
+    -------
+    joint_selected(int)
+        Emitted when a joint is selected (by viewport click or dropdown).
+    correction_applied(int, int)
+        Emitted when a correction is committed (person_id, frame_index).
+    """
+
+    joint_selected = Signal(int)
+    correction_applied = Signal(int, int)
+
+    def __init__(self, session: Session, gvhmr_root: Path | None = None, parent=None):
+        super().__init__(parent)
+        self._session = session
+        self._gvhmr_root = gvhmr_root
+        self._current_person: int = -1
+        self._current_frame: int = 0
+        self._current_joint: int = -1
+        self._updating_sliders: bool = False  # guard against signal loops
+
+        self._setup_ui()
+        self._connect_signals()
+
+    @property
+    def mesh_viewport(self) -> MeshViewport:
+        """Expose embedded MeshViewport for external signal wiring."""
+        return self._viewport
+
+    # ------------------------------------------------------------------
+    # UI setup
+    # ------------------------------------------------------------------
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # ---- Left: Viewport + camera/color mode ----
+        viewport_widget = QWidget()
+        vp_layout = QVBoxLayout(viewport_widget)
+        vp_layout.setContentsMargins(4, 4, 4, 4)
+
+        self._viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
+        self._viewport.set_session(self._session)
+        vp_layout.addWidget(self._viewport, stretch=1)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Camera:"))
+        self._camera_combo = QComboBox()
+        self._camera_combo.addItems(["In-camera", "Free orbit"])
+        mode_row.addWidget(self._camera_combo)
+        mode_row.addWidget(QLabel("Color:"))
+        self._color_combo = QComboBox()
+        self._color_combo.addItems(["Solid", "Joint influence", "Confidence"])
+        mode_row.addWidget(self._color_combo)
+        mode_row.addStretch()
+        vp_layout.addLayout(mode_row)
+
+        splitter.addWidget(viewport_widget)
+
+        # ---- Right: Joint controls ----
+        controls = QWidget()
+        ctrl_layout = QVBoxLayout(controls)
+        ctrl_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Person selector
+        person_group = QHBoxLayout()
+        person_group.addWidget(QLabel("Person:"))
+        self._person_combo = QComboBox()
+        person_group.addWidget(self._person_combo, stretch=1)
+        ctrl_layout.addLayout(person_group)
+
+        # Joint selector
+        joint_group = QHBoxLayout()
+        joint_group.addWidget(QLabel("Joint:"))
+        self._joint_combo = QComboBox()
+        self._populate_joint_dropdown()
+        joint_group.addWidget(self._joint_combo, stretch=1)
+        ctrl_layout.addLayout(joint_group)
+
+        # Joint info label
+        self._joint_info = QLabel("")
+        self._joint_info.setStyleSheet("color: #888; font-size: 11px;")
+        self._joint_info.setWordWrap(True)
+        ctrl_layout.addWidget(self._joint_info)
+
+        # Euler rotation group
+        rot_group = QGroupBox("Rotation (degrees)")
+        rot_layout = QVBoxLayout(rot_group)
+
+        self._euler_x, self._slider_x = self._make_euler_row("X:", rot_layout)
+        self._euler_y, self._slider_y = self._make_euler_row("Y:", rot_layout)
+        self._euler_z, self._slider_z = self._make_euler_row("Z:", rot_layout)
+
+        ctrl_layout.addWidget(rot_group)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setToolTip("Commit correction as keyframe")
+        btn_row.addWidget(self._apply_btn)
+
+        self._reset_joint_btn = QPushButton("Reset Joint")
+        self._reset_joint_btn.setToolTip("Reset selected joint to original pose")
+        btn_row.addWidget(self._reset_joint_btn)
+
+        self._reset_all_btn = QPushButton("Reset All")
+        self._reset_all_btn.setToolTip("Remove all corrections at this frame")
+        btn_row.addWidget(self._reset_all_btn)
+
+        ctrl_layout.addLayout(btn_row)
+
+        ctrl_layout.addStretch()
+
+        splitter.addWidget(controls)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        layout.addWidget(splitter)
+
+    def _make_euler_row(self, label: str, parent_layout: QVBoxLayout):
+        """Create a slider + spinbox row for one euler angle.
+
+        Returns (spinbox, slider) tuple.
+        """
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(-180, 180)
+        slider.setValue(0)
+        slider.setSingleStep(1)
+        row.addWidget(slider, stretch=1)
+
+        spinbox = QDoubleSpinBox()
+        spinbox.setRange(-180.0, 180.0)
+        spinbox.setValue(0.0)
+        spinbox.setSingleStep(0.1)
+        spinbox.setDecimals(1)
+        spinbox.setSuffix("°")
+        spinbox.setFixedWidth(80)
+        row.addWidget(spinbox)
+
+        parent_layout.addLayout(row)
+        return spinbox, slider
+
+    def _populate_joint_dropdown(self):
+        """Populate joint dropdown with all SMPL-X joints."""
+        self._joint_combo.clear()
+        # Body joints (0-21)
+        for i in range(min(_N_BODY_JOINTS, len(JOINT_NAMES))):
+            self._joint_combo.addItem(f"{i}: {JOINT_NAMES[i]}", userData=i)
+        # Separator then hand joints
+        if len(JOINT_NAMES) > _N_BODY_JOINTS:
+            self._joint_combo.insertSeparator(self._joint_combo.count())
+            for i in range(_N_BODY_JOINTS, len(JOINT_NAMES)):
+                self._joint_combo.addItem(f"{i}: {JOINT_NAMES[i]}", userData=i)
+
+    # ------------------------------------------------------------------
+    # Signal wiring
+    # ------------------------------------------------------------------
+
+    def _connect_signals(self):
+        # Viewport joint click → update dropdown + sliders
+        self._viewport.joint_clicked.connect(self._on_joint_clicked)
+
+        # Dropdowns
+        self._joint_combo.currentIndexChanged.connect(self._on_joint_dropdown_changed)
+        self._person_combo.currentIndexChanged.connect(self._on_person_dropdown_changed)
+
+        # Camera/color mode
+        self._camera_combo.currentIndexChanged.connect(self._on_camera_mode_changed)
+        self._color_combo.currentIndexChanged.connect(self._on_color_mode_changed)
+
+        # Euler spinboxes (primary — sliders sync from these)
+        self._euler_x.valueChanged.connect(self._on_euler_changed)
+        self._euler_y.valueChanged.connect(self._on_euler_changed)
+        self._euler_z.valueChanged.connect(self._on_euler_changed)
+
+        # Slider → spinbox sync
+        self._slider_x.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_x, v))
+        self._slider_y.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_y, v))
+        self._slider_z.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_z, v))
+
+        # Action buttons
+        self._apply_btn.clicked.connect(self._on_apply)
+        self._reset_joint_btn.clicked.connect(self._on_reset_joint)
+        self._reset_all_btn.clicked.connect(self._on_reset_all)
+
+    # ------------------------------------------------------------------
+    # Public API (used by MultiPersonTab)
+    # ------------------------------------------------------------------
+
+    def set_session(self, session: Session):
+        """Bind session data source."""
+        self._session = session
+        self._viewport.set_session(session)
+
+    def set_person(self, person_id: int):
+        """Select person externally (e.g., from identity inspector)."""
+        if person_id == self._current_person:
+            return
+        self._current_person = person_id
+        self._viewport.set_person(person_id)
+        # Sync dropdown without re-triggering the callback
+        self._person_combo.blockSignals(True)
+        for i in range(self._person_combo.count()):
+            if self._person_combo.itemData(i) == person_id:
+                self._person_combo.setCurrentIndex(i)
+                break
+        self._person_combo.blockSignals(False)
+        self._update_sliders()
+
+    def on_frame_changed(self, frame_idx: int):
+        """Update frame externally."""
+        self._current_frame = frame_idx
+        self._viewport.on_frame_changed(frame_idx)
+        # Clear any in-progress preview when navigating frames
+        self._viewport.set_pose_override(None)
+        self._update_sliders()
+
+    def refresh(self):
+        """Refresh person list from session."""
+        self._update_person_dropdown()
+
+    # ------------------------------------------------------------------
+    # Dropdown handlers
+    # ------------------------------------------------------------------
+
+    def _on_joint_clicked(self, joint_idx: int):
+        """Handle joint click from viewport — sync dropdown."""
+        for i in range(self._joint_combo.count()):
+            if self._joint_combo.itemData(i) == joint_idx:
+                self._joint_combo.setCurrentIndex(i)
+                return
+
+    def _on_joint_dropdown_changed(self, idx: int):
+        """Handle joint selection from dropdown."""
+        if idx < 0:
+            return
+        joint_idx = self._joint_combo.itemData(idx)
+        if joint_idx is None:
+            return
+        self._current_joint = joint_idx
+        self._viewport.highlight_joint(joint_idx)
+        # Clear any in-progress preview for the previous joint
+        self._viewport.set_pose_override(None)
+        self._update_sliders()
+        self._update_joint_info()
+        self.joint_selected.emit(joint_idx)
+
+    def _on_person_dropdown_changed(self, idx: int):
+        """Handle person selection from dropdown."""
+        if idx < 0:
+            return
+        person_id = self._person_combo.itemData(idx)
+        if person_id is None:
+            return
+        self._current_person = person_id
+        self._viewport.set_person(person_id)
+        self._viewport.set_pose_override(None)
+        self._update_sliders()
+
+    def _on_camera_mode_changed(self, idx: int):
+        """Handle camera mode dropdown change."""
+        mode = "incam" if idx == 0 else "orbit"
+        self._viewport.set_camera_mode(mode)
+
+    def _on_color_mode_changed(self, idx: int):
+        """Handle color mode dropdown change."""
+        modes = ["solid", "joint", "confidence"]
+        if 0 <= idx < len(modes):
+            self._viewport.set_color_mode(modes[idx])
+
+    # ------------------------------------------------------------------
+    # Euler slider handlers
+    # ------------------------------------------------------------------
+
+    def _on_slider_moved(self, spinbox: QDoubleSpinBox, value: int):
+        """Sync slider (integer) → spinbox (float)."""
+        if not self._updating_sliders:
+            self._updating_sliders = True
+            spinbox.setValue(float(value))
+            self._updating_sliders = False
+
+    def _on_euler_changed(self):
+        """Handle euler spinbox value change — sync slider + preview."""
+        if self._updating_sliders:
+            return
+        self._updating_sliders = True
+        # Sync spinbox → slider (truncate to int)
+        self._slider_x.setValue(int(self._euler_x.value()))
+        self._slider_y.setValue(int(self._euler_y.value()))
+        self._slider_z.setValue(int(self._euler_z.value()))
+        self._updating_sliders = False
+
+        # Real-time mesh preview
+        self._preview_correction()
+
+    # ------------------------------------------------------------------
+    # Preview + Apply + Reset
+    # ------------------------------------------------------------------
+
+    def _preview_correction(self):
+        """Apply current euler values as a temporary pose override for preview."""
+        if self._current_joint < 0 or self._current_person < 0:
+            return
+
+        _, euler_to_aa, _ = _safe_import_pose_correction()
+        if euler_to_aa is None:
+            euler_to_aa = euler_deg_to_axis_angle_fallback
+
+        euler = np.array([
+            self._euler_x.value(),
+            self._euler_y.value(),
+            self._euler_z.value(),
+        ], dtype=np.float32)
+
+        aa = euler_to_aa(euler)
+
+        override = {"frame_idx": self._current_frame}
+        if self._current_joint == 0:
+            override["global_orient"] = aa
+        elif 1 <= self._current_joint <= 21:
+            override["body_pose"] = {self._current_joint - 1: aa}
+        else:
+            # Hand joints: no preview override support yet (body joints only)
+            return
+
+        self._viewport.set_pose_override(override)
+
+    def _on_apply(self):
+        """Commit current correction to CorrectionTrack."""
+        if self._current_joint < 0 or self._current_person < 0:
+            return
+
+        _, euler_to_aa, CorrectionTrack = _safe_import_pose_correction()
+        if euler_to_aa is None or CorrectionTrack is None:
+            log.warning("Cannot apply correction: pose_correction backend unavailable")
+            return
+
+        euler = np.array([
+            self._euler_x.value(),
+            self._euler_y.value(),
+            self._euler_z.value(),
+        ], dtype=np.float32)
+
+        aa = euler_to_aa(euler)
+
+        pid = self._current_person
+        frame = self._current_frame
+
+        # Ensure correction track exists
+        if pid not in self._session.correction_tracks:
+            self._session.correction_tracks[pid] = CorrectionTrack(person_id=pid)
+
+        ct = self._session.correction_tracks[pid]
+
+        # Build correction (merge with existing if any)
+        go = None
+        bp = None
+        ctype = "joint"
+
+        if self._current_joint == 0:
+            go = aa
+            ctype = "global_orient"
+        elif 1 <= self._current_joint <= 21:
+            bp = {self._current_joint - 1: aa}
+        else:
+            # Hand joints cannot be committed to CorrectionTrack
+            log.info("Hand joint corrections not supported in CorrectionTrack")
+            return
+
+        # Merge with existing correction at this frame
+        existing = ct.get_correction(frame)
+        if existing is not None:
+            if go is None:
+                go = existing.global_orient
+            if bp is None:
+                bp = existing.body_pose
+            elif existing.body_pose is not None:
+                merged_bp = dict(existing.body_pose)
+                merged_bp.update(bp)
+                bp = merged_bp
+
+        ct.add_correction(
+            frame_index=frame,
+            correction_type=ctype,
+            global_orient=go,
+            body_pose=bp,
+        )
+
+        # Also update the raw params so the mesh renders the corrected pose
+        # without needing the override active
+        self._apply_to_raw_params(self._current_joint, aa, frame)
+
+        # Clear preview override (correction is now committed)
+        self._viewport.set_pose_override(None)
+
+        # Persist to file
+        self._save_correction_track(pid)
+
+        log.info("Correction applied: person=%d, frame=%d, joint=%d",
+                 pid, frame, self._current_joint)
+        self.correction_applied.emit(pid, frame)
+
+    def _on_reset_joint(self):
+        """Reset current joint to original pose (remove from correction)."""
+        if self._current_joint < 0 or self._current_person < 0:
+            return
+
+        pid = self._current_person
+        frame = self._current_frame
+
+        ct = self._session.correction_tracks.get(pid)
+        if ct is not None:
+            corr = ct.get_correction(frame)
+            if corr is not None:
+                if self._current_joint == 0:
+                    corr.global_orient = None
+                elif corr.body_pose is not None:
+                    bp_idx = self._current_joint - 1
+                    corr.body_pose.pop(bp_idx, None)
+                    if not corr.body_pose:
+                        corr.body_pose = None
+
+                # If correction is now empty, remove it entirely
+                if (corr.global_orient is None
+                        and corr.body_pose is None
+                        and corr.transl is None):
+                    ct.remove_correction(frame)
+
+                self._save_correction_track(pid)
+
+        # Clear preview and invalidate cache
+        self._viewport.set_pose_override(None)
+        self._viewport.invalidate_cache(pid, frame)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+
+    def _on_reset_all(self):
+        """Remove all corrections at current frame."""
+        if self._current_person < 0:
+            return
+
+        pid = self._current_person
+        frame = self._current_frame
+
+        ct = self._session.correction_tracks.get(pid)
+        if ct is not None:
+            ct.remove_correction(frame)
+            self._save_correction_track(pid)
+
+        # Clear preview and invalidate cache
+        self._viewport.set_pose_override(None)
+        self._viewport.invalidate_cache(pid, frame)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _update_person_dropdown(self):
+        """Populate person dropdown from session."""
+        self._person_combo.blockSignals(True)
+        self._person_combo.clear()
+        if self._session:
+            for pid in sorted(self._session.person_tracks.keys()):
+                if pid not in self._session.inactive_tracks:
+                    self._person_combo.addItem(f"Person {pid}", userData=pid)
+        self._person_combo.blockSignals(False)
+
+    def _update_sliders(self):
+        """Update euler sliders to reflect current joint's rotation."""
+        if self._current_joint < 0 or self._current_person < 0:
+            return
+
+        euler = get_joint_euler(
+            self._session, self._current_person,
+            self._current_frame, self._current_joint,
+        )
+
+        self._updating_sliders = True
+        self._euler_x.setValue(float(euler[0]))
+        self._euler_y.setValue(float(euler[1]))
+        self._euler_z.setValue(float(euler[2]))
+        self._slider_x.setValue(int(round(euler[0])))
+        self._slider_y.setValue(int(round(euler[1])))
+        self._slider_z.setValue(int(round(euler[2])))
+        self._updating_sliders = False
+
+    def _update_joint_info(self):
+        """Update joint info label with name and parent."""
+        if self._current_joint < 0:
+            self._joint_info.setText("")
+            return
+        if self._current_joint >= len(JOINT_NAMES):
+            self._joint_info.setText("Unknown joint")
+            return
+        name = JOINT_NAMES[self._current_joint]
+        parent_idx = JOINT_PARENTS[self._current_joint]
+        parent_name = JOINT_NAMES[parent_idx] if 0 <= parent_idx < len(JOINT_NAMES) else "root"
+        self._joint_info.setText(f"{name} (parent: {parent_name})")
+
+    def _apply_to_raw_params(self, joint_idx: int, aa: np.ndarray, frame_idx: int):
+        """Apply axis-angle correction directly to session params.
+
+        This updates the raw smplx_params so the mesh renders correctly
+        without the temporary pose override.
+        """
+        track = self._session.person_tracks.get(self._current_person)
+        if not track or not track.smplx_params:
+            return
+
+        params = track.smplx_params
+
+        if joint_idx == 0:
+            go = np.array(params.get("global_orient", []), dtype=np.float32)
+            if go.ndim >= 2 and frame_idx < go.shape[0]:
+                go[frame_idx] = aa.astype(np.float32)
+                params["global_orient"] = go
+        elif 1 <= joint_idx <= 21:
+            bp = np.array(params.get("body_pose", []), dtype=np.float32)
+            if bp.ndim == 2 and bp.shape[-1] != 3:
+                bp = bp.reshape(bp.shape[0], -1, 3)
+            bp_idx = joint_idx - 1
+            if bp.ndim >= 3 and frame_idx < bp.shape[0] and bp_idx < bp.shape[1]:
+                bp[frame_idx, bp_idx] = aa.astype(np.float32)
+                params["body_pose"] = bp
+
+        # Invalidate vertex cache for this frame
+        self._viewport.invalidate_cache(self._current_person, frame_idx)
+
+    def _save_correction_track(self, person_id: int):
+        """Persist correction track to JSON file in person directory."""
+        track = self._session.person_tracks.get(person_id)
+        ct = self._session.correction_tracks.get(person_id)
+        if track is None or ct is None:
+            return
+
+        if track.person_dir is not None:
+            path = Path(track.person_dir) / "correction_track.json"
+            try:
+                ct.save_json(path)
+                log.info("Saved correction track: %s", path)
+            except Exception as e:
+                log.warning("Failed to save correction track: %s", e)
