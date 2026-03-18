@@ -656,6 +656,76 @@ _ORBIT_DEFAULT_PITCH = 10.0    # slight tilt from above
 _PITCH_LIMIT = 89.0            # clamp to avoid gimbal lock
 _ORBIT_DEFAULT_CENTER = np.array([0.0, 0.0, -2.5], dtype=np.float32)
 
+# Grid floor constants (orbit mode reference plane).
+_GRID_SIZE = 10.0            # half-extent in meters (grid spans ±size)
+_GRID_DIVISIONS = 20         # number of cells per half (total 2*N lines per axis)
+_GRID_COLOR = np.array([0.25, 0.25, 0.28], dtype=np.float32)      # dim gray
+_GRID_AXIS_COLOR = np.array([0.40, 0.40, 0.45], dtype=np.float32) # brighter center lines
+
+
+def compute_grid_lines(
+    size: float = _GRID_SIZE,
+    divisions: int = _GRID_DIVISIONS,
+    y: float = 0.0,
+    center_x: float = 0.0,
+    center_z: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate grid line vertices on the XZ plane at the given Y level.
+
+    The grid is centered at (center_x, y, center_z) and spans ±size in X and Z.
+    Lines parallel to each axis are spaced ``size / divisions`` meters apart.
+    The center lines (through center_x and center_z) use a brighter color.
+
+    Parameters
+    ----------
+    size : float
+        Half-extent of the grid in meters.
+    divisions : int
+        Number of cells per half-axis (total lines = 2*divisions + 1 per axis).
+    y : float
+        Y coordinate of the grid plane (GL space, Y-up).
+    center_x, center_z : float
+        Center of the grid in the XZ plane.
+
+    Returns
+    -------
+    positions : (N, 3) float32 — line segment endpoints (pairs of vertices)
+    colors : (N, 3) float32 — per-vertex colors
+    """
+    step = size / max(divisions, 1)
+    lines_per_axis = 2 * divisions + 1
+    total_verts = lines_per_axis * 2 * 2  # 2 axes × lines × 2 endpoints
+
+    positions = np.zeros((total_verts, 3), dtype=np.float32)
+    colors = np.zeros((total_verts, 3), dtype=np.float32)
+
+    idx = 0
+    for i in range(-divisions, divisions + 1):
+        x = center_x + i * step
+        is_center = (i == 0)
+        color = _GRID_AXIS_COLOR if is_center else _GRID_COLOR
+
+        # Line parallel to Z axis
+        positions[idx] = [x, y, center_z - size]
+        positions[idx + 1] = [x, y, center_z + size]
+        colors[idx] = color
+        colors[idx + 1] = color
+        idx += 2
+
+    for i in range(-divisions, divisions + 1):
+        z = center_z + i * step
+        is_center = (i == 0)
+        color = _GRID_AXIS_COLOR if is_center else _GRID_COLOR
+
+        # Line parallel to X axis
+        positions[idx] = [center_x - size, y, z]
+        positions[idx + 1] = [center_x + size, y, z]
+        colors[idx] = color
+        colors[idx + 1] = color
+        idx += 2
+
+    return positions[:idx], colors[:idx]
+
 
 # ---------------------------------------------------------------------------
 # Widget
@@ -746,6 +816,10 @@ class MeshViewport(_BaseWidget):
         # dict with keys: frame_idx (int), global_orient (3,) optional,
         #                  body_pose {int: (3,)} optional
         self._pose_override: dict | None = None
+
+        # Grid floor state (orbit mode reference plane)
+        self._show_grid: bool = True  # visible by default in orbit mode
+        self._grid_y: float = 0.0  # Y level of the grid in GL space
 
         # Status message for fallback rendering
         self._status_msg: str = ""
@@ -842,6 +916,14 @@ class MeshViewport(_BaseWidget):
         if show == self._show_skeleton:
             return
         self._show_skeleton = show
+        if _HAS_GL:
+            self.update()
+
+    def set_show_grid(self, show: bool):
+        """Toggle grid floor visibility in orbit mode."""
+        if show == self._show_grid:
+            return
+        self._show_grid = show
         if _HAS_GL:
             self.update()
 
@@ -971,6 +1053,8 @@ class MeshViewport(_BaseWidget):
             np.linalg.norm(gl_verts - self._orbit_center, axis=1)
         )
         self._orbit_distance = max(float(extent) * 2.5, 1.0)
+        # Place grid floor at lowest mesh point (feet)
+        self._grid_y = float(np.min(gl_verts[:, 1]))
         self._orbit_auto_centered = True
 
     def mousePressEvent(self, event):
@@ -1315,6 +1399,10 @@ class MeshViewport(_BaseWidget):
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
+        # Grid floor (orbit mode only, drawn first so mesh occludes it)
+        if self._show_grid and self._camera_mode == "orbit":
+            self._draw_grid()
+
         if self._vertices is None or self._n_indices == 0:
             return
 
@@ -1420,6 +1508,44 @@ class MeshViewport(_BaseWidget):
 
         # Restore state
         gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glEnable(gl.GL_CULL_FACE)
+
+        self._shader.release()
+
+    def _draw_grid(self):
+        """Draw grid floor in orbit mode as GL_LINES.
+
+        The grid is drawn on the XZ plane at the mesh's foot level (self._grid_y),
+        centered around the orbit center's XZ position.  It uses depth testing so
+        the mesh properly occludes grid lines behind it.
+        """
+        if not _HAS_GL or not self._gl_ready:
+            return
+
+        positions, colors = compute_grid_lines(
+            y=self._grid_y,
+            center_x=self._orbit_center[0],
+            center_z=self._orbit_center[2],
+        )
+        if len(positions) == 0:
+            return
+
+        self._shader.bind()
+
+        # Uniforms — unlit (full ambient) so grid color is exact
+        self._set_mat4("model", np.eye(4, dtype=np.float32))
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        # Grid uses depth test (mesh occludes it) but no face culling
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        normals = np.zeros_like(positions)
+        self._draw_primitive(gl.GL_LINES, positions, normals, colors, line_width=1.0)
+
         gl.glEnable(gl.GL_CULL_FACE)
 
         self._shader.release()

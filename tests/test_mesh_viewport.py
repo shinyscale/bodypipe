@@ -53,6 +53,11 @@ from views.mesh_viewport import (
     _ORBIT_SENSITIVITY,
     _PITCH_LIMIT,
     _ZOOM_FACTOR,
+    compute_grid_lines,
+    _GRID_SIZE,
+    _GRID_DIVISIONS,
+    _GRID_COLOR,
+    _GRID_AXIS_COLOR,
 )
 
 
@@ -1795,3 +1800,149 @@ class TestMeshViewportColorMode:
 
         assert w._lbs_weights is not None
         assert w._lbs_weights.shape == (100, 55)
+
+
+# ======================================================================
+# Grid floor tests
+# ======================================================================
+
+
+class TestComputeGridLines:
+    """Tests for the pure compute_grid_lines() helper function."""
+
+    def test_returns_positions_and_colors(self):
+        """Should return a tuple of (positions, colors) arrays."""
+        pos, col = compute_grid_lines()
+        assert isinstance(pos, np.ndarray)
+        assert isinstance(col, np.ndarray)
+        assert pos.dtype == np.float32
+        assert col.dtype == np.float32
+
+    def test_shape_matches(self):
+        """positions and colors should have same shape (N, 3)."""
+        pos, col = compute_grid_lines()
+        assert pos.shape == col.shape
+        assert pos.ndim == 2
+        assert pos.shape[1] == 3
+
+    def test_expected_vertex_count(self):
+        """Lines per axis = 2*divisions+1, each line has 2 endpoints, 2 axes."""
+        divisions = 5
+        pos, col = compute_grid_lines(divisions=divisions)
+        lines_per_axis = 2 * divisions + 1
+        expected = lines_per_axis * 2 * 2  # 2 axes × 2 endpoints per line
+        assert len(pos) == expected
+
+    def test_default_divisions(self):
+        """Default divisions should produce correct count."""
+        pos, col = compute_grid_lines()
+        lines_per_axis = 2 * _GRID_DIVISIONS + 1
+        expected = lines_per_axis * 2 * 2
+        assert len(pos) == expected
+
+    def test_y_coordinate(self):
+        """All vertices should be at the specified Y level."""
+        y_val = -1.5
+        pos, _ = compute_grid_lines(y=y_val)
+        np.testing.assert_allclose(pos[:, 1], y_val, atol=1e-7)
+
+    def test_default_y_is_zero(self):
+        """Default Y should be 0."""
+        pos, _ = compute_grid_lines()
+        np.testing.assert_allclose(pos[:, 1], 0.0, atol=1e-7)
+
+    def test_centered_at_custom_position(self):
+        """Grid should be centered at specified center_x, center_z."""
+        cx, cz = 2.0, -3.0
+        size = 5.0
+        pos, _ = compute_grid_lines(size=size, divisions=2, center_x=cx, center_z=cz)
+        # X range should be [cx - size, cx + size]
+        assert pos[:, 0].min() == pytest.approx(cx - size, abs=1e-6)
+        assert pos[:, 0].max() == pytest.approx(cx + size, abs=1e-6)
+        # Z range should be [cz - size, cz + size]
+        assert pos[:, 2].min() == pytest.approx(cz - size, abs=1e-6)
+        assert pos[:, 2].max() == pytest.approx(cz + size, abs=1e-6)
+
+    def test_center_lines_use_axis_color(self):
+        """The center cross-hair lines (i=0) should use _GRID_AXIS_COLOR."""
+        pos, col = compute_grid_lines(divisions=2)
+        # Find vertices on the center Z-parallel line: x ≈ 0
+        center_mask = np.abs(pos[:, 0]) < 1e-6
+        if np.any(center_mask):
+            for idx in np.where(center_mask)[0]:
+                np.testing.assert_allclose(col[idx], _GRID_AXIS_COLOR, atol=1e-6)
+
+    def test_non_center_lines_use_grid_color(self):
+        """Non-center lines should use _GRID_COLOR."""
+        pos, col = compute_grid_lines(size=5.0, divisions=2)
+        # Find a vertex on x = step (non-center)
+        step = 5.0 / 2
+        non_center_mask = np.abs(pos[:, 0] - step) < 1e-6
+        if np.any(non_center_mask):
+            idx = np.where(non_center_mask)[0][0]
+            np.testing.assert_allclose(col[idx], _GRID_COLOR, atol=1e-6)
+
+    def test_single_division(self):
+        """divisions=1 should produce 3 lines per axis (6 lines total, 12 verts)."""
+        pos, _ = compute_grid_lines(divisions=1)
+        assert len(pos) == 3 * 2 * 2  # 3 lines × 2 axes × 2 endpoints
+
+    def test_size_affects_extent(self):
+        """Grid should span ±size in each axis direction."""
+        size = 3.0
+        pos, _ = compute_grid_lines(size=size, divisions=5)
+        assert pos[:, 0].min() == pytest.approx(-size, abs=1e-6)
+        assert pos[:, 0].max() == pytest.approx(size, abs=1e-6)
+        assert pos[:, 2].min() == pytest.approx(-size, abs=1e-6)
+        assert pos[:, 2].max() == pytest.approx(size, abs=1e-6)
+
+
+class TestMeshViewportGrid:
+    """Tests for MeshViewport grid floor state and rendering."""
+
+    def test_show_grid_default_true(self, qapp):
+        """Grid should be visible by default."""
+        w = MeshViewport()
+        assert w._show_grid is True
+
+    def test_set_show_grid(self, qapp):
+        """set_show_grid should toggle the flag."""
+        w = MeshViewport()
+        w.set_show_grid(False)
+        assert w._show_grid is False
+        w.set_show_grid(True)
+        assert w._show_grid is True
+
+    def test_grid_y_default(self, qapp):
+        """Grid Y should default to 0."""
+        w = MeshViewport()
+        assert w._grid_y == 0.0
+
+    def test_grid_y_updated_on_auto_center(self, qapp):
+        """_auto_center_orbit should set _grid_y to lowest GL vertex Y."""
+        w = MeshViewport()
+        # Fake vertices in CV space: Y values 0.5..2.5 (Y down in CV)
+        # After GL flip: Y values -0.5..-2.5 → min is -2.5
+        w._vertices = np.array([
+            [0, 0.5, 1],
+            [0, 1.5, 1],
+            [0, 2.5, 1],
+        ], dtype=np.float32)
+        w._auto_center_orbit()
+        # In GL space, Y is flipped: -0.5, -1.5, -2.5 → min = -2.5
+        assert w._grid_y == pytest.approx(-2.5, abs=1e-5)
+
+    def test_grid_only_in_orbit_mode(self, qapp):
+        """Grid should only be drawn in orbit mode (verified via state check)."""
+        w = MeshViewport()
+        # In incam mode, paintGL should NOT call _draw_grid
+        assert w._camera_mode == "incam"
+        assert w._show_grid is True
+        # The grid draw is guarded by camera_mode == "orbit" in paintGL
+
+    def test_grid_hidden_when_show_grid_false(self, qapp):
+        """Grid should not draw when _show_grid is False."""
+        w = MeshViewport()
+        w._camera_mode = "orbit"
+        w.set_show_grid(False)
+        assert w._show_grid is False
