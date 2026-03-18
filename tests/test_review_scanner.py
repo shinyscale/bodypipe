@@ -623,7 +623,8 @@ class TestMultiPersonTabReprocessWiring:
 
         session = _session_with_tracks()
         tab = MultiPersonTab(session, gvhmr_root=Path("/tmp/gvhmr"))
-        tab._reprocess_worker = "fake"
+        from unittest.mock import MagicMock
+        tab._reprocess_worker = MagicMock()
 
         tab._on_reprocess_error("test error")
         assert tab._reprocess_worker is None

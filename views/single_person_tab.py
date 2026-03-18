@@ -362,6 +362,8 @@ class SinglePersonTab(QWidget):
     def _on_cancel(self):
         if self._worker:
             self._worker.cancel()
+            self._worker.wait()
+            self._worker = None
             self._set_running(False)
             self.status_message.emit("Pipeline cancelled")
             self.log_message.emit("Pipeline cancelled by user", "warning")
@@ -391,7 +393,9 @@ class SinglePersonTab(QWidget):
 
     def _on_finished(self, result: dict):
         self._set_running(False)
-        self._worker = None
+        if self._worker is not None:
+            self._worker.wait()
+            self._worker = None
         self.status_message.emit("GVHMR pipeline complete")
         self.log_message.emit("Pipeline finished successfully", "info")
 
@@ -412,7 +416,9 @@ class SinglePersonTab(QWidget):
 
     def _on_error(self, message: str):
         self._set_running(False)
-        self._worker = None
+        if self._worker is not None:
+            self._worker.wait()
+            self._worker = None
         self.status_message.emit(f"Error: {message}")
         self.log_message.emit(f"Pipeline error: {message}", "error")
 

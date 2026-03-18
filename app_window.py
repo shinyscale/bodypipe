@@ -394,6 +394,16 @@ class AppWindow(QMainWindow):
         self._save_pipeline_configs()
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("windowState", self.saveState())
+        # Wait for any running worker threads to prevent QThread destruction crash
+        for tab in (self._tab_single, self._tab_perf, self._tab_multi):
+            worker = getattr(tab, "_worker", None)
+            if worker is not None and worker.isRunning():
+                worker.cancel()
+                worker.wait(5000)
+            rw = getattr(tab, "_reprocess_worker", None)
+            if rw is not None and rw.isRunning():
+                rw.cancel()
+                rw.wait(5000)
         super().closeEvent(event)
 
     def _connect_tab_signals(self):
