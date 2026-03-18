@@ -62,6 +62,24 @@ class TestSession:
         assert s.num_frames == 0
         assert len(s.person_tracks) == 0
 
+    def test_reset_clears_pipeline_config_fields(self):
+        """reset() must return pipeline config fields to dataclass defaults.
+
+        Why: Without this, loading a new video after changing pipeline settings
+        (e.g. switching to multi-person mode with DPVO enabled) would carry
+        stale config into the fresh session, causing unexpected behavior.
+        """
+        s = Session()
+        s.pipeline_mode = "multi"
+        s.static_cam = False
+        s.use_dpvo = True
+        s.focal_mm = 50.0
+        s.reset()
+        assert s.pipeline_mode == "single"
+        assert s.static_cam is True
+        assert s.use_dpvo is False
+        assert s.focal_mm == 24.0
+
 
 class TestPipelineConfig:
     def test_default_config(self):

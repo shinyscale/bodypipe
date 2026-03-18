@@ -252,13 +252,25 @@ class Session:
             return cls.from_dict(json.load(f))
 
     def reset(self):
-        """Clear all state for a fresh session."""
+        """Clear all state for a fresh session.
+
+        Why: Every field must return to its dataclass default so that loading
+        a new video or session starts from a clean slate.  Pipeline config
+        fields (pipeline_mode, static_cam, use_dpvo, focal_mm) were previously
+        missed, which could leave stale settings from a prior session.
+        """
         self.video_path = None
         self.num_frames = 0
         self.fps = 30.0
         self.img_width = 0
         self.img_height = 0
         self.output_dir = None
+        # Pipeline config — reset to dataclass defaults
+        self.pipeline_mode = "single"
+        self.static_cam = True
+        self.use_dpvo = False
+        self.focal_mm = 24.0
+        # Multi-person tracking
         self.person_tracks.clear()
         self.inactive_tracks.clear()
         self.crossing_spans.clear()
