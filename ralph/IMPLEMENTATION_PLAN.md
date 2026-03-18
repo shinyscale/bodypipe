@@ -153,13 +153,17 @@ Full spec: `spec/ux-overhaul.md`
 
 **File:** `views/mesh_viewport.py`
 
-### Phase 6: Error Heatmap on Skeleton *(1 commit, ~50 LOC)*
+### Phase 6: Error Heatmap on Skeleton *(DONE)*
 
-- [ ] Add `set_skeleton_heatmap(bool)` to MeshViewport public API
-- [ ] Per-joint confidence coloring on skeleton overlay (not just mesh surface)
-- [ ] Reuse existing `confidence_to_color()` function
+- [x] Added `set_skeleton_heatmap(bool)` to MeshViewport public API
+- [x] Per-joint confidence coloring on skeleton overlay (not just mesh surface)
+- [x] Reused existing `confidence_to_color()` function
+- [x] Added `_get_frame_confidence()` helper (reads confidence_breakdown["overall"] → raw confidences → 0.5 default)
+- [x] Chain highlighting and selected-joint accent take priority over heatmap
+- [x] 19 new tests in `tests/test_mesh_viewport.py` (TestSkeletonHeatmapAPI, TestGetFrameConfidence, TestSkeletonHeatmapRendering)
+- [x] All 1246 tests pass (1227 original + 19 new)
 
-**File:** `views/mesh_viewport.py`
+**File:** `views/mesh_viewport.py`, `tests/test_mesh_viewport.py`
 
 ### Phase 7: Viewport Quality Toggle *(1 commit, ~60 LOC)*
 

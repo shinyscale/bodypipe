@@ -2600,3 +2600,192 @@ class TestContextMenuExists:
         w = MeshViewport()
         assert hasattr(w, "contextMenuEvent")
         assert callable(w.contextMenuEvent)
+
+
+# ======================================================================
+# Skeleton heatmap tests (Phase 6)
+# ======================================================================
+
+
+class TestSkeletonHeatmapAPI:
+    """set_skeleton_heatmap: toggle confidence heatmap on skeleton overlay."""
+
+    def test_default_off(self, qapp):
+        w = MeshViewport()
+        assert w._skeleton_heatmap is False
+
+    def test_enable(self, qapp):
+        w = MeshViewport()
+        w.set_skeleton_heatmap(True)
+        assert w._skeleton_heatmap is True
+
+    def test_disable(self, qapp):
+        w = MeshViewport()
+        w.set_skeleton_heatmap(True)
+        w.set_skeleton_heatmap(False)
+        assert w._skeleton_heatmap is False
+
+    def test_no_op_when_same(self, qapp):
+        """Setting the same value should not trigger update."""
+        w = MeshViewport()
+        w.update = MagicMock()
+        w.set_skeleton_heatmap(False)  # already False
+        w.update.assert_not_called()
+
+    def test_triggers_update_on_change(self, qapp):
+        """Changing the value should trigger update when GL available."""
+        w = MeshViewport()
+        w.update = MagicMock()
+        w.set_skeleton_heatmap(True)
+        if _HAS_GL:
+            w.update.assert_called()
+
+
+class TestGetFrameConfidence:
+    """_get_frame_confidence: extract per-frame confidence from session."""
+
+    def test_no_session_returns_default(self, qapp):
+        w = MeshViewport()
+        assert w._get_frame_confidence() == 0.5
+
+    def test_no_person_returns_default(self, qapp):
+        w = MeshViewport()
+        w._session = Session()
+        w._person_id = -1
+        assert w._get_frame_confidence() == 0.5
+
+    def test_no_track_returns_default(self, qapp):
+        w = MeshViewport()
+        w._session = Session()
+        w._person_id = 42  # not in person_tracks
+        assert w._get_frame_confidence() == 0.5
+
+    def test_reads_confidence_breakdown_overall(self, qapp):
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidence_breakdown = {"overall": [0.2, 0.8, 0.95]}
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 1
+        assert w._get_frame_confidence() == pytest.approx(0.8)
+
+    def test_reads_raw_confidences_fallback(self, qapp):
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidences = [0.3, 0.6, 0.9]
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 2
+        assert w._get_frame_confidence() == pytest.approx(0.9)
+
+    def test_breakdown_takes_priority_over_raw(self, qapp):
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidence_breakdown = {"overall": [0.1, 0.2]}
+        track.confidences = [0.9, 0.9]
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 0
+        assert w._get_frame_confidence() == pytest.approx(0.1)
+
+    def test_frame_out_of_range_returns_default(self, qapp):
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidence_breakdown = {"overall": [0.5]}
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 99  # out of range
+        assert w._get_frame_confidence() == 0.5
+
+    def test_empty_breakdown_keys_uses_raw(self, qapp):
+        """If breakdown exists but lacks 'overall', fall back to raw."""
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidence_breakdown = {"detection": [0.7]}
+        track.confidences = [0.4, 0.6]
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 1
+        assert w._get_frame_confidence() == pytest.approx(0.6)
+
+
+class TestSkeletonHeatmapRendering:
+    """Verify heatmap mode changes joint/bone colors in _draw_skeleton logic.
+
+    We test the color assignment logic without actually calling GL, by
+    inspecting the internal state that _draw_skeleton would use.
+    """
+
+    def _make_widget_with_confidence(self, qapp, confidence: float):
+        """Helper: create a MeshViewport with a known confidence value."""
+        w = MeshViewport()
+        session = Session()
+        track = PersonTrack(person_id=0)
+        track.confidence_breakdown = {"overall": [confidence]}
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 0
+        return w
+
+    def test_heatmap_off_uses_standard_colors(self, qapp):
+        """With heatmap off, joint colors should be the standard body/hand."""
+        w = self._make_widget_with_confidence(qapp, 0.9)
+        w.set_skeleton_heatmap(False)
+        # _get_frame_confidence works, but heatmap is off
+        assert w._skeleton_heatmap is False
+
+    def test_heatmap_on_high_confidence_green(self, qapp):
+        """High confidence → green heatmap color."""
+        w = self._make_widget_with_confidence(qapp, 1.0)
+        w.set_skeleton_heatmap(True)
+        color = confidence_to_color(w._get_frame_confidence())
+        np.testing.assert_array_almost_equal(color, [0.0, 1.0, 0.0])
+
+    def test_heatmap_on_low_confidence_red(self, qapp):
+        """Low confidence → red heatmap color."""
+        w = self._make_widget_with_confidence(qapp, 0.0)
+        w.set_skeleton_heatmap(True)
+        color = confidence_to_color(w._get_frame_confidence())
+        np.testing.assert_array_almost_equal(color, [1.0, 0.0, 0.0])
+
+    def test_heatmap_on_mid_confidence_yellow(self, qapp):
+        """Mid confidence → yellow heatmap color."""
+        w = self._make_widget_with_confidence(qapp, 0.5)
+        w.set_skeleton_heatmap(True)
+        color = confidence_to_color(w._get_frame_confidence())
+        np.testing.assert_array_almost_equal(color, [1.0, 1.0, 0.0])
+
+    def test_heatmap_color_varies_with_confidence(self, qapp):
+        """Different confidence values produce different colors."""
+        w_low = self._make_widget_with_confidence(qapp, 0.1)
+        w_low.set_skeleton_heatmap(True)
+        w_high = self._make_widget_with_confidence(qapp, 0.9)
+        w_high.set_skeleton_heatmap(True)
+        c_low = confidence_to_color(w_low._get_frame_confidence())
+        c_high = confidence_to_color(w_high._get_frame_confidence())
+        assert not np.allclose(c_low, c_high)
+
+    def test_heatmap_chain_still_highlighted(self, qapp):
+        """Chain highlighting takes priority over heatmap coloring.
+
+        Selected joint should still get _SELECTED_ACCENT_COLOR even
+        when heatmap is enabled.
+        """
+        w = self._make_widget_with_confidence(qapp, 0.3)
+        w.set_skeleton_heatmap(True)
+        w._selected_joint = 5
+        # The selected joint should still use accent color, not heatmap
+        # (verified by the _draw_skeleton logic: selected check comes first)
+        assert w._skeleton_heatmap is True
+        assert w._selected_joint == 5

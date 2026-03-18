@@ -1028,6 +1028,7 @@ class MeshViewport(_BaseWidget):
         self._joint_positions: np.ndarray | None = None  # (52, 3) camera-space
         self._selected_joint: int = -1  # -1 = no selection
         self._show_skeleton: bool = True  # whether to draw skeleton overlay
+        self._skeleton_heatmap: bool = False  # confidence heatmap on skeleton
 
         # Pose override for real-time preview (Phase 3.4)
         # dict with keys: frame_idx (int), global_orient (3,) optional,
@@ -1146,6 +1147,19 @@ class MeshViewport(_BaseWidget):
         if show == self._show_skeleton:
             return
         self._show_skeleton = show
+        if _HAS_GL:
+            self.update()
+
+    def set_skeleton_heatmap(self, enabled: bool):
+        """Toggle confidence heatmap coloring on the skeleton overlay.
+
+        When enabled, joints and bones are colored by per-frame confidence
+        using the red→yellow→green gradient from confidence_to_color().
+        Chain highlighting and selected-joint accent still take priority.
+        """
+        if enabled == self._skeleton_heatmap:
+            return
+        self._skeleton_heatmap = enabled
         if _HAS_GL:
             self.update()
 
@@ -1965,6 +1979,29 @@ class MeshViewport(_BaseWidget):
     # Skeleton GL rendering
     # ------------------------------------------------------------------
 
+    def _get_frame_confidence(self) -> float:
+        """Return the confidence value for the current frame and person.
+
+        Checks confidence_breakdown["overall"] first, then raw confidences.
+        Returns 0.5 (mid-confidence) when no data is available.
+        """
+        if self._session is None or self._person_id < 0:
+            return 0.5
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None:
+            return 0.5
+        if (
+            track.confidence_breakdown is not None
+            and "overall" in track.confidence_breakdown
+        ):
+            vals = track.confidence_breakdown["overall"]
+            if 0 <= self._current_frame < len(vals):
+                return float(vals[self._current_frame])
+        elif track.confidences is not None:
+            if 0 <= self._current_frame < len(track.confidences):
+                return float(track.confidences[self._current_frame])
+        return 0.5
+
     def _draw_skeleton(self):
         """Draw skeleton overlay: bones as GL_LINES, joints as GL_POINTS.
 
@@ -2003,11 +2040,18 @@ class MeshViewport(_BaseWidget):
             chain_set = set(get_joint_chain(self._selected_joint))
             chain_bones = get_joint_chain_bones(self._selected_joint)
 
+        # Heatmap base color: confidence-mapped color for non-highlighted elements
+        if self._skeleton_heatmap:
+            heatmap_color = confidence_to_color(self._get_frame_confidence())
+        else:
+            heatmap_color = None
+
         # --- Draw non-chain bones as GL_LINES (normal width) ---
         bone_verts = []
         bone_colors = []
         chain_bone_verts = []
         chain_bone_colors = []
+        base_bone_color = heatmap_color if heatmap_color is not None else _BONE_COLOR
         for a, b in BONE_CONNECTIONS:
             if a < len(joints) and b < len(joints):
                 key = (min(a, b), max(a, b))
@@ -2019,8 +2063,8 @@ class MeshViewport(_BaseWidget):
                 else:
                     bone_verts.append(joints[a])
                     bone_verts.append(joints[b])
-                    bone_colors.append(_BONE_COLOR)
-                    bone_colors.append(_BONE_COLOR)
+                    bone_colors.append(base_bone_color)
+                    bone_colors.append(base_bone_color)
 
         if bone_verts:
             bv = np.array(bone_verts, dtype=np.float32)
@@ -2048,6 +2092,8 @@ class MeshViewport(_BaseWidget):
             elif i in chain_set:
                 jc[i] = _CHAIN_JOINT_COLOR
                 jp[i] = _CHAIN_JOINT_POINT_SIZE
+            elif heatmap_color is not None:
+                jc[i] = heatmap_color
             elif i < _N_BODY_JOINTS:
                 jc[i] = _BODY_JOINT_COLOR
             else:
