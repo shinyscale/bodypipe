@@ -169,6 +169,92 @@ def estimate_K(width: int, height: int) -> np.ndarray:
     return K
 
 
+def compute_orbit_view(
+    yaw_deg: float,
+    pitch_deg: float,
+    distance: float,
+    center: np.ndarray,
+) -> np.ndarray:
+    """Compute a look-at view matrix for an orbit camera.
+
+    The camera sits on a sphere of radius *distance* around *center*,
+    positioned by spherical coordinates *yaw_deg* (horizontal angle from
+    +Z axis) and *pitch_deg* (vertical, positive = above horizontal).
+
+    Parameters
+    ----------
+    yaw_deg   : horizontal angle in degrees
+    pitch_deg : vertical angle in degrees (clamped to ±89°)
+    distance  : orbit radius (meters)
+    center    : (3,) pivot point in GL world space
+
+    Returns
+    -------
+    view : (4, 4) float32 view matrix (GL convention, +Y up, -Z fwd)
+    """
+    yaw = np.radians(yaw_deg)
+    pitch = np.radians(np.clip(pitch_deg, -89.0, 89.0))
+    cos_p = np.cos(pitch)
+    eye = np.asarray(center, dtype=np.float32) + distance * np.array(
+        [cos_p * np.sin(yaw), np.sin(pitch), cos_p * np.cos(yaw)],
+        dtype=np.float32,
+    )
+
+    fwd = np.asarray(center, dtype=np.float32) - eye
+    fwd_len = np.linalg.norm(fwd)
+    if fwd_len < 1e-8:
+        fwd = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+    else:
+        fwd = fwd / fwd_len
+
+    world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    right = np.cross(fwd, world_up)
+    r_len = np.linalg.norm(right)
+    if r_len < 1e-6:
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    else:
+        right = right / r_len
+
+    up = np.cross(right, fwd)
+
+    view = np.eye(4, dtype=np.float32)
+    view[0, :3] = right
+    view[1, :3] = up
+    view[2, :3] = -fwd
+    view[0, 3] = -np.dot(right, eye)
+    view[1, 3] = -np.dot(up, eye)
+    view[2, 3] = np.dot(fwd, eye)
+    return view
+
+
+def perspective_fov(
+    fov_deg: float,
+    aspect: float,
+    near: float = 0.01,
+    far: float = 100.0,
+) -> np.ndarray:
+    """Standard symmetric perspective projection from vertical FOV.
+
+    Parameters
+    ----------
+    fov_deg : vertical field-of-view in degrees
+    aspect  : width / height
+    near, far : clipping planes
+
+    Returns
+    -------
+    proj : (4, 4) float32 projection matrix
+    """
+    f = 1.0 / np.tan(np.radians(fov_deg) / 2.0)
+    proj = np.zeros((4, 4), dtype=np.float32)
+    proj[0, 0] = f / max(aspect, 1e-6)
+    proj[1, 1] = f
+    proj[2, 2] = -(far + near) / (far - near)
+    proj[2, 3] = -2.0 * far * near / (far - near)
+    proj[3, 2] = -1.0
+    return proj
+
+
 # View matrix: flip Y and Z to convert from CV camera space to GL eye space.
 _CV_TO_GL = np.array(
     [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]],
@@ -186,6 +272,17 @@ _AMBIENT = np.array([0.35, 0.35, 0.35], dtype=np.float32)
 
 # Maximum vertex cache size (per person+frame).
 _CACHE_MAX = 200
+
+# Orbit camera defaults and sensitivity.
+_ORBIT_SENSITIVITY = 0.3       # degrees per pixel drag
+_PAN_SENSITIVITY = 0.003       # fraction of distance per pixel
+_ZOOM_FACTOR = 0.1             # fraction of distance per wheel step
+_ORBIT_DEFAULT_FOV = 45.0      # vertical FOV in degrees
+_ORBIT_DEFAULT_DISTANCE = 3.0  # meters from orbit center
+_ORBIT_DEFAULT_YAW = 0.0       # look from +Z
+_ORBIT_DEFAULT_PITCH = 10.0    # slight tilt from above
+_PITCH_LIMIT = 89.0            # clamp to avoid gimbal lock
+_ORBIT_DEFAULT_CENTER = np.array([0.0, 0.0, -2.5], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +348,19 @@ class MeshViewport(_BaseWidget):
         self._n_indices: int = 0
         self._faces_uploaded: bool = False
 
+        # Camera mode ("incam" or "orbit")
+        self._camera_mode: str = "incam"
+
+        # Orbit camera state (used in "orbit" mode)
+        self._orbit_yaw: float = _ORBIT_DEFAULT_YAW
+        self._orbit_pitch: float = _ORBIT_DEFAULT_PITCH
+        self._orbit_distance: float = _ORBIT_DEFAULT_DISTANCE
+        self._orbit_center: np.ndarray = _ORBIT_DEFAULT_CENTER.copy()
+        self._orbit_auto_centered: bool = False
+
+        # Mouse tracking for orbit interaction
+        self._mouse_last_pos: tuple[int, int] | None = None
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -301,13 +411,167 @@ class MeshViewport(_BaseWidget):
         self._refresh_mesh()
 
     def set_camera_mode(self, mode: str):
-        """Set camera mode ('incam' or 'orbit'). Stub for Phase 3.2."""
+        """Set camera mode ('incam' or 'orbit').
+
+        In 'incam' mode the projection matches the video camera using K
+        intrinsics.  In 'orbit' mode the user can rotate, pan, and zoom
+        with the mouse.
+        """
+        if mode not in ("incam", "orbit"):
+            return
+        if mode == self._camera_mode:
+            return
+        self._camera_mode = mode
+        if mode == "orbit":
+            self._auto_center_orbit()
+        self._update_camera()
+        self.camera_changed.emit(self._camera_state())
 
     def set_color_mode(self, mode: str):
-        """Set vertex color mode ('solid', 'joint', 'confidence'). Stub for Phase 3.2."""
+        """Set vertex color mode ('solid', 'joint', 'confidence'). Stub for Phase 3.3."""
 
     def highlight_joint(self, joint_idx: int):
         """Highlight a joint in accent color. Stub for Phase 3.3."""
+
+    # ------------------------------------------------------------------
+    # Camera modes & mouse interaction
+    # ------------------------------------------------------------------
+
+    def _camera_state(self) -> dict:
+        """Return current camera state for the camera_changed signal."""
+        if self._camera_mode == "orbit":
+            return {
+                "mode": "orbit",
+                "yaw": self._orbit_yaw,
+                "pitch": self._orbit_pitch,
+                "distance": self._orbit_distance,
+                "center": self._orbit_center.tolist(),
+            }
+        return {"mode": "incam"}
+
+    def _update_camera(self):
+        """Recompute model/view/projection from current camera state."""
+        if self._camera_mode == "orbit":
+            self._model_mat = _CV_TO_GL.copy()
+            self._view = compute_orbit_view(
+                self._orbit_yaw,
+                self._orbit_pitch,
+                self._orbit_distance,
+                self._orbit_center,
+            )
+        else:  # incam
+            self._model_mat = np.eye(4, dtype=np.float32)
+            self._view = _CV_TO_GL.copy()
+        w = self.width() if self.width() > 0 else 200
+        h = self.height() if self.height() > 0 else 150
+        self._update_projection(w, h)
+        if _HAS_GL:
+            self.update()
+
+    def _reset_orbit(self):
+        """Reset orbit camera to defaults, auto-centering on mesh."""
+        self._orbit_yaw = _ORBIT_DEFAULT_YAW
+        self._orbit_pitch = _ORBIT_DEFAULT_PITCH
+        self._orbit_distance = _ORBIT_DEFAULT_DISTANCE
+        self._orbit_center = _ORBIT_DEFAULT_CENTER.copy()
+        self._orbit_auto_centered = False
+        self._auto_center_orbit()
+
+    def _auto_center_orbit(self):
+        """Set orbit center to the current mesh centroid in GL space."""
+        if self._vertices is None:
+            return
+        # Convert centroid from CV camera space to GL space (flip Y, Z)
+        centroid = self._vertices.mean(axis=0).copy()
+        centroid[1] *= -1
+        centroid[2] *= -1
+        self._orbit_center = centroid.astype(np.float32)
+        # Set distance from mesh extent
+        gl_verts = self._vertices.copy()
+        gl_verts[:, 1] *= -1
+        gl_verts[:, 2] *= -1
+        extent = np.max(
+            np.linalg.norm(gl_verts - self._orbit_center, axis=1)
+        )
+        self._orbit_distance = max(float(extent) * 2.5, 1.0)
+        self._orbit_auto_centered = True
+
+    def mousePressEvent(self, event):
+        """Begin orbit/pan drag in orbit mode."""
+        if self._camera_mode == "orbit":
+            self._mouse_last_pos = (event.position().x(), event.position().y())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Update orbit/pan during drag."""
+        if self._camera_mode != "orbit" or self._mouse_last_pos is None:
+            super().mouseMoveEvent(event)
+            return
+
+        x, y = event.position().x(), event.position().y()
+        dx = x - self._mouse_last_pos[0]
+        dy = y - self._mouse_last_pos[1]
+        self._mouse_last_pos = (x, y)
+
+        buttons = event.buttons()
+        if buttons & Qt.MouseButton.LeftButton:
+            # Orbit: rotate camera around center
+            self._orbit_yaw += dx * _ORBIT_SENSITIVITY
+            self._orbit_pitch += dy * _ORBIT_SENSITIVITY
+            self._orbit_pitch = float(
+                np.clip(self._orbit_pitch, -_PITCH_LIMIT, _PITCH_LIMIT)
+            )
+            self._update_camera()
+            self.camera_changed.emit(self._camera_state())
+        elif buttons & Qt.MouseButton.MiddleButton:
+            # Pan: translate orbit center in the camera's screen plane
+            yaw = np.radians(self._orbit_yaw)
+            pitch = np.radians(self._orbit_pitch)
+            cos_p = np.cos(pitch)
+            eye_dir = np.array(
+                [cos_p * np.sin(yaw), np.sin(pitch), cos_p * np.cos(yaw)],
+                dtype=np.float32,
+            )
+            world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            right = np.cross(-eye_dir, world_up)
+            r_len = np.linalg.norm(right)
+            if r_len > 1e-6:
+                right /= r_len
+            up = np.cross(right, -eye_dir)
+            pan_speed = self._orbit_distance * _PAN_SENSITIVITY
+            self._orbit_center += right * float(dx * pan_speed)
+            self._orbit_center -= up * float(dy * pan_speed)
+            self._update_camera()
+            self.camera_changed.emit(self._camera_state())
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """End orbit/pan drag."""
+        self._mouse_last_pos = None
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        """Zoom in/out in orbit mode."""
+        if self._camera_mode == "orbit":
+            delta = event.angleDelta().y()
+            factor = 1.0 - (delta / 120.0) * _ZOOM_FACTOR
+            self._orbit_distance = max(self._orbit_distance * factor, 0.1)
+            self._update_camera()
+            self.camera_changed.emit(self._camera_state())
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Reset orbit camera on double-click."""
+        if self._camera_mode == "orbit":
+            self._reset_orbit()
+            self._update_camera()
+            self.camera_changed.emit(self._camera_state())
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------
     # SMPL-X model loading
@@ -539,6 +803,10 @@ class MeshViewport(_BaseWidget):
             self._n_vertices = len(self._vertices)
             if self._gl_ready:
                 self._upload_buffers()
+            # Auto-center orbit camera on first mesh load
+            if self._camera_mode == "orbit" and not self._orbit_auto_centered:
+                self._auto_center_orbit()
+                self._update_camera()
         else:
             self._vertices = None
             self._normals = None
@@ -613,16 +881,19 @@ class MeshViewport(_BaseWidget):
         self.doneCurrent()
 
     def _update_projection(self, width: int, height: int):
-        """Recompute projection from session camera K or an estimate."""
+        """Recompute projection from camera mode and session intrinsics."""
         w = max(width, 1)
         h = max(height, 1)
-        if self._session and self._session.camera_K is not None:
-            K = self._session.camera_K
-        elif self._session and self._session.img_width > 0:
-            K = estimate_K(self._session.img_width, self._session.img_height)
+        if self._camera_mode == "orbit":
+            self._projection = perspective_fov(_ORBIT_DEFAULT_FOV, w / h)
         else:
-            K = estimate_K(w, h)
-        self._projection = k_to_projection(K, w, h)
+            if self._session and self._session.camera_K is not None:
+                K = self._session.camera_K
+            elif self._session and self._session.img_width > 0:
+                K = estimate_K(self._session.img_width, self._session.img_height)
+            else:
+                K = estimate_K(w, h)
+            self._projection = k_to_projection(K, w, h)
 
     def _set_mat4(self, name: str, mat: np.ndarray):
         loc = self._shader.uniformLocation(name)
