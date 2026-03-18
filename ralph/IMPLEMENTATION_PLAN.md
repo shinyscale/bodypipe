@@ -31,4 +31,4 @@ Full audit completed — all specs are compliant. Minor non-functional notes:
 ## Remaining Gradio Parity Gaps (discovered via audit)
 
 - [x] Settings restoration when video path is re-entered: All three tabs save solve_config.json to their output directory on pipeline run and restore settings when a previously-processed video is loaded. SinglePersonTab uses outputs/demo/{stem}, PerfCaptureTab uses outputs/perfcap/{stem}, MultiPersonTab uses outputs/multi_person/{stem}. Corrupt configs silently ignored. 13 new tests added (1160 total pass).
-- [ ] "Download All" button label (spec says "Download All", implementation says "Open Output Folder" — behavior matches)
+- [x] "Download All" button label: renamed from "Open Output Folder" to "Download All" per single-person-tab spec. PerfCaptureTab inherits the fix. 1160 tests pass.

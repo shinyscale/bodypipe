@@ -203,7 +203,7 @@ class SinglePersonTab(QWidget):
         self._file_list.setContextMenuPolicy(Qt.CustomContextMenu)
         files_layout.addWidget(self._file_list)
 
-        self._open_folder_btn = QPushButton("Open Output Folder")
+        self._open_folder_btn = QPushButton("Download All")
         self._open_folder_btn.setEnabled(False)
         files_layout.addWidget(self._open_folder_btn)
 
