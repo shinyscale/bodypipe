@@ -2,7 +2,7 @@
 
 ## Completed Phases (summary)
 
-All 7 phases fully implemented with 1129 tests passing.
+All 7 phases fully implemented with 1136 tests passing.
 
 - **Phase 1**: Pipeline Tabs — SinglePersonTab, PerfCaptureTab, MultiPersonTab
 - **Phase 2**: Identity Inspector — person selector, confidence, keyframes, bbox overlay, two-click bbox editing, track operations (swap/split/merge), review scanner, reprocess
@@ -14,8 +14,5 @@ All 7 phases fully implemented with 1129 tests passing.
 
 ## Spec Compliance Fixes
 
-- [x] Session.reset() pipeline config fields: `models/session.py` — reset() now resets pipeline_mode, static_cam, use_dpvo, focal_mm to dataclass defaults. Previously these were missed, allowing stale settings to persist across session resets. Test in `tests/test_models.py` (test_reset_clears_pipeline_config_fields). (1129 total pass).
-
-## Known Minor Gaps (deferred)
-
-- [ ] RenderWorker.finished signal emits `str` instead of `Path` per spec — minimal impact (no consumers use Path), PySide6 Signal(Path) can be unreliable across environments.
+- [x] Session.reset() pipeline config fields: `models/session.py` — reset() now resets pipeline_mode, static_cam, use_dpvo, focal_mm to dataclass defaults.
+- [x] RenderWorker.finished signal: changed from `Signal(str)` to `Signal(object)` emitting `Path` per pipeline-runner spec. Uses `Signal(object)` instead of `Signal(Path)` because PySide6 doesn't reliably handle pathlib.Path as a signal type. Added 7 tests (TestRenderWorker) covering signals, cancellation, error handling, Path emission, progress, and person_dirs passthrough. (1136 total pass).

@@ -26,6 +26,7 @@ from workers.pipeline_orchestrator import (
     extract_bboxes_from_output,
     fallback_face_bboxes,
 )
+from workers.render_worker import RenderWorker
 
 
 # ---------------------------------------------------------------------------
@@ -1063,3 +1064,157 @@ class TestFullPipelineWorkerConfigPassthrough:
         assert result_c["left_hand_pose"] == "original"
         assert any("not available" in line.lower() or "hamer" in line.lower()
                     for line in log_lines)
+
+
+# ---------------------------------------------------------------------------
+# RenderWorker
+# ---------------------------------------------------------------------------
+
+
+class TestRenderWorker:
+    """Why: RenderWorker wraps multi-person in-camera rendering. The spec
+    requires finished to emit a Path (not str) so consumers get a typed
+    filesystem path. Signal(object) is used because PySide6 Signal(Path)
+    is unreliable across environments."""
+
+    def test_has_signals(self, qapp):
+        from models.session import Session
+
+        s = Session()
+        w = RenderWorker(s)
+        assert hasattr(w, "progress")
+        assert hasattr(w, "finished")
+        assert hasattr(w, "error")
+
+    def test_cancel(self, qapp):
+        from models.session import Session
+
+        s = Session()
+        w = RenderWorker(s)
+        assert not w._cancelled
+        w.cancel()
+        assert w._cancelled
+
+    def test_error_when_no_output_dir(self, qapp):
+        """Should emit error when session has no output_dir."""
+        from models.session import Session
+        from unittest.mock import patch, MagicMock
+
+        s = Session()
+        s.output_dir = None
+        w = RenderWorker(s)
+
+        errors = []
+        w.error.connect(errors.append)
+
+        # Mock the import so it doesn't need the real backend
+        mock_module = MagicMock()
+        with patch.dict(sys.modules, {"multi_person_split": mock_module}):
+            w.run()
+
+        assert len(errors) == 1
+        assert "output directory" in errors[0].lower()
+
+    def test_finished_emits_path(self, qapp, tmp_path):
+        """finished signal must emit a Path object per pipeline-runner spec."""
+        from models.session import Session
+        from unittest.mock import patch, MagicMock
+
+        s = Session()
+        s.video_path = tmp_path / "video.mp4"
+        s.output_dir = tmp_path / "out"
+        s.person_tracks = {}
+
+        w = RenderWorker(s)
+
+        results = []
+        w.finished.connect(results.append)
+
+        mock_render = MagicMock(return_value=tmp_path / "out" / "scene.mp4")
+        mock_module = MagicMock()
+        mock_module.render_multi_person_incam = mock_render
+        with patch.dict(sys.modules, {"multi_person_split": mock_module}):
+            w.run()
+
+        assert len(results) == 1
+        assert isinstance(results[0], Path), (
+            f"finished should emit Path, got {type(results[0]).__name__}"
+        )
+        assert results[0] == tmp_path / "out" / "scene.mp4"
+
+    def test_progress_emitted(self, qapp, tmp_path):
+        """Should emit progress at start (0.1) and end (1.0)."""
+        from models.session import Session
+        from unittest.mock import patch, MagicMock
+
+        s = Session()
+        s.video_path = tmp_path / "video.mp4"
+        s.output_dir = tmp_path / "out"
+        s.person_tracks = {}
+
+        w = RenderWorker(s)
+
+        progress_signals = []
+        w.progress.connect(lambda f, m: progress_signals.append((f, m)))
+
+        mock_render = MagicMock(return_value=tmp_path / "out" / "scene.mp4")
+        mock_module = MagicMock()
+        mock_module.render_multi_person_incam = mock_render
+        with patch.dict(sys.modules, {"multi_person_split": mock_module}):
+            w.run()
+
+        assert len(progress_signals) == 2
+        assert progress_signals[0] == (0.1, "Rendering scene preview...")
+        assert progress_signals[1] == (1.0, "Done")
+
+    def test_exception_emits_error(self, qapp):
+        """Backend exceptions should emit error signal, not crash."""
+        from models.session import Session
+        from unittest.mock import patch, MagicMock
+
+        s = Session()
+        s.output_dir = Path("/tmp/out")
+        s.video_path = Path("/tmp/video.mp4")
+        s.person_tracks = {}
+
+        w = RenderWorker(s)
+
+        errors = []
+        w.error.connect(errors.append)
+
+        mock_module = MagicMock()
+        mock_module.render_multi_person_incam.side_effect = RuntimeError("GPU OOM")
+        with patch.dict(sys.modules, {"multi_person_split": mock_module}):
+            w.run()
+
+        assert len(errors) == 1
+        assert "GPU OOM" in errors[0]
+
+    def test_passes_person_dirs(self, qapp, tmp_path):
+        """Should pass person_dirs from session tracks to render function."""
+        from models.session import Session, PersonTrack
+        from unittest.mock import patch, MagicMock
+
+        s = Session()
+        s.video_path = tmp_path / "video.mp4"
+        s.output_dir = tmp_path / "out"
+        s.person_tracks = {
+            0: PersonTrack(person_id=0, person_dir=tmp_path / "p0"),
+            1: PersonTrack(person_id=1, person_dir=tmp_path / "p1"),
+            2: PersonTrack(person_id=2, person_dir=None),  # no dir — should be filtered
+        }
+
+        w = RenderWorker(s)
+
+        mock_render = MagicMock(return_value=tmp_path / "out" / "scene.mp4")
+        mock_module = MagicMock()
+        mock_module.render_multi_person_incam = mock_render
+        with patch.dict(sys.modules, {"multi_person_split": mock_module}):
+            w.run()
+
+        mock_render.assert_called_once()
+        call_kwargs = mock_render.call_args
+        person_dirs = call_kwargs[1]["person_dirs"] if "person_dirs" in call_kwargs[1] else call_kwargs[0][1]
+        assert len(person_dirs) == 2
+        assert str(tmp_path / "p0") in person_dirs
+        assert str(tmp_path / "p1") in person_dirs

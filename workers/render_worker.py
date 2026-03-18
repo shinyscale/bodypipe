@@ -13,7 +13,7 @@ class RenderWorker(QThread):
     """Renders multi-person in-camera scene preview."""
 
     progress = Signal(float, str)
-    finished = Signal(str)  # path to rendered video
+    finished = Signal(object)  # Path to rendered video
     error = Signal(str)
 
     def __init__(self, session: Session, parent=None):
@@ -45,7 +45,7 @@ class RenderWorker(QThread):
             )
 
             self.progress.emit(1.0, "Done")
-            self.finished.emit(str(result_path))
+            self.finished.emit(Path(result_path))
 
         except Exception as e:
             self.error.emit(str(e))
