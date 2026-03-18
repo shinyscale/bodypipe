@@ -64,34 +64,39 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** new `views/dock_widgets.py`, new `tests/test_dock_widgets.py`
 
-### Commit 1C: Rewire AppWindow from Tabs to Docks *(medium risk)*
+### Commit 1C: Rewire AppWindow from Tabs to Docks *(DONE)*
 
-- [ ] Remove QTabWidget from `_setup_ui()`
-- [ ] Create empty central widget (hidden), `setDockNestingEnabled(True)`
-- [ ] Instantiate all docks, add to dock areas:
+- [x] Removed QTabWidget from `_setup_ui()` — replaced with dock-based layout
+- [x] Created empty central widget (hidden, max size 0×0), `setDockNestingEnabled(True)`
+- [x] Instantiated all docks, added to dock areas:
   - Pipeline: left
-  - Video: center area
-  - Mesh: center area (tabbed with Video)
-  - Identity: right
+  - Video: right area (acts as center since central is hidden)
+  - Mesh: right area (tabbed with Video)
+  - Identity: right (split from Video)
   - PoseCorrector: right (tabbed with Identity)
   - TrackOverview: bottom
   - Log: bottom (tabbed with TrackOverview)
-- [ ] Mode selector in PipelineSettingsDock switches stacked widget + shows/hides multi-only docks (Identity, PoseCorrector, TrackOverview)
-- [ ] Move signal hub from MultiPersonTab to AppWindow:
-  - `VideoPlayer.frame_changed` → IdentityInspector, PoseCorrector, MeshViewport, TrackOverview
+- [x] Mode selector in PipelineSettingsDock switches stacked widget + shows/hides multi-only docks (Identity, PoseCorrector, TrackOverview)
+- [x] Moved signal hub from MultiPersonTab to AppWindow (`_setup_signal_hub`):
+  - `VideoPlayer.frame_changed` → `_on_video_frame_changed` → broadcasts to IdentityInspector, PoseCorrector, MeshViewport, TrackOverview (multi mode only)
   - `IdentityInspector.person_changed` → MeshViewport, PoseCorrector
   - `MeshViewport.joint_clicked` → PoseCorrector.set_joint
   - `IdentityInspector.frame_requested` → VideoPlayer.seek
   - `PoseCorrector.frame_requested` → VideoPlayer.seek
   - `IdentityInspector.bbox_overlay_changed` → video frame composite
   - `IdentityInspector.track_modified` → TrackOverview refresh
-- [ ] Update `closeEvent` worker cleanup to iterate dock panels
-- [ ] Update `_on_open_video` to load into VideoPlayer directly
-- [ ] Add backward-compat properties: `_tab_single`, `_tab_perf`, `_tab_multi` (point to settings widgets)
-- [ ] Update View menu: toggle action per dock panel
-- [ ] Rewrite ~25 tests in `test_app_window.py` (tab count → mode selector, tab text → dock titles, currentWidget → mode combo)
+- [x] Moved reprocess logic from MultiPersonTab to AppWindow
+- [x] Moved person track loading (`_load_person_tracks_from_result`, `_load_smplx_params`, `_load_confidences_csv`, `_populate_tracks`) from MultiPersonTab to AppWindow
+- [x] Updated `closeEvent` worker cleanup to iterate settings panels + reprocess worker
+- [x] Updated `_on_open_video` to load into active settings panel (video_loaded signal loads into shared VideoPlayer)
+- [x] Added backward-compat properties: `_tab_single`, `_tab_perf`, `_tab_multi` (point to settings widgets)
+- [x] Updated View menu: toggle action per dock panel via `toggleViewAction()`
+- [x] Rewrote 8 tests in `test_app_window.py`, 6 tests across `test_single_person_tab.py`, `test_perf_capture_tab.py`, `test_multi_person_tab.py`
+- [x] Added `_DOCK_VERSION = 1` for `saveState()`/`restoreState()` versioning (old tab-based state ignored)
+- [x] Added `mode_changed` Signal(str) on AppWindow; `tab_changed` Signal(int) emitted for backward compat
+- [x] All 1282 tests pass (1242 original, 5 new mode/dock tests, some rewritten)
 
-**Files:** `app_window.py` (major rewrite), `views/dock_widgets.py` (minor)
+**Files:** `app_window.py` (major rewrite), `tests/test_app_window.py`, `tests/test_single_person_tab.py`, `tests/test_perf_capture_tab.py`, `tests/test_multi_person_tab.py`
 
 ### Commit 1D: Workspace Presets *(low risk)*
 

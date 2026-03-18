@@ -485,18 +485,19 @@ class TestDropArea:
 
 
 class TestAppWindowIntegration:
-    """Verify that AppWindow uses SinglePersonTab for the first tab."""
+    """Verify AppWindow uses SinglePipelineSettings via _tab_single property."""
 
-    def test_first_tab_is_single_person(self, qapp):
+    def test_tab_single_is_settings_widget(self, qapp):
         from app_window import AppWindow
+        from views.pipeline_settings import SinglePipelineSettings
         window = AppWindow()
-        assert isinstance(window._tab_single, SinglePersonTab)
+        assert isinstance(window._tab_single, SinglePipelineSettings)
 
     def test_status_signal_connected(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
-        # Emit a status message from the tab and check it lands in the status bar
-        window._tab_single.status_message.emit("test status")
+        # Emit a status message from the settings widget and check it lands in the status bar
+        window._single_settings.status_message.emit("test status")
         assert window._status_label.text() == "test status"
 
 

@@ -436,15 +436,16 @@ class TestPerfCaptureRunningState:
 
 
 class TestAppWindowPerfTab:
-    def test_second_tab_is_perf_capture(self, qapp):
+    def test_tab_perf_is_settings_widget(self, qapp):
         from app_window import AppWindow
+        from views.pipeline_settings import PerfPipelineSettings
         window = AppWindow()
-        assert isinstance(window._tab_perf, PerfCaptureTab)
+        assert isinstance(window._tab_perf, PerfPipelineSettings)
 
     def test_perf_tab_status_connected(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
-        window._tab_perf.status_message.emit("perf test status")
+        window._perf_settings.status_message.emit("perf test status")
         assert window._status_label.text() == "perf test status"
 
 

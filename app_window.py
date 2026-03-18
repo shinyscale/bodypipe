@@ -1,18 +1,26 @@
-"""Main application window with tab widget, menu bar, status bar, and log panel."""
+"""Main application window with dock-based layout, menu bar, status bar, and log panel.
 
+Why dockable layout: Replaces the fixed 3-tab QTabWidget with QDockWidgets that
+users can rearrange, tabify, float, and close/reopen via the View menu.  A mode
+selector in PipelineSettingsDock switches the settings panel and shows/hides
+multi-person-only docks (Identity Inspector, Pose Corrector, Track Overview).
+QMainWindow.saveState()/restoreState() persists the layout across sessions.
+"""
+
+import logging
 from pathlib import Path
+
+import cv2
+import numpy as np
 
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
-    QTabWidget,
     QStatusBar,
-    QMenuBar,
     QDockWidget,
     QPlainTextEdit,
     QWidget,
     QLabel,
-    QVBoxLayout,
     QFileDialog,
     QMessageBox,
     QMenu,
@@ -22,11 +30,30 @@ from PySide6.QtGui import QAction, QPalette, QColor
 
 from models.pipeline_config import PipelineConfig
 from models.session import Session
-from views.single_person_tab import SinglePersonTab
-from views.perf_capture_tab import PerfCaptureTab
-from views.multi_person_tab import MultiPersonTab
+from views.video_player import VideoPlayer
+from views.mesh_viewport import MeshViewport
+from views.identity_inspector import IdentityInspector
+from views.pose_corrector_panel import PoseCorrectorPanel
+from views.multi_person_tab import _TrackOverview
+from views.pipeline_settings import (
+    SinglePipelineSettings,
+    PerfPipelineSettings,
+    MultiPipelineSettings,
+)
+from views.dock_widgets import (
+    VideoDock,
+    MeshViewportDock,
+    IdentityDock,
+    PoseCorrectorDock,
+    TrackOverviewDock,
+    PipelineSettingsDock,
+)
+from views.bbox_overlay import render_bbox_overlay, render_edit_preview
 from views.keyboard_shortcuts_dialog import KeyboardShortcutsDialog
+from workers.reprocess_worker import ReprocessWorker
 from theme import COLORS
+
+log = logging.getLogger(__name__)
 
 
 def _apply_dark_theme(app):
@@ -219,13 +246,25 @@ class LogPanel(QPlainTextEdit):
 
 
 class AppWindow(QMainWindow):
-    """Main application window."""
+    """Main application window with dock-based layout.
+
+    All panels live in QDockWidgets that the user can rearrange.  A mode
+    selector (in PipelineSettingsDock) switches between single/perf/multi
+    settings and shows/hides multi-only docks.  AppWindow acts as the
+    central signal hub connecting all panels.
+    """
 
     session_loaded = Signal(object)
     session_saved = Signal(Path)
-    tab_changed = Signal(int)
+    tab_changed = Signal(int)   # backward compat — emitted on mode change
+    mode_changed = Signal(str)  # "single", "perf", "multi"
 
     MAX_RECENT = 5
+    _DOCK_VERSION = 1  # increment when dock layout structure changes
+
+    _MULTI_ONLY_DOCKS = (
+        "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
+    )
 
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
@@ -233,6 +272,9 @@ class AppWindow(QMainWindow):
         self._session_path: Path | None = None
         self._settings = QSettings("GVHMR", "bodypipe")
         self._gvhmr_root = gvhmr_root or Path(__file__).resolve().parent.parent / "GVHMR"
+        self._reprocess_worker: ReprocessWorker | None = None
+        self._show_all_tracks = False
+        self._edit_preview: dict | None = None
 
         self.setWindowTitle("bodypipe \u2014 Motion Capture Studio")
         self.setMinimumSize(1200, 700)
@@ -245,29 +287,88 @@ class AppWindow(QMainWindow):
         self._setup_status_bar_toggle()
         self._setup_log_panel()
         self._setup_undo_redo()
+        self._setup_signal_hub()
+        self._add_dock_view_toggles()
         self._restore_geometry()
         self._restore_pipeline_configs()
-        self._connect_tab_signals()
+
+    # ------------------------------------------------------------------
+    # Backward-compat properties (point to settings widgets so existing
+    # tests that access _tab_single._static_cam etc. keep working).
+    # Removed in Commit 1F.
+    # ------------------------------------------------------------------
+
+    @property
+    def _tab_single(self):
+        return self._single_settings
+
+    @property
+    def _tab_perf(self):
+        return self._perf_settings
+
+    @property
+    def _tab_multi(self):
+        return self._multi_settings
+
+    # ------------------------------------------------------------------
+    # UI Setup
+    # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        """Create tab widget with real and placeholder tabs."""
-        self._tabs = QTabWidget()
-        self._tabs.currentChanged.connect(self.tab_changed.emit)
+        """Create dock-based layout with mode selector.
 
-        # Tab 1: Single-person GVHMR body capture
-        self._tab_single = SinglePersonTab(self._session, self._gvhmr_root)
+        Why empty central widget: All real content lives in docks so users
+        can freely rearrange, tabify, and float every panel.  The central
+        widget is hidden (zero size) and dock nesting is enabled for
+        maximum workspace flexibility.
+        """
+        # Empty central widget — all content in docks
+        central = QWidget()
+        central.setMaximumSize(0, 0)
+        self.setCentralWidget(central)
+        self.setDockNestingEnabled(True)
 
-        # Tab 2: Performance capture (body + hands + face)
-        self._tab_perf = PerfCaptureTab(self._session, self._gvhmr_root)
+        # ---- Create inner widgets ----
+        self._video_player = VideoPlayer()
+        self._mesh_viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
+        self._mesh_viewport.set_session(self._session)
+        self._identity_inspector = IdentityInspector(self._session)
+        self._pose_corrector = PoseCorrectorPanel(
+            session=self._session, gvhmr_root=self._gvhmr_root,
+        )
+        self._track_overview = _TrackOverview()
 
-        # Tab 3: Multi-person capture
-        self._tab_multi = MultiPersonTab(self._session, self._gvhmr_root)
+        # ---- Create settings widgets ----
+        self._single_settings = SinglePipelineSettings(self._session, self._gvhmr_root)
+        self._perf_settings = PerfPipelineSettings(self._session, self._gvhmr_root)
+        self._multi_settings = MultiPipelineSettings(self._session, self._gvhmr_root)
 
-        self._tabs.addTab(self._tab_single, "GVHMR Body")
-        self._tabs.addTab(self._tab_perf, "Performance Capture")
-        self._tabs.addTab(self._tab_multi, "Multi-Person")
+        # ---- Create dock widgets ----
+        self._video_dock = VideoDock(self._video_player, self)
+        self._mesh_dock = MeshViewportDock(self._mesh_viewport, self)
+        self._identity_dock = IdentityDock(self._identity_inspector, self)
+        self._pose_corrector_dock = PoseCorrectorDock(self._pose_corrector, self)
+        self._track_overview_dock = TrackOverviewDock(self._track_overview, self)
+        self._pipeline_dock = PipelineSettingsDock(
+            self._single_settings, self._perf_settings, self._multi_settings, self,
+        )
 
-        self.setCentralWidget(self._tabs)
+        # ---- Arrange docks ----
+        # Pipeline settings on the left
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._pipeline_dock)
+
+        # Video + 3D Mesh in center (right area, tabbed)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._video_dock)
+        self.tabifyDockWidget(self._video_dock, self._mesh_dock)
+        self._video_dock.raise_()
+
+        # Identity + PoseCorrector split to the right of video (tabbed)
+        self.splitDockWidget(self._video_dock, self._identity_dock, Qt.Horizontal)
+        self.tabifyDockWidget(self._identity_dock, self._pose_corrector_dock)
+        self._identity_dock.raise_()
+
+        # Track overview at the bottom (log dock added later in _setup_log_panel)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._track_overview_dock)
 
     def _setup_menu(self):
         """Create menu bar with File, Edit, View, Help menus."""
@@ -319,19 +420,19 @@ class AppWindow(QMainWindow):
         self._redo_action.triggered.connect(self._on_redo)
         edit_menu.addAction(self._redo_action)
 
-        # View menu
-        view_menu = menubar.addMenu("&View")
+        # View menu (stored for _add_dock_view_toggles)
+        self._view_menu = menubar.addMenu("&View")
 
         self._toggle_statusbar_action = QAction("Toggle &Status Bar", self)
         self._toggle_statusbar_action.setCheckable(True)
         self._toggle_statusbar_action.setChecked(True)
-        view_menu.addAction(self._toggle_statusbar_action)
+        self._view_menu.addAction(self._toggle_statusbar_action)
 
         self._toggle_log_action = QAction("Toggle &Log Panel", self)
         self._toggle_log_action.setShortcut("Ctrl+L")
         self._toggle_log_action.setCheckable(True)
         self._toggle_log_action.setChecked(True)
-        view_menu.addAction(self._toggle_log_action)
+        self._view_menu.addAction(self._toggle_log_action)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -345,6 +446,16 @@ class AppWindow(QMainWindow):
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
+
+    def _add_dock_view_toggles(self):
+        """Add per-dock toggle actions to the View menu."""
+        self._view_menu.addSeparator()
+        for dock in (
+            self._pipeline_dock, self._video_dock, self._mesh_dock,
+            self._identity_dock, self._pose_corrector_dock,
+            self._track_overview_dock,
+        ):
+            self._view_menu.addAction(dock.toggleViewAction())
 
     def _setup_status_bar(self):
         """Create status bar with operation status, frame counter, FPS."""
@@ -364,19 +475,21 @@ class AppWindow(QMainWindow):
         self._toggle_statusbar_action.toggled.connect(self._status_bar.setVisible)
 
     def _setup_log_panel(self):
-        """Create collapsible log dock widget."""
+        """Create collapsible log dock widget, tabified with track overview."""
         self._log_panel = LogPanel()
         self._log_dock = QDockWidget("Log", self)
         self._log_dock.setObjectName("LogDock")
         self._log_dock.setWidget(self._log_panel)
-        self._log_dock.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self._log_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
+        self.tabifyDockWidget(self._track_overview_dock, self._log_dock)
+        self._log_dock.raise_()
 
         self._toggle_log_action.toggled.connect(self._log_dock.setVisible)
         self._log_dock.visibilityChanged.connect(self._toggle_log_action.setChecked)
 
     def _restore_geometry(self):
-        """Restore window geometry from settings."""
+        """Restore window geometry and dock state from settings."""
         geometry = self._settings.value("geometry")
         if geometry and isinstance(geometry, QByteArray):
             self.restoreGeometry(geometry)
@@ -385,7 +498,11 @@ class AppWindow(QMainWindow):
 
         state = self._settings.value("windowState")
         if state and isinstance(state, QByteArray):
-            self.restoreState(state)
+            self.restoreState(state, self._DOCK_VERSION)
+
+        # Enforce mode-based dock visibility — restoreState may have made
+        # multi-only docks visible from a previous session.
+        self._update_dock_visibility()
 
     # ------------------------------------------------------------------
     # Pipeline config persistence
@@ -398,25 +515,25 @@ class AppWindow(QMainWindow):
     }
 
     def _save_pipeline_configs(self):
-        """Save each tab's pipeline settings to QSettings."""
+        """Save each settings panel's pipeline config to QSettings."""
         import json
 
         for mode, attr in self._TAB_CONFIG_MAP.items():
-            tab = getattr(self, attr, None)
-            if tab and hasattr(tab, "get_config"):
-                config = tab.get_config()
+            widget = getattr(self, attr, None)
+            if widget and hasattr(widget, "get_config"):
+                config = widget.get_config()
                 self._settings.setValue(
                     f"pipeline_config/{mode}",
                     json.dumps(config.to_dict()),
                 )
 
     def _restore_pipeline_configs(self):
-        """Restore each tab's pipeline settings from QSettings."""
+        """Restore each settings panel's pipeline config from QSettings."""
         import json
 
         for mode, attr in self._TAB_CONFIG_MAP.items():
-            tab = getattr(self, attr, None)
-            if not tab or not hasattr(tab, "set_config"):
+            widget = getattr(self, attr, None)
+            if not widget or not hasattr(widget, "set_config"):
                 continue
             raw = self._settings.value(f"pipeline_config/{mode}")
             if not raw or not isinstance(raw, str):
@@ -424,64 +541,418 @@ class AppWindow(QMainWindow):
             try:
                 data = json.loads(raw)
                 config = PipelineConfig.from_dict(data)
-                tab.set_config(config)
+                widget.set_config(config)
             except Exception:
                 pass  # Ignore corrupt/stale settings
 
     def closeEvent(self, event):
-        """Save window geometry and pipeline configs on close."""
+        """Save window geometry, dock state, and pipeline configs on close."""
         self._save_pipeline_configs()
         self._settings.setValue("geometry", self.saveGeometry())
-        self._settings.setValue("windowState", self.saveState())
+        self._settings.setValue("windowState", self.saveState(self._DOCK_VERSION))
         # Wait for any running worker threads to prevent QThread destruction crash
-        for tab in (self._tab_single, self._tab_perf, self._tab_multi):
-            worker = getattr(tab, "_worker", None)
+        for settings in (self._single_settings, self._perf_settings, self._multi_settings):
+            worker = getattr(settings, "_worker", None)
             if worker is not None and worker.isRunning():
                 worker.cancel()
                 worker.wait(5000)
-            rw = getattr(tab, "_reprocess_worker", None)
-            if rw is not None and rw.isRunning():
-                rw.cancel()
-                rw.wait(5000)
+        # Clean up reprocess worker
+        if self._reprocess_worker is not None and self._reprocess_worker.isRunning():
+            self._reprocess_worker.cancel()
+            self._reprocess_worker.wait(5000)
         super().closeEvent(event)
 
-    def _connect_tab_signals(self):
-        """Wire tab signals to main window status bar and log panel."""
-        for tab in (self._tab_single, self._tab_perf, self._tab_multi):
-            tab.status_message.connect(self.set_status)
-            tab.log_message.connect(
+    # ------------------------------------------------------------------
+    # Signal Hub
+    # ------------------------------------------------------------------
+
+    def _setup_signal_hub(self):
+        """Wire all cross-panel signals.
+
+        Why centralised: In the tab layout, MultiPersonTab was the signal
+        hub connecting sub-panels.  With docks, AppWindow owns all panels
+        directly and takes over the hub role so panels stay decoupled.
+        """
+        # Settings widgets → status bar + log
+        for settings in (self._single_settings, self._perf_settings, self._multi_settings):
+            settings.status_message.connect(self.set_status)
+            settings.log_message.connect(
                 lambda text, level: self._log_panel.append_line(text, level)
             )
-            # Wire video player frame changes to status bar
-            tab.video_player.frame_changed.connect(
-                lambda idx, t=tab: self._on_tab_frame_changed(t, idx)
+
+        # Video loaded → shared VideoPlayer
+        self._single_settings.video_loaded.connect(self._on_video_loaded)
+        self._perf_settings.video_loaded.connect(self._on_video_loaded)
+        self._multi_settings.video_loaded.connect(self._on_video_loaded)
+
+        # Pipeline finished handlers
+        self._single_settings.pipeline_finished.connect(self._on_pipeline_output)
+        self._perf_settings.pipeline_finished.connect(self._on_pipeline_output)
+        self._multi_settings.pipeline_finished.connect(self._on_multi_pipeline_finished)
+
+        # Shared VideoPlayer → status bar + multi-mode broadcast
+        self._video_player.frame_changed.connect(self._on_video_frame_changed)
+
+        # Multi-mode signal hub (signals only fire when panels are visible)
+        self._video_player.frame_clicked.connect(self._identity_inspector.on_frame_click)
+        self._mesh_viewport.joint_clicked.connect(self._pose_corrector.set_joint)
+        self._track_overview.person_clicked.connect(self._on_track_clicked)
+        self._identity_inspector.frame_requested.connect(self._video_player.seek)
+        self._identity_inspector.person_changed.connect(self._on_identity_person_changed)
+        self._identity_inspector.bbox_overlay_changed.connect(self._on_bbox_overlay_changed)
+        self._identity_inspector.keyframe_changed.connect(self._on_keyframe_changed)
+        self._identity_inspector.track_modified.connect(self._on_tracks_modified)
+        self._identity_inspector.reprocess_requested.connect(self._on_reprocess_requested)
+        self._pose_corrector.frame_requested.connect(self._video_player.seek)
+
+        # Mode selector
+        self._pipeline_dock.mode_changed.connect(self._on_mode_changed)
+
+    # ------------------------------------------------------------------
+    # Mode switching
+    # ------------------------------------------------------------------
+
+    def _on_mode_changed(self, mode: str):
+        """Show/hide multi-only docks and emit signals."""
+        self._update_dock_visibility()
+        mode_to_index = {"single": 0, "perf": 1, "multi": 2}
+        self.tab_changed.emit(mode_to_index.get(mode, 0))
+        self.mode_changed.emit(mode)
+
+    def _update_dock_visibility(self):
+        """Show/hide docks based on current pipeline mode."""
+        is_multi = self._pipeline_dock.current_mode == "multi"
+        for attr in self._MULTI_ONLY_DOCKS:
+            dock = getattr(self, attr, None)
+            if dock:
+                dock.setVisible(is_multi)
+
+    # ------------------------------------------------------------------
+    # Video frame handling
+    # ------------------------------------------------------------------
+
+    def _on_video_frame_changed(self, frame_idx: int):
+        """Update status bar and broadcast frame change in multi mode."""
+        self.set_frame_info(frame_idx, self._video_player.num_frames)
+        self.set_fps_info(self._video_player.fps)
+        self._session.current_frame = frame_idx
+
+        if self._pipeline_dock.current_mode == "multi":
+            self._track_overview.set_current_frame(frame_idx)
+            self._identity_inspector.set_frame(frame_idx)
+            self._pose_corrector.on_frame_changed(frame_idx)
+            raw = self._video_player.get_raw_frame(frame_idx)
+            self._mesh_viewport.set_video_frame(raw)
+            self._mesh_viewport.on_frame_changed(frame_idx)
+            self._show_frame(frame_idx)
+
+    def _on_video_loaded(self, video_path):
+        """Load video into the shared VideoPlayer."""
+        self._video_player.set_video(
+            video_path, self._session.num_frames, self._session.fps,
+        )
+
+    def _show_frame(self, frame_idx: int):
+        """Display the current frame with bbox overlays and edit preview."""
+        frame = self._video_player.get_raw_frame(frame_idx)
+        if frame is not None:
+            composited = render_bbox_overlay(
+                frame,
+                self._session,
+                frame_idx,
+                selected_person=self._session.selected_person,
+                show_all_tracks=self._show_all_tracks,
             )
+            if self._edit_preview:
+                composited = render_edit_preview(composited, self._edit_preview)
+            self._video_player.set_frame(composited)
 
-        # Update status bar on tab switch
-        self._tabs.currentChanged.connect(self._on_tab_switched)
+    # ------------------------------------------------------------------
+    # Track / person interaction (signal hub for multi mode)
+    # ------------------------------------------------------------------
 
-    def _on_tab_frame_changed(self, tab, frame_idx: int):
-        """Update status bar frame/FPS when the active tab's video player changes frame."""
-        if self._tabs.currentWidget() is not tab:
+    def _on_track_clicked(self, person_id: int, frame_idx: int):
+        """Select person and seek to frame from track overview."""
+        self._session.selected_person = person_id
+        self._identity_inspector.set_person(person_id)
+        self._pose_corrector.set_person(person_id)
+        self._mesh_viewport.set_person(person_id)
+        self._video_player.seek(frame_idx)
+        self.set_status(f"Selected Person {person_id} at frame {frame_idx}")
+
+    def _on_identity_person_changed(self, person_id: int):
+        """Handle person change from identity inspector."""
+        self._session.selected_person = person_id
+        self._pose_corrector.set_person(person_id)
+        self._mesh_viewport.set_person(person_id)
+        self._show_frame(self._session.current_frame)
+
+    def _on_bbox_overlay_changed(self, data: object):
+        """Handle overlay changes (show-all-tracks toggle, edit preview)."""
+        if isinstance(data, dict):
+            if "show_all" in data:
+                self._show_all_tracks = data["show_all"]
+            if "edit_preview" in data:
+                self._edit_preview = data["edit_preview"]
+        self._show_frame(self._session.current_frame)
+
+    def _on_keyframe_changed(self, person_id: int, frame_idx: int):
+        """Redraw overlay when keyframes change."""
+        self._show_frame(self._session.current_frame)
+
+    def _on_tracks_modified(self):
+        """Handle track modifications (swap, split, merge)."""
+        self._populate_tracks()
+        self._identity_inspector.refresh()
+        self._show_frame(self._session.current_frame)
+
+    # ------------------------------------------------------------------
+    # Pipeline output handling
+    # ------------------------------------------------------------------
+
+    def _on_pipeline_output(self, result: dict):
+        """Handle single/perf pipeline completion — load output preview."""
+        output_dir = result.get("output_dir")
+        if output_dir:
+            self._session.output_dir = Path(output_dir)
+        for key in ("side_by_side", "incam"):
+            path = result.get(key)
+            if path and Path(path).is_file():
+                self._load_output_preview(Path(path))
+                break
+
+    def _load_output_preview(self, video_path: Path):
+        """Load an output video into the shared VideoPlayer."""
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
             return
-        player = tab.video_player
-        self.set_frame_info(frame_idx, player.num_frames)
-        self.set_fps_info(player.fps)
+        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+        self._video_player.set_video(video_path, num_frames, fps)
 
-    def _on_tab_switched(self, index: int):
-        """Update status bar frame/FPS info when switching tabs."""
-        tab = self._tabs.widget(index)
-        if tab and hasattr(tab, "video_player"):
-            player = tab.video_player
-            if player.num_frames > 0:
-                self.set_frame_info(player.current_frame_index(), player.num_frames)
-                self.set_fps_info(player.fps)
+    def _on_multi_pipeline_finished(self, result: dict):
+        """Handle multi pipeline completion — load tracks and refresh UI."""
+        output_dir = result.get("output_dir")
+        if output_dir:
+            self._session.output_dir = Path(output_dir)
+
+        multi_result = result.get("result")
+        if multi_result is not None:
+            self._load_person_tracks_from_result(multi_result)
+
+        self._populate_tracks()
+        self._identity_inspector.refresh()
+
+    # ------------------------------------------------------------------
+    # Reprocess
+    # ------------------------------------------------------------------
+
+    def _on_reprocess_requested(self, person_ids: list):
+        """Launch ReprocessWorker for dirty persons."""
+        if self._reprocess_worker is not None:
+            self.set_status("Reprocess already running")
+            return
+
+        self._reprocess_worker = ReprocessWorker(
+            session=self._session,
+            person_ids=person_ids,
+        )
+        self._reprocess_worker.progress.connect(self._on_reprocess_progress)
+        self._reprocess_worker.person_done.connect(self._on_reprocess_person_done)
+        self._reprocess_worker.finished.connect(self._on_reprocess_finished)
+        self._reprocess_worker.error.connect(self._on_reprocess_error)
+        self._reprocess_worker.start()
+
+        self._multi_settings._progress_bar.show()
+        self._multi_settings._progress_label.show()
+        self.set_status(f"Reprocessing {len(person_ids)} person(s)...")
+        self._log_panel.append_line(
+            f"Reprocess started for persons: {person_ids}", "info",
+        )
+
+    def _on_reprocess_progress(self, fraction: float, stage: str):
+        self._multi_settings._progress_bar.setValue(int(fraction * 1000))
+        self._multi_settings._progress_label.setText(stage)
+        self.set_status(f"{stage} ({fraction:.0%})")
+
+    def _on_reprocess_person_done(self, person_id: int):
+        self._session.dirty_persons.discard(person_id)
+        self._identity_inspector.update_reprocess_button()
+        self._log_panel.append_line(f"Person {person_id} reprocessed", "info")
+
+    def _on_reprocess_finished(self, result: dict):
+        if self._reprocess_worker is not None:
+            self._reprocess_worker.wait()
+            self._reprocess_worker = None
+        self._multi_settings._progress_bar.hide()
+        self._multi_settings._progress_label.hide()
+        self._multi_settings._progress_bar.setValue(0)
+
+        reprocessed = result.get("reprocessed", [])
+        self._session.dirty_persons -= set(reprocessed)
+
+        self._populate_tracks()
+        self._identity_inspector.refresh()
+        self._show_frame(self._session.current_frame)
+
+        self.set_status(f"Reprocess complete: {len(reprocessed)} person(s) updated")
+        self._log_panel.append_line(f"Reprocess finished: {reprocessed}", "info")
+
+    def _on_reprocess_error(self, message: str):
+        if self._reprocess_worker is not None:
+            self._reprocess_worker.wait()
+            self._reprocess_worker = None
+        self._multi_settings._progress_bar.hide()
+        self._multi_settings._progress_label.hide()
+        self._multi_settings._progress_bar.setValue(0)
+
+        self.set_status(f"Reprocess error: {message}")
+        self._log_panel.append_line(f"Reprocess error: {message}", "error")
+
+    # ------------------------------------------------------------------
+    # Person track loading (from multi pipeline results)
+    # ------------------------------------------------------------------
+
+    def _load_person_tracks_from_result(self, multi_result):
+        """Convert MultiPersonResult into session.person_tracks."""
+        from models.session import PersonTrack
+
+        self._session.person_tracks.clear()
+        self._session.inactive_tracks.clear()
+
+        all_tracks = getattr(multi_result, "all_tracks", [])
+        person_dirs = getattr(multi_result, "person_dirs", [])
+        identity_tracks = getattr(multi_result, "identity_tracks", [])
+
+        for i, track in enumerate(all_tracks):
+            tid = track.get("track_id", i)
+            bboxes_raw = track["bbx_xyxy"]
+            if hasattr(bboxes_raw, "numpy"):
+                bboxes = bboxes_raw.cpu().numpy()
             else:
-                self._frame_label.setText("")
-                self._fps_label.setText("")
+                bboxes = np.asarray(bboxes_raw)
+
+            person_dir = Path(person_dirs[i]) if i < len(person_dirs) else None
+            id_track = identity_tracks[i] if i < len(identity_tracks) else None
+
+            keyframes = []
+            if id_track and hasattr(id_track, "keyframes"):
+                for kf in id_track.keyframes:
+                    keyframes.append({
+                        "frame": kf.frame_index,
+                        "verified": kf.verified,
+                        "confidence": getattr(kf, "confidence", None),
+                    })
+
+            confidences = None
+            confidence_breakdown = None
+            if person_dir:
+                confidences, confidence_breakdown = self._load_confidences_csv(
+                    person_dir
+                )
+
+            smplx_params = None
+            if person_dir:
+                smplx_params = self._load_smplx_params(person_dir)
+
+            pt = PersonTrack(
+                person_id=tid,
+                person_dir=person_dir,
+                identity_track=id_track,
+                confidences=confidences,
+                bboxes=bboxes,
+                keyframes=keyframes,
+                confidence_breakdown=confidence_breakdown,
+                smplx_params=smplx_params,
+            )
+            self._session.person_tracks[tid] = pt
+
+        # Mark inactive tracks
+        for track in getattr(multi_result, "inactive_tracks", []):
+            tid = track.get("track_id", -1) if isinstance(track, dict) else -1
+            if tid >= 0:
+                self._session.inactive_tracks.add(tid)
+
+        # Load crossing spans from person dirs
+        for pid, pt in self._session.person_tracks.items():
+            if pt.person_dir:
+                spans_path = pt.person_dir / "crossing_spans.json"
+                if spans_path.is_file():
+                    import json
+                    try:
+                        spans = json.loads(spans_path.read_text())
+                        self._session.crossing_spans[pid] = [
+                            tuple(s) for s in spans
+                        ]
+                    except Exception:
+                        pass
+
+    def _load_smplx_params(self, person_dir: Path) -> dict | None:
+        """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering."""
+        hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
+        if not hmr4d_pt.is_file():
+            return None
+        try:
+            import torch
+
+            results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
+            params = results.get("smpl_params_incam")
+            if params and "body_pose" in params:
+                K = results.get("K_fullimg")
+                if K is not None and self._session.camera_K is None:
+                    self._session.camera_K = K[0].numpy()
+                return params
+        except Exception:
+            pass
+        return None
+
+    def _load_confidences_csv(self, person_dir: Path):
+        """Load confidence.csv -> (overall_list, breakdown_dict)."""
+        import csv
+
+        csv_path = person_dir / "confidence.csv"
+        if not csv_path.is_file():
+            return None, None
+
+        overall = []
+        breakdown = {
+            m: [] for m in [
+                "detection", "visibility", "overlap",
+                "shape", "motion", "overall",
+            ]
+        }
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                overall.append(float(row["overall"]))
+                breakdown["detection"].append(float(row["detection"]))
+                breakdown["visibility"].append(float(row["visible_kp"]))
+                breakdown["overlap"].append(float(row["bbox_overlap"]))
+                breakdown["shape"].append(float(row["shape_dist"]))
+                breakdown["motion"].append(float(row["motion_dist"]))
+                breakdown["overall"].append(float(row["overall"]))
+        return overall if overall else None, breakdown if overall else None
+
+    def _populate_tracks(self):
+        """Populate track overview from session person_tracks."""
+        if not self._session.person_tracks:
+            return
+
+        tracks: dict[int, np.ndarray] = {}
+        for pid, track in self._session.person_tracks.items():
+            if track.confidences is not None:
+                tracks[pid] = np.array(track.confidences)
+            else:
+                tracks[pid] = np.ones(max(1, self._session.num_frames)) * 0.8
+        self._track_overview.set_tracks(tracks)
+
+    # ------------------------------------------------------------------
+    # Open video
+    # ------------------------------------------------------------------
 
     def _on_open_video(self):
-        """Open Video menu action — load video into the active tab."""
+        """Open Video menu action — load video into the active settings panel."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Video",
@@ -489,9 +960,9 @@ class AppWindow(QMainWindow):
             "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv *.wmv);;All Files (*)",
         )
         if path:
-            current = self._tabs.currentWidget()
-            if hasattr(current, "_load_video"):
-                current._load_video(path)
+            settings = self._pipeline_dock.current_settings
+            if hasattr(settings, "_load_video"):
+                settings._load_video(path)
 
     @property
     def session(self) -> Session:
@@ -585,7 +1056,7 @@ class AppWindow(QMainWindow):
             QMessageBox.warning(self, "Load Error", f"Failed to load session:\n{e}")
             return
 
-        # Copy all fields to shared session object (tabs hold a reference)
+        # Copy all fields to shared session object (panels hold a reference)
         # Preserve the existing undo stack (with its on_changed callback)
         saved_undo_stack = self._session.undo_stack
         for attr in vars(loaded):
@@ -596,11 +1067,11 @@ class AppWindow(QMainWindow):
         self._session_path = session_path
         self._add_recent(session_path)
 
-        # If video exists, load into current tab to set up the UI
+        # If video exists, load into current settings panel
         if self._session.video_path and self._session.video_path.is_file():
-            current = self._tabs.currentWidget()
-            if hasattr(current, "_load_video"):
-                current._load_video(str(self._session.video_path))
+            settings = self._pipeline_dock.current_settings
+            if hasattr(settings, "_load_video"):
+                settings._load_video(str(self._session.video_path))
 
         self.set_status(f"Session loaded from {session_path.name}")
         self.session_loaded.emit(self._session)

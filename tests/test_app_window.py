@@ -71,8 +71,8 @@ class TestAppWindowConstruction:
     def test_window_title(self, app_window):
         assert "bodypipe" in app_window.windowTitle()
 
-    def test_has_three_tabs(self, app_window):
-        assert app_window._tabs.count() == 3
+    def test_has_pipeline_dock_with_three_modes(self, app_window):
+        assert app_window._pipeline_dock.mode_combo.count() == 3
 
     def test_has_session(self, app_window):
         assert isinstance(app_window.session, Session)
@@ -286,14 +286,14 @@ class TestSessionLoad:
         assert app_window._session_path is None
 
     def test_load_preserves_shared_reference(self, app_window, tmp_session_file):
-        """Tabs should still see updates via their shared session reference."""
-        tab_session_ref = app_window._tab_single._session
+        """Settings widgets should still see updates via shared session reference."""
+        settings_session_ref = app_window._single_settings._session
         app_window._load_session(tmp_session_file)
 
-        # The tab's reference should be the same object
-        assert tab_session_ref is app_window._session
+        # The settings widget's reference should be the same object
+        assert settings_session_ref is app_window._session
         # And it should have the loaded values
-        assert tab_session_ref.num_frames == 100
+        assert settings_session_ref.num_frames == 100
 
     def test_round_trip_save_load(self, app_window, tmp_path):
         """Save then load produces equivalent session state."""
@@ -467,24 +467,23 @@ class TestStatusAndLogging:
 
 
 # ---------------------------------------------------------------------------
-# Tab video_player property
+# Shared VideoPlayer
 # ---------------------------------------------------------------------------
 
 
-class TestTabVideoPlayerProperty:
-    """Each tab exposes a video_player property for status bar wiring."""
+class TestSharedVideoPlayer:
+    """AppWindow owns a single shared VideoPlayer in the VideoDock."""
 
-    def test_single_tab_has_video_player(self, app_window):
+    def test_has_shared_video_player(self, app_window):
         from views.video_player import VideoPlayer
-        assert isinstance(app_window._tab_single.video_player, VideoPlayer)
+        assert isinstance(app_window._video_player, VideoPlayer)
 
-    def test_perf_tab_has_video_player(self, app_window):
-        from views.video_player import VideoPlayer
-        assert isinstance(app_window._tab_perf.video_player, VideoPlayer)
+    def test_video_dock_wraps_shared_player(self, app_window):
+        assert app_window._video_dock.video_player is app_window._video_player
 
-    def test_multi_tab_has_video_player(self, app_window):
-        from views.video_player import VideoPlayer
-        assert isinstance(app_window._tab_multi.video_player, VideoPlayer)
+    def test_has_mesh_viewport(self, app_window):
+        from views.mesh_viewport import MeshViewport
+        assert isinstance(app_window._mesh_viewport, MeshViewport)
 
 
 # ---------------------------------------------------------------------------
@@ -493,62 +492,49 @@ class TestTabVideoPlayerProperty:
 
 
 class TestStatusBarWiring:
-    """Status bar updates from active tab's video player frame changes."""
+    """Status bar updates from the shared video player frame changes."""
 
     def test_frame_change_updates_status_bar(self, app_window):
-        """When active tab's video player emits frame_changed, status bar updates."""
-        # Set up the single tab's player with a video
-        player = app_window._tab_single.video_player
-        player._num_frames = 200
-        player._fps = 24.0
+        """When video player emits frame_changed, status bar updates."""
+        app_window._video_player._num_frames = 200
+        app_window._video_player._fps = 24.0
 
-        # Make sure single tab is active (tab 0)
-        app_window._tabs.setCurrentIndex(0)
-
-        # Simulate frame change
-        app_window._on_tab_frame_changed(app_window._tab_single, 42)
+        app_window._on_video_frame_changed(42)
 
         assert "42" in app_window._frame_label.text()
         assert "200" in app_window._frame_label.text()
         assert "24.0" in app_window._fps_label.text()
 
-    def test_inactive_tab_frame_change_ignored(self, app_window):
-        """Frame changes from non-active tabs do not update status bar."""
-        # Tab 0 is active
-        app_window._tabs.setCurrentIndex(0)
-        app_window._frame_label.setText("")
+    def test_mode_switch_shows_multi_docks(self, app_window):
+        """Switching to multi mode shows identity/pose/track docks."""
+        app_window._pipeline_dock.set_mode("multi")
 
-        # Simulate frame change from tab 2 (not active)
-        app_window._on_tab_frame_changed(app_window._tab_multi, 99)
+        assert not app_window._identity_dock.isHidden()
+        assert not app_window._pose_corrector_dock.isHidden()
+        assert not app_window._track_overview_dock.isHidden()
 
-        assert app_window._frame_label.text() == ""
+    def test_mode_switch_hides_multi_docks(self, app_window):
+        """Switching back to single mode hides multi-only docks."""
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._pipeline_dock.set_mode("single")
 
-    def test_tab_switch_updates_status_bar(self, app_window):
-        """Switching tabs updates status bar with new tab's video state."""
-        # Set up multi tab player
-        multi_player = app_window._tab_multi.video_player
-        multi_player._num_frames = 500
-        multi_player._fps = 60.0
-        multi_player._current_frame = 123
+        assert app_window._identity_dock.isHidden()
+        assert app_window._pose_corrector_dock.isHidden()
+        assert app_window._track_overview_dock.isHidden()
 
-        # Switch to multi tab
-        app_window._on_tab_switched(2)
+    def test_mode_change_emits_tab_changed(self, app_window):
+        """mode_changed emits backward-compat tab_changed signal."""
+        received = []
+        app_window.tab_changed.connect(received.append)
+        app_window._pipeline_dock.set_mode("multi")
+        assert received == [2]
 
-        assert "123" in app_window._frame_label.text()
-        assert "500" in app_window._frame_label.text()
-        assert "60.0" in app_window._fps_label.text()
-
-    def test_tab_switch_clears_when_no_video(self, app_window):
-        """Switching to a tab with no video clears the status bar."""
-        # Set something in status bar first
-        app_window.set_frame_info(50, 100)
-        app_window.set_fps_info(30.0)
-
-        # Switch to tab with no video loaded (num_frames=0)
-        app_window._on_tab_switched(0)
-
-        assert app_window._frame_label.text() == ""
-        assert app_window._fps_label.text() == ""
+    def test_mode_change_emits_mode_changed(self, app_window):
+        """mode_changed signal carries the mode string."""
+        received = []
+        app_window.mode_changed.connect(received.append)
+        app_window._pipeline_dock.set_mode("perf")
+        assert received == ["perf"]
 
 
 # ---------------------------------------------------------------------------

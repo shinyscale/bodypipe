@@ -1063,23 +1063,24 @@ class TestPersonColors:
 
 
 class TestAppWindowIntegration:
-    """Verify that AppWindow uses MultiPersonTab for the third tab."""
+    """Verify AppWindow uses MultiPipelineSettings via _tab_multi property."""
 
-    def test_third_tab_is_multi_person(self, qapp):
+    def test_tab_multi_is_settings_widget(self, qapp):
         from app_window import AppWindow
+        from views.pipeline_settings import MultiPipelineSettings
         window = AppWindow()
-        assert isinstance(window._tab_multi, MultiPersonTab)
+        assert isinstance(window._tab_multi, MultiPipelineSettings)
 
     def test_multi_tab_status_connected(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
-        window._tab_multi.status_message.emit("multi test status")
+        window._multi_settings.status_message.emit("multi test status")
         assert window._status_label.text() == "multi test status"
 
-    def test_tab_label(self, qapp):
+    def test_mode_combo_has_multi(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
-        assert window._tabs.tabText(2) == "Multi-Person"
+        assert window._pipeline_dock.mode_combo.itemText(2) == "Multi-Person"
 
 
 # ---------------------------------------------------------------------------
