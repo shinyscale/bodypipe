@@ -98,18 +98,21 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** `app_window.py` (major rewrite), `tests/test_app_window.py`, `tests/test_single_person_tab.py`, `tests/test_perf_capture_tab.py`, `tests/test_multi_person_tab.py`
 
-### Commit 1D: Workspace Presets *(low risk)*
+### Commit 1D: Workspace Presets *(DONE)*
 
-- [ ] Add `View > Workspace` submenu to `app_window.py`:
-  - Review: Video large center, Inspector right, Timeline bottom
-  - Correction: Video + 3D side-by-side, PoseCorrector right, Timeline bottom
-  - Tracking: Video center, Inspector right (expanded), TrackOverview bottom
-  - Pipeline: Video center, PipelineSettings left, Log bottom (expanded)
-- [ ] "Save Current Layout..." → named QByteArray in QSettings
-- [ ] "Reset to Default" → restore hardcoded initial layout
-- [ ] Add ~15 new tests
+- [x] Added `View > Workspace` submenu to `app_window.py`:
+  - Review: Video + Inspector + Timeline (hides Mesh, PoseCorrector, Log)
+  - Correction: Video + 3D + Pose Corrector + Timeline (hides Identity, Log)
+  - Tracking: Video + Inspector + Track Overview (hides Mesh, PoseCorrector, Log)
+  - Pipeline: Video + Settings + Log (hides Mesh, Identity, PoseCorrector, Track)
+- [x] "Save Current Layout..." → prompts for name, saves QByteArray in QSettings (`workspace/state/{name}`)
+- [x] "Reset to Default" → restores `_default_state` captured at init
+- [x] Custom saved layouts appear in Workspace submenu and can be restored
+- [x] `_default_state` QByteArray captured after initial dock setup, before `_restore_geometry()`
+- [x] 18 new tests in `tests/test_app_window.py`
+- [x] All 1300 tests pass (1282 original + 18 new)
 
-**Files:** `app_window.py` (~80 LOC addition)
+**Files:** `app_window.py` (~85 LOC addition), `tests/test_app_window.py`
 
 ### Commit 1E: Remove Old Tab Classes *(cleanup)*
 

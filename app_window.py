@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QFileDialog,
+    QInputDialog,
     QMessageBox,
     QMenu,
 )
@@ -266,6 +267,35 @@ class AppWindow(QMainWindow):
         "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
     )
 
+    # All content docks (excludes _log_dock which is created separately)
+    _ALL_CONTENT_DOCKS = (
+        "_pipeline_dock", "_video_dock", "_mesh_dock",
+        "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
+    )
+
+    # Built-in workspace presets: name → (description, set of visible dock attrs)
+    _WORKSPACE_PRESETS = {
+        "Review": (
+            "Video + Inspector + Timeline",
+            {"_pipeline_dock", "_video_dock", "_identity_dock",
+             "_track_overview_dock"},
+        ),
+        "Correction": (
+            "Video + 3D + Pose Corrector",
+            {"_pipeline_dock", "_video_dock", "_mesh_dock",
+             "_pose_corrector_dock", "_track_overview_dock"},
+        ),
+        "Tracking": (
+            "Video + Inspector + Track Overview",
+            {"_pipeline_dock", "_video_dock", "_identity_dock",
+             "_track_overview_dock"},
+        ),
+        "Pipeline": (
+            "Video + Settings + Log",
+            {"_pipeline_dock", "_video_dock"},
+        ),
+    }
+
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
         self._session = Session()
@@ -289,6 +319,8 @@ class AppWindow(QMainWindow):
         self._setup_undo_redo()
         self._setup_signal_hub()
         self._add_dock_view_toggles()
+        # Capture default dock layout before restoring user's saved state
+        self._default_state = self.saveState(self._DOCK_VERSION)
         self._restore_geometry()
         self._restore_pipeline_configs()
 
@@ -434,6 +466,11 @@ class AppWindow(QMainWindow):
         self._toggle_log_action.setChecked(True)
         self._view_menu.addAction(self._toggle_log_action)
 
+        self._view_menu.addSeparator()
+        self._workspace_menu = QMenu("&Workspace", self)
+        self._view_menu.addMenu(self._workspace_menu)
+        self._build_workspace_menu()
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
@@ -503,6 +540,107 @@ class AppWindow(QMainWindow):
         # Enforce mode-based dock visibility — restoreState may have made
         # multi-only docks visible from a previous session.
         self._update_dock_visibility()
+
+    # ------------------------------------------------------------------
+    # Workspace presets
+    # ------------------------------------------------------------------
+
+    def _build_workspace_menu(self):
+        """Populate the View > Workspace submenu with presets and actions."""
+        self._workspace_menu.clear()
+        for name, (desc, _visible) in self._WORKSPACE_PRESETS.items():
+            action = QAction(f"{name}  —  {desc}", self)
+            action.triggered.connect(lambda checked, n=name: self._apply_preset(n))
+            self._workspace_menu.addAction(action)
+
+        self._workspace_menu.addSeparator()
+
+        # Custom saved layouts
+        custom_names = self._get_custom_workspace_names()
+        if custom_names:
+            for cname in custom_names:
+                action = QAction(cname, self)
+                action.triggered.connect(
+                    lambda checked, n=cname: self._apply_custom_workspace(n),
+                )
+                self._workspace_menu.addAction(action)
+            self._workspace_menu.addSeparator()
+
+        save_action = QAction("Save Current Layout...", self)
+        save_action.triggered.connect(self._on_save_workspace)
+        self._workspace_menu.addAction(save_action)
+
+        reset_action = QAction("Reset to Default", self)
+        reset_action.triggered.connect(self._on_reset_workspace)
+        self._workspace_menu.addAction(reset_action)
+
+    def _apply_preset(self, name: str):
+        """Apply a built-in workspace preset by showing/hiding docks."""
+        _desc, visible_attrs = self._WORKSPACE_PRESETS[name]
+
+        # Restore default dock arrangement first
+        self.restoreState(self._default_state, self._DOCK_VERSION)
+
+        # Show/hide content docks per preset
+        for attr in self._ALL_CONTENT_DOCKS:
+            dock = getattr(self, attr, None)
+            if dock:
+                dock.setVisible(attr in visible_attrs)
+
+        # Log dock: visible only in Pipeline preset
+        if hasattr(self, "_log_dock"):
+            show_log = name == "Pipeline"
+            self._log_dock.setVisible(show_log)
+            self._toggle_log_action.setChecked(show_log)
+
+        # Raise video dock in tabified groups
+        self._video_dock.raise_()
+
+        self.set_status(f"Workspace: {name}")
+
+    def _get_custom_workspace_names(self) -> list[str]:
+        """Return names of user-saved custom workspace layouts."""
+        raw = self._settings.value("workspace/custom_names")
+        if raw and isinstance(raw, list):
+            return raw
+        return []
+
+    def _on_save_workspace(self):
+        """Prompt for a name and save the current dock layout."""
+        name, ok = QInputDialog.getText(
+            self, "Save Workspace", "Layout name:",
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # Save the current state bytes
+        state = self.saveState(self._DOCK_VERSION)
+        self._settings.setValue(f"workspace/state/{name}", state)
+
+        # Update the custom names list
+        names = self._get_custom_workspace_names()
+        if name not in names:
+            names.append(name)
+        self._settings.setValue("workspace/custom_names", names)
+
+        # Rebuild menu to include the new entry
+        self._build_workspace_menu()
+        self.set_status(f"Workspace saved: {name}")
+
+    def _apply_custom_workspace(self, name: str):
+        """Restore a user-saved custom workspace layout."""
+        state = self._settings.value(f"workspace/state/{name}")
+        if state and isinstance(state, QByteArray):
+            self.restoreState(state, self._DOCK_VERSION)
+            self._update_dock_visibility()
+            self.set_status(f"Workspace: {name}")
+
+    def _on_reset_workspace(self):
+        """Restore the hardcoded initial dock layout."""
+        self.restoreState(self._default_state, self._DOCK_VERSION)
+        self._update_dock_visibility()
+        self.set_status("Workspace reset to default")
 
     # ------------------------------------------------------------------
     # Pipeline config persistence

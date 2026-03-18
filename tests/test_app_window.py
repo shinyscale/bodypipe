@@ -28,6 +28,7 @@ def app_window(qapp):
     settings.remove("pipeline_config/single")
     settings.remove("pipeline_config/perf")
     settings.remove("pipeline_config/multi")
+    settings.remove("workspace")
     settings.sync()
 
     window = AppWindow()
@@ -733,3 +734,162 @@ class TestPipelineConfigPersistence:
         w2.close()
         if shiboken6.isValid(w2):
             shiboken6.delete(w2)
+
+
+# ---------------------------------------------------------------------------
+# Workspace Presets
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspacePresets:
+    """Test View > Workspace submenu and preset/custom layout management."""
+
+    def test_workspace_submenu_exists(self, app_window):
+        """Workspace submenu is present under View menu."""
+        assert app_window._workspace_menu is not None
+        assert app_window._workspace_menu.title() == "&Workspace"
+
+    def test_workspace_menu_has_four_presets(self, app_window):
+        """Four built-in presets appear as actions."""
+        actions = [a for a in app_window._workspace_menu.actions()
+                   if not a.isSeparator() and a.text() not in (
+                       "Save Current Layout...", "Reset to Default")]
+        assert len(actions) == 4
+        names = [a.text().split("  —")[0] for a in actions]
+        assert "Review" in names
+        assert "Correction" in names
+        assert "Tracking" in names
+        assert "Pipeline" in names
+
+    def test_workspace_menu_has_save_action(self, app_window):
+        """'Save Current Layout...' action exists."""
+        texts = [a.text() for a in app_window._workspace_menu.actions()]
+        assert "Save Current Layout..." in texts
+
+    def test_workspace_menu_has_reset_action(self, app_window):
+        """'Reset to Default' action exists."""
+        texts = [a.text() for a in app_window._workspace_menu.actions()]
+        assert "Reset to Default" in texts
+
+    def test_default_state_captured(self, app_window):
+        """_default_state QByteArray is captured at init."""
+        from PySide6.QtCore import QByteArray
+        assert isinstance(app_window._default_state, QByteArray)
+        assert len(app_window._default_state) > 0
+
+    def test_apply_review_preset(self, app_window):
+        """Review preset shows video, identity, track; hides mesh, pose."""
+        app_window._apply_preset("Review")
+
+        assert not app_window._video_dock.isHidden()
+        assert not app_window._identity_dock.isHidden()
+        assert not app_window._track_overview_dock.isHidden()
+        assert app_window._mesh_dock.isHidden()
+        assert app_window._pose_corrector_dock.isHidden()
+
+    def test_apply_correction_preset(self, app_window):
+        """Correction preset shows video, mesh, pose corrector; hides identity."""
+        app_window._apply_preset("Correction")
+
+        assert not app_window._video_dock.isHidden()
+        assert not app_window._mesh_dock.isHidden()
+        assert not app_window._pose_corrector_dock.isHidden()
+        assert not app_window._track_overview_dock.isHidden()
+        assert app_window._identity_dock.isHidden()
+
+    def test_apply_tracking_preset(self, app_window):
+        """Tracking preset shows video, identity, track; hides mesh, pose."""
+        app_window._apply_preset("Tracking")
+
+        assert not app_window._video_dock.isHidden()
+        assert not app_window._identity_dock.isHidden()
+        assert not app_window._track_overview_dock.isHidden()
+        assert app_window._mesh_dock.isHidden()
+        assert app_window._pose_corrector_dock.isHidden()
+
+    def test_apply_pipeline_preset(self, app_window):
+        """Pipeline preset shows video + pipeline + log; hides inspector docks."""
+        app_window._apply_preset("Pipeline")
+
+        assert not app_window._video_dock.isHidden()
+        assert not app_window._pipeline_dock.isHidden()
+        assert not app_window._log_dock.isHidden()
+        assert app_window._mesh_dock.isHidden()
+        assert app_window._identity_dock.isHidden()
+        assert app_window._pose_corrector_dock.isHidden()
+        assert app_window._track_overview_dock.isHidden()
+
+    def test_pipeline_preset_hides_log_toggle_synced(self, app_window):
+        """Pipeline preset sets the log toggle action to checked."""
+        app_window._apply_preset("Pipeline")
+        assert app_window._toggle_log_action.isChecked() is True
+
+    def test_non_pipeline_preset_hides_log(self, app_window):
+        """Non-Pipeline presets hide the log dock."""
+        app_window._apply_preset("Review")
+        assert app_window._log_dock.isHidden()
+
+    def test_apply_preset_updates_status(self, app_window):
+        """Applying a preset updates the status bar."""
+        app_window._apply_preset("Review")
+        assert "Review" in app_window._status_label.text()
+
+    def test_reset_workspace_restores_default(self, app_window):
+        """Reset to Default restores the initial dock layout."""
+        # Apply a preset that hides some docks
+        app_window._apply_preset("Pipeline")
+        assert app_window._mesh_dock.isHidden()
+
+        # Reset
+        app_window._on_reset_workspace()
+
+        # After reset, default layout is restored — video dock should be visible
+        assert not app_window._video_dock.isHidden()
+        assert "reset" in app_window._status_label.text().lower()
+
+    @patch("app_window.QInputDialog.getText", return_value=("My Layout", True))
+    def test_save_custom_workspace(self, mock_input, app_window):
+        """Saving a custom workspace stores state in QSettings."""
+        app_window._on_save_workspace()
+
+        names = app_window._get_custom_workspace_names()
+        assert "My Layout" in names
+        # Verify the state bytes are stored
+        state = app_window._settings.value("workspace/state/My Layout")
+        assert state is not None
+        assert "My Layout" in app_window._status_label.text()
+
+    @patch("app_window.QInputDialog.getText", return_value=("", False))
+    def test_save_custom_workspace_cancelled(self, mock_input, app_window):
+        """Cancelling save dialog does not create a custom workspace."""
+        app_window._on_save_workspace()
+        names = app_window._get_custom_workspace_names()
+        assert len(names) == 0
+
+    @patch("app_window.QInputDialog.getText", return_value=("Test WS", True))
+    def test_custom_workspace_appears_in_menu(self, mock_input, app_window):
+        """After saving, custom workspace appears in the submenu."""
+        app_window._on_save_workspace()
+
+        texts = [a.text() for a in app_window._workspace_menu.actions()]
+        assert "Test WS" in texts
+
+    @patch("app_window.QInputDialog.getText", return_value=("Saved", True))
+    def test_apply_custom_workspace(self, mock_input, app_window):
+        """Restoring a custom workspace applies the saved state."""
+        # Save current state as "Saved"
+        app_window._on_save_workspace()
+
+        # Apply a different preset
+        app_window._apply_preset("Pipeline")
+        assert app_window._mesh_dock.isHidden()
+
+        # Restore the custom workspace
+        app_window._apply_custom_workspace("Saved")
+
+        assert "Saved" in app_window._status_label.text()
+
+    def test_get_custom_workspace_names_empty(self, app_window):
+        """No custom workspaces initially."""
+        names = app_window._get_custom_workspace_names()
+        assert names == []
