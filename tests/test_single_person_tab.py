@@ -383,7 +383,7 @@ class TestSolveConfigSaveRestore:
         tab._focal_mm.setValue(50.0)
 
         # Mock the worker to prevent actual execution
-        with patch("views.single_person_tab.GVHMRWorker") as MockWorker:
+        with patch("views.pipeline_settings.GVHMRWorker") as MockWorker:
             mock_instance = MagicMock()
             MockWorker.return_value = mock_instance
             tab._on_run()

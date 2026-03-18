@@ -300,7 +300,7 @@ class TestSolveConfigSaveRestore:
         tab._max_persons.setValue(4)
         tab._use_inpainting.setChecked(False)
 
-        with patch("views.multi_person_tab.MultiPersonWorker") as MockWorker:
+        with patch("views.pipeline_settings.MultiPersonWorker") as MockWorker:
             mock_instance = MagicMock()
             MockWorker.return_value = mock_instance
             tab._on_run()
@@ -1106,7 +1106,7 @@ class TestSplitterPersistence:
         session = Session()
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
         from PySide6.QtCore import QSettings
-        assert isinstance(tab._settings, QSettings)
+        assert isinstance(tab._qsettings, QSettings)
 
     def test_has_main_splitter_as_attribute(self, qapp):
         """main_splitter must be an instance attr for save/restore access."""
@@ -1121,9 +1121,9 @@ class TestSplitterPersistence:
         tab._save_splitter_state()
 
         # All three keys should be set
-        assert tab._settings.value("multi_person/main_splitter") is not None
-        assert tab._settings.value("multi_person/vert_splitter") is not None
-        assert tab._settings.value("multi_person/bottom_splitter") is not None
+        assert tab._qsettings.value("multi_person/main_splitter") is not None
+        assert tab._qsettings.value("multi_person/vert_splitter") is not None
+        assert tab._qsettings.value("multi_person/bottom_splitter") is not None
 
     def test_restore_splitter_state_round_trip(self, qapp):
         """Save → create new tab → verify state is restored."""
@@ -1149,9 +1149,9 @@ class TestSplitterPersistence:
         session = Session()
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
         # Clear any saved state
-        tab._settings.remove("multi_person/main_splitter")
-        tab._settings.remove("multi_person/vert_splitter")
-        tab._settings.remove("multi_person/bottom_splitter")
+        tab._qsettings.remove("multi_person/main_splitter")
+        tab._qsettings.remove("multi_person/vert_splitter")
+        tab._qsettings.remove("multi_person/bottom_splitter")
         # Restore should not raise
         tab._restore_splitter_state()
 
@@ -1161,13 +1161,13 @@ class TestSplitterPersistence:
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
 
         # Clear saved state
-        tab._settings.remove("multi_person/vert_splitter")
+        tab._qsettings.remove("multi_person/vert_splitter")
 
         # Emit splitterMoved signal (pos, index)
         tab._vert_splitter.splitterMoved.emit(200, 0)
 
         # State should now be saved
-        assert tab._settings.value("multi_person/vert_splitter") is not None
+        assert tab._qsettings.value("multi_person/vert_splitter") is not None
 
     def test_all_three_splitters_connected(self, qapp):
         """All three splitters must have splitterMoved wired to save."""
@@ -1176,19 +1176,19 @@ class TestSplitterPersistence:
 
         # Clear all saved state
         for key in ("main_splitter", "vert_splitter", "bottom_splitter"):
-            tab._settings.remove(f"multi_person/{key}")
+            tab._qsettings.remove(f"multi_person/{key}")
 
         # Fire splitterMoved on each
         tab._main_splitter.splitterMoved.emit(100, 0)
-        assert tab._settings.value("multi_person/main_splitter") is not None
+        assert tab._qsettings.value("multi_person/main_splitter") is not None
 
-        tab._settings.remove("multi_person/vert_splitter")
+        tab._qsettings.remove("multi_person/vert_splitter")
         tab._vert_splitter.splitterMoved.emit(200, 0)
-        assert tab._settings.value("multi_person/vert_splitter") is not None
+        assert tab._qsettings.value("multi_person/vert_splitter") is not None
 
-        tab._settings.remove("multi_person/bottom_splitter")
+        tab._qsettings.remove("multi_person/bottom_splitter")
         tab._bottom_splitter.splitterMoved.emit(150, 0)
-        assert tab._settings.value("multi_person/bottom_splitter") is not None
+        assert tab._qsettings.value("multi_person/bottom_splitter") is not None
 
 
 # ---------------------------------------------------------------------------
