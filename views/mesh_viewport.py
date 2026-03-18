@@ -8,6 +8,12 @@ and shaders/mesh.frag.
 
 Phase 3.3 adds skeleton overlay (bones as GL_LINES, joints as GL_POINTS)
 and click-to-select joint picking via screen-space distance.
+
+FBO color-coded joint picking renders each joint as a uniquely colored
+GL_POINT into an offscreen FBO, reads the pixel at the click position,
+and decodes the joint index.  Depth-tested so the front-most joint wins
+when multiple joints overlap on screen — more accurate than screen-space
+distance for overlapping joints.  Toggled via set_picking_mode().
 """
 
 from __future__ import annotations
@@ -443,6 +449,30 @@ def find_nearest_joint(
     if dists[min_idx] <= threshold:
         return min_idx
     return None
+
+
+def encode_joint_id(joint_idx: int) -> tuple[int, int, int]:
+    """Encode a joint index as a unique RGB color for FBO picking.
+
+    Joint 0 → (1, 0, 0), Joint 1 → (2, 0, 0), etc.
+    Background (no joint) is (0, 0, 0).  Supports up to 16M joints.
+    """
+    encoded = joint_idx + 1  # 0 reserved for background
+    r = encoded & 0xFF
+    g = (encoded >> 8) & 0xFF
+    b = (encoded >> 16) & 0xFF
+    return (r, g, b)
+
+
+def decode_joint_id(r: int, g: int, b: int) -> int | None:
+    """Decode an RGB pixel from FBO picking back to a joint index.
+
+    Returns None if the pixel is background (0, 0, 0).
+    """
+    encoded = r | (g << 8) | (b << 16)
+    if encoded == 0:
+        return None
+    return encoded - 1
 
 
 def k_to_projection(
@@ -889,6 +919,13 @@ class MeshViewport(_BaseWidget):
         self._show_grid: bool = True  # visible by default in orbit mode
         self._grid_y: float = 0.0  # Y level of the grid in GL space
 
+        # FBO picking state (color-coded render pass for accurate joint selection)
+        self._picking_mode: str = "fbo"  # "screen" or "fbo"
+        self._pick_fbo_id: int = 0
+        self._pick_rbo_color: int = 0
+        self._pick_rbo_depth: int = 0
+        self._pick_fbo_size: tuple[int, int] = (0, 0)
+
         # Video frame background for in-camera composite
         self._video_frame: np.ndarray | None = None  # RGB (H, W, 3) uint8
 
@@ -989,6 +1026,16 @@ class MeshViewport(_BaseWidget):
         self._show_skeleton = show
         if _HAS_GL:
             self.update()
+
+    def set_picking_mode(self, mode: str):
+        """Set joint picking mode ('screen' or 'fbo').
+
+        'screen' uses screen-space distance (fast, less accurate for overlapping).
+        'fbo' uses an offscreen color-coded render pass (more accurate).
+        """
+        if mode not in ("screen", "fbo"):
+            return
+        self._picking_mode = mode
 
     def set_show_grid(self, show: bool):
         """Toggle grid floor visibility in orbit mode."""
@@ -1267,14 +1314,171 @@ class MeshViewport(_BaseWidget):
             return None
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
-        """Screen-space joint picking: project joints, find nearest within threshold."""
+        """Pick the joint at screen position, using the active picking mode.
+
+        When ``_picking_mode`` is ``'fbo'``, renders joints as uniquely
+        colored points into an offscreen FBO and reads back the pixel.
+        Falls back to screen-space distance if FBO picking fails or is
+        disabled.
+        """
         if self._joint_positions is None:
             return None
+
+        if self._picking_mode == "fbo" and _HAS_GL and self._gl_ready:
+            result = self._fbo_pick_joint(screen_x, screen_y)
+            if result is not None:
+                return result
+            # Fall through to screen-space if FBO returned no hit
+
+        # Screen-space distance fallback
         w = self.width() if self.width() > 0 else 200
         h = self.height() if self.height() > 0 else 150
         mvp = self._projection @ self._view @ self._model_mat
         screen = project_joints_to_screen(self._joint_positions, mvp, w, h)
         return find_nearest_joint(screen_x, screen_y, screen)
+
+    def _ensure_pick_fbo(self, width: int, height: int) -> bool:
+        """Create or resize the offscreen FBO for color-coded joint picking.
+
+        Returns True if the FBO is ready to use.
+        """
+        if not _HAS_GL:
+            return False
+
+        if self._pick_fbo_id and self._pick_fbo_size == (width, height):
+            return True  # Already the right size
+
+        # Clean up old FBO
+        if self._pick_fbo_id:
+            gl.glDeleteFramebuffers(1, [self._pick_fbo_id])
+            gl.glDeleteRenderbuffers(
+                2, [self._pick_rbo_color, self._pick_rbo_depth]
+            )
+
+        self._pick_fbo_id = gl.glGenFramebuffers(1)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._pick_fbo_id)
+
+        # Color renderbuffer (RGBA8 for ID encoding)
+        self._pick_rbo_color = gl.glGenRenderbuffers(1)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self._pick_rbo_color)
+        gl.glRenderbufferStorage(
+            gl.GL_RENDERBUFFER, gl.GL_RGBA8, width, height
+        )
+        gl.glFramebufferRenderbuffer(
+            gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
+            gl.GL_RENDERBUFFER, self._pick_rbo_color,
+        )
+
+        # Depth renderbuffer (for correct occlusion among overlapping joints)
+        self._pick_rbo_depth = gl.glGenRenderbuffers(1)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self._pick_rbo_depth)
+        gl.glRenderbufferStorage(
+            gl.GL_RENDERBUFFER, gl.GL_DEPTH_COMPONENT24, width, height
+        )
+        gl.glFramebufferRenderbuffer(
+            gl.GL_FRAMEBUFFER, gl.GL_DEPTH_ATTACHMENT,
+            gl.GL_RENDERBUFFER, self._pick_rbo_depth,
+        )
+
+        status = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+        if status != gl.GL_FRAMEBUFFER_COMPLETE:
+            logger.warning("Pick FBO incomplete: 0x%x", status)
+            gl.glDeleteFramebuffers(1, [self._pick_fbo_id])
+            gl.glDeleteRenderbuffers(
+                2, [self._pick_rbo_color, self._pick_rbo_depth]
+            )
+            self._pick_fbo_id = 0
+            return False
+
+        self._pick_fbo_size = (width, height)
+        return True
+
+    def _fbo_pick_joint(self, screen_x: float, screen_y: float) -> int | None:
+        """Color-coded FBO joint picking for accurate overlapping-joint selection.
+
+        Renders each joint as a uniquely colored GL_POINT into an offscreen
+        FBO with depth testing, reads back the pixel at the click position,
+        and decodes the color to a joint index.  Depth testing ensures the
+        front-most joint wins when multiple joints overlap on screen.
+        """
+        if not _HAS_GL or not self._gl_ready:
+            return None
+
+        joints = self._joint_positions
+        if joints is None:
+            return None
+
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return None
+
+        self.makeCurrent()
+
+        if not self._ensure_pick_fbo(w, h):
+            self.doneCurrent()
+            return None
+
+        # Bind FBO and clear
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._pick_fbo_id)
+        gl.glViewport(0, 0, w, h)
+        gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+        # Depth test for correct occlusion; no backface culling for points
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        # Render joints with unique ID colors (unlit)
+        self._shader.bind()
+        self._set_mat4("model", self._model_mat)
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        # Build joint positions + ID colors (body joints only by default)
+        n = min(len(joints), _N_BODY_JOINTS)
+        jv = joints[:n].astype(np.float32)
+        jn = np.zeros_like(jv)
+        jc = np.zeros((n, 3), dtype=np.float32)
+        for i in range(n):
+            r, g, b = encode_joint_id(i)
+            jc[i] = [r / 255.0, g / 255.0, b / 255.0]
+
+        # Large point size so clicking near a joint registers
+        pick_size = max(_JOINT_PICK_THRESHOLD, _SELECTED_JOINT_POINT_SIZE)
+        self._draw_primitive(
+            gl.GL_POINTS, jv, jn, jc, point_size=pick_size,
+        )
+
+        self._shader.release()
+
+        # Read pixel at click position (flip Y for GL coordinate system)
+        px = max(0, min(int(screen_x), w - 1))
+        py = max(0, min(h - 1 - int(screen_y), h - 1))
+
+        pixel = gl.glReadPixels(px, py, 1, 1, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+
+        # Restore default framebuffer + state
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, w, h)
+        gl.glEnable(gl.GL_CULL_FACE)
+
+        self.doneCurrent()
+
+        # Decode pixel → joint index
+        if pixel is not None and len(pixel) >= 3:
+            r_val = int(pixel[0]) if not isinstance(pixel[0], int) else pixel[0]
+            g_val = int(pixel[1]) if not isinstance(pixel[1], int) else pixel[1]
+            b_val = int(pixel[2]) if not isinstance(pixel[2], int) else pixel[2]
+            result = decode_joint_id(r_val, g_val, b_val)
+            if result is not None and result < _N_BODY_JOINTS:
+                return result
+        return None
 
     # ------------------------------------------------------------------
     # SMPL-X model loading

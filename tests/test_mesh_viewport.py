@@ -31,6 +31,8 @@ from views.mesh_viewport import (
     forward_kinematics,
     project_joints_to_screen,
     find_nearest_joint,
+    encode_joint_id,
+    decode_joint_id,
     JOINT_NAMES,
     JOINT_PARENTS,
     DEFAULT_OFFSETS,
@@ -2158,3 +2160,188 @@ class TestVideoFrameComposite:
         assert w._video_frame is not None
         assert w._video_frame.shape == (100, 200, 3)
         np.testing.assert_array_equal(w._video_frame, 128)
+
+
+# ======================================================================
+# FBO color-coded joint picking tests
+# ======================================================================
+
+
+class TestEncodeJointId:
+    """encode_joint_id: joint index → unique (R, G, B) color."""
+
+    def test_joint_zero(self):
+        """Joint 0 encodes to (1, 0, 0) — 0 is reserved for background."""
+        assert encode_joint_id(0) == (1, 0, 0)
+
+    def test_joint_one(self):
+        assert encode_joint_id(1) == (2, 0, 0)
+
+    def test_joint_51(self):
+        """Last SMPL-X joint encodes correctly."""
+        r, g, b = encode_joint_id(51)
+        assert r == 52
+        assert g == 0
+        assert b == 0
+
+    def test_large_index_uses_multiple_channels(self):
+        """Joint index 255 → (0, 1, 0) since 256 = 0x100."""
+        r, g, b = encode_joint_id(255)
+        assert r == 0
+        assert g == 1
+        assert b == 0
+
+    def test_all_body_joints_unique(self):
+        """All 22 body joint colors must be distinct."""
+        colors = {encode_joint_id(i) for i in range(22)}
+        assert len(colors) == 22
+
+    def test_all_52_joints_unique(self):
+        """All 52 SMPL-X joint colors must be distinct."""
+        colors = {encode_joint_id(i) for i in range(52)}
+        assert len(colors) == 52
+
+    def test_no_joint_encodes_to_black(self):
+        """No valid joint should encode to (0, 0, 0) (reserved for background)."""
+        for i in range(1000):
+            assert encode_joint_id(i) != (0, 0, 0)
+
+
+class TestDecodeJointId:
+    """decode_joint_id: (R, G, B) → joint index or None."""
+
+    def test_background_returns_none(self):
+        """(0, 0, 0) is background — no joint hit."""
+        assert decode_joint_id(0, 0, 0) is None
+
+    def test_decode_joint_zero(self):
+        assert decode_joint_id(1, 0, 0) == 0
+
+    def test_decode_joint_one(self):
+        assert decode_joint_id(2, 0, 0) == 1
+
+    def test_decode_joint_51(self):
+        assert decode_joint_id(52, 0, 0) == 51
+
+    def test_roundtrip_all_body_joints(self):
+        """Encode then decode for all 22 body joints."""
+        for i in range(22):
+            r, g, b = encode_joint_id(i)
+            assert decode_joint_id(r, g, b) == i
+
+    def test_roundtrip_all_52_joints(self):
+        """Encode then decode for all 52 SMPL-X joints."""
+        for i in range(52):
+            r, g, b = encode_joint_id(i)
+            assert decode_joint_id(r, g, b) == i
+
+    def test_roundtrip_large_index(self):
+        """Roundtrip for index 1000 (uses G channel)."""
+        r, g, b = encode_joint_id(1000)
+        assert decode_joint_id(r, g, b) == 1000
+
+    def test_decode_multi_channel(self):
+        """Decode a color that spans R and G channels."""
+        # 255 → encoded = 256 → R=0, G=1
+        assert decode_joint_id(0, 1, 0) == 255
+
+
+class TestMeshViewportFboPicking:
+    """MeshViewport FBO picking mode: state, API, and dispatch."""
+
+    def test_default_picking_mode_is_fbo(self, qapp):
+        """Default picking mode should be 'fbo'."""
+        w = MeshViewport()
+        assert w._picking_mode == "fbo"
+
+    def test_set_picking_mode_screen(self, qapp):
+        w = MeshViewport()
+        w.set_picking_mode("screen")
+        assert w._picking_mode == "screen"
+
+    def test_set_picking_mode_fbo(self, qapp):
+        w = MeshViewport()
+        w.set_picking_mode("screen")
+        w.set_picking_mode("fbo")
+        assert w._picking_mode == "fbo"
+
+    def test_set_picking_mode_invalid_ignored(self, qapp):
+        w = MeshViewport()
+        w.set_picking_mode("invalid")
+        assert w._picking_mode == "fbo"  # unchanged
+
+    def test_has_set_picking_mode_method(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "set_picking_mode")
+        assert callable(w.set_picking_mode)
+
+    def test_pick_fbo_state_initialized(self, qapp):
+        """FBO resources should start at zero (not yet created)."""
+        w = MeshViewport()
+        assert w._pick_fbo_id == 0
+        assert w._pick_rbo_color == 0
+        assert w._pick_rbo_depth == 0
+        assert w._pick_fbo_size == (0, 0)
+
+    def test_pick_joint_screen_mode_no_fbo(self, qapp):
+        """In 'screen' mode, _pick_joint should use screen-space distance."""
+        w = MeshViewport()
+        w.set_picking_mode("screen")
+        w._joint_positions = np.zeros((52, 3))
+        w._joint_positions[5] = [0, 0, -2]
+
+        # Mock to verify screen-space path is used
+        with patch.object(w, "_fbo_pick_joint") as mock_fbo:
+            w._pick_joint(100, 100)
+            mock_fbo.assert_not_called()
+
+    def test_pick_joint_fbo_mode_attempts_fbo(self, qapp):
+        """In 'fbo' mode with GL ready, _pick_joint should attempt FBO picking."""
+        w = MeshViewport()
+        w._picking_mode = "fbo"
+        w._gl_ready = True
+        w._joint_positions = np.zeros((52, 3))
+
+        with patch.object(w, "_fbo_pick_joint", return_value=5) as mock_fbo:
+            result = w._pick_joint(100, 100)
+            if _HAS_GL:
+                mock_fbo.assert_called_once_with(100, 100)
+                assert result == 5
+
+    def test_pick_joint_fbo_fallback_to_screen(self, qapp):
+        """When FBO returns None, _pick_joint should fall back to screen-space."""
+        w = MeshViewport()
+        w._picking_mode = "fbo"
+        w._gl_ready = True
+        w._joint_positions = np.zeros((52, 3))
+        w._joint_positions[0] = [0, 0, 0]
+
+        with patch.object(w, "_fbo_pick_joint", return_value=None):
+            # Should fall through to screen-space distance
+            result = w._pick_joint(100, 100)
+            # Result depends on projection — just verify no crash
+            assert result is None or isinstance(result, int)
+
+    def test_fbo_pick_joint_no_gl(self, qapp):
+        """_fbo_pick_joint returns None when GL is not ready."""
+        w = MeshViewport()
+        w._gl_ready = False
+        w._joint_positions = np.zeros((52, 3))
+        assert w._fbo_pick_joint(100, 100) is None
+
+    def test_fbo_pick_joint_no_joints(self, qapp):
+        """_fbo_pick_joint returns None when no joint positions exist."""
+        w = MeshViewport()
+        w._gl_ready = True
+        w._joint_positions = None
+        assert w._fbo_pick_joint(100, 100) is None
+
+    def test_has_fbo_pick_joint_method(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "_fbo_pick_joint")
+        assert callable(w._fbo_pick_joint)
+
+    def test_has_ensure_pick_fbo_method(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "_ensure_pick_fbo")
+        assert callable(w._ensure_pick_fbo)
