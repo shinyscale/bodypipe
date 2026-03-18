@@ -284,6 +284,12 @@ class FullPipelineWorker(SubprocessWorkerBase):
                         f"Merged hybrid: {world_params['num_frames']} frames"
                     )
 
+                    # HaMeR hand replacement (if selected)
+                    if self._config.hand_source == "hamer":
+                        world_params, camera_params = self._try_hamer(
+                            world_params, camera_params
+                        )
+
                     # Save merged .pt for re-export
                     stem = self._video_path.stem
                     merged_path = self._output_dir / f"{stem}_hybrid_smplx.pt"
@@ -307,6 +313,41 @@ class FullPipelineWorker(SubprocessWorkerBase):
         except Exception as exc:
             self.log_line.emit(f"WARNING: Merge failed: {exc}")
         return None, None
+
+    def _try_hamer(
+        self, world_params: dict, camera_params: dict
+    ) -> tuple[dict, dict]:
+        """Run HaMeR hand reconstruction and merge into existing params.
+
+        Falls back to original params if HaMeR is unavailable or fails.
+        Mirrors Gradio's HaMeR integration in ``run_full_pipeline()``.
+        """
+        try:
+            from hamer_inference import run_hamer
+        except ImportError:
+            self.log_line.emit("WARNING: hamer_inference not available, using SMPLest-X hands.")
+            return world_params, camera_params
+
+        try:
+            self.log_line.emit("Running HaMeR hand reconstruction...")
+            hamer_result = run_hamer(
+                video_path=str(self._video_path),
+                output_dir=str(self._output_dir),
+            )
+            if hamer_result is not None:
+                # Merge HaMeR hand poses into world and camera params
+                for params in (world_params, camera_params):
+                    if params is not None and "left_hand_pose" in hamer_result:
+                        params["left_hand_pose"] = hamer_result["left_hand_pose"]
+                    if params is not None and "right_hand_pose" in hamer_result:
+                        params["right_hand_pose"] = hamer_result["right_hand_pose"]
+                self.log_line.emit("HaMeR hands merged successfully.")
+            else:
+                self.log_line.emit("WARNING: HaMeR returned no results, keeping SMPLest-X hands.")
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: HaMeR failed: {exc}, keeping SMPLest-X hands.")
+
+        return world_params, camera_params
 
     # ------------------------------------------------------------------
     # Stage 4: Face pipeline
@@ -346,7 +387,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 vitpose_path = str(vp)
                 self.log_line.emit(f"Found ViTPose: {vitpose_path}")
 
-        use_vitpose = vitpose_path is not None
+        use_vitpose = self._config.use_vitpose_face_crops and vitpose_path is not None
 
         # Face blendshape extraction
         face_csv_path = str(self._output_dir / f"{stem}_arkit_blendshapes.csv")
@@ -402,14 +443,17 @@ class FullPipelineWorker(SubprocessWorkerBase):
             if world_params is not None:
                 from smplx_to_bvh import convert_params_to_bvh
 
-                convert_params_to_bvh(
-                    world_params,
-                    bvh_path,
+                bvh_kwargs = dict(
                     fps=self._fps,
                     skip_world_grounding=is_hybrid,
                     smooth_body=not is_hybrid,
                     smooth_hands=True,
                 )
+                if not is_hybrid:
+                    bvh_kwargs["pitch_adjust_deg"] = self._config.pitch_adjust
+                if self._config.body_smooth_preset != "moderate":
+                    bvh_kwargs["body_smooth_preset"] = self._config.body_smooth_preset
+                convert_params_to_bvh(world_params, bvh_path, **bvh_kwargs)
                 results["bvh"] = bvh_path
                 self.log_line.emit(f"BVH written: {bvh_path}")
             else:
@@ -439,8 +483,9 @@ class FullPipelineWorker(SubprocessWorkerBase):
         try:
             from bvh_to_fbx import convert_bvh_to_fbx
 
+            naming_key = "ue5" if "ue5" in self._config.fbx_naming.lower() else "mixamo"
             fbx_log = convert_bvh_to_fbx(
-                bvh_path, fbx_path, fps=self._fps, naming="mixamo"
+                bvh_path, fbx_path, fps=self._fps, naming=naming_key
             )
             self.log_line.emit(fbx_log)
             if "ERROR" not in fbx_log:

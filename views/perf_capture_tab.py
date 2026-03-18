@@ -1,7 +1,9 @@
 """Performance capture tab — body + hands + face pipeline.
 
-Extends SinglePersonTab with hand capture mode selection and face capture
-toggle. Uses FullPipelineWorker for multi-stage orchestration.
+Extends SinglePersonTab with hand capture mode selection, face capture
+toggle, and pipeline output settings (FPS, FBX naming, pitch adjust,
+hand source, body smoothing, ViTPose face crops). Uses FullPipelineWorker
+for multi-stage orchestration.
 """
 
 from __future__ import annotations
@@ -11,9 +13,13 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QGroupBox,
     QVBoxLayout,
+    QHBoxLayout,
     QCheckBox,
     QRadioButton,
     QButtonGroup,
+    QComboBox,
+    QDoubleSpinBox,
+    QLabel,
 )
 
 from models.pipeline_config import PipelineConfig
@@ -35,7 +41,7 @@ class PerfCaptureTab(SinglePersonTab):
         self._add_hand_face_settings()
 
     def _add_hand_face_settings(self):
-        """Insert hand and face capture settings between body settings and run button."""
+        """Insert hand/face/pipeline settings between body settings and run button."""
         if self._hand_face_added:
             return
         self._hand_face_added = True
@@ -67,9 +73,26 @@ class PerfCaptureTab(SinglePersonTab):
         hand_layout.addWidget(self._hand_hybrid)
         hand_layout.addWidget(self._hand_smplestx)
 
+        # Hand source (SMPLest-X vs HaMeR)
+        self._hand_source_group = QButtonGroup(self)
+        self._hand_src_smplestx = QRadioButton("SMPLest-X (default)")
+        self._hand_src_smplestx.setChecked(True)
+        self._hand_src_smplestx.setToolTip("Use SMPLest-X for hand reconstruction")
+        self._hand_src_hamer = QRadioButton("HaMeR")
+        self._hand_src_hamer.setToolTip(
+            "Use HaMeR for dedicated hand mesh recovery (better fingers)"
+        )
+        self._hand_source_group.addButton(self._hand_src_smplestx)
+        self._hand_source_group.addButton(self._hand_src_hamer)
+        hand_layout.addWidget(QLabel("Hand source:"))
+        hand_layout.addWidget(self._hand_src_smplestx)
+        hand_layout.addWidget(self._hand_src_hamer)
+
         # Enable/disable radio buttons based on hand checkbox
         self._use_hands.toggled.connect(self._hand_hybrid.setEnabled)
         self._use_hands.toggled.connect(self._hand_smplestx.setEnabled)
+        self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
+        self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
 
         self._left_layout.insertWidget(run_idx, hand_group)
 
@@ -84,7 +107,68 @@ class PerfCaptureTab(SinglePersonTab):
         )
         face_layout.addWidget(self._use_face)
 
+        self._use_vitpose_face = QCheckBox("Use ViTPose face crops")
+        self._use_vitpose_face.setChecked(True)
+        self._use_vitpose_face.setToolTip(
+            "Use ViTPose keypoints for tight face crops (better for full-body shots)"
+        )
+        face_layout.addWidget(self._use_vitpose_face)
+
         self._left_layout.insertWidget(run_idx + 1, face_group)
+
+        # Pipeline output settings group
+        output_group = QGroupBox("Pipeline Settings")
+        output_layout = QVBoxLayout(output_group)
+
+        # Target FPS
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("Target FPS:"))
+        self._target_fps = QDoubleSpinBox()
+        self._target_fps.setRange(1.0, 120.0)
+        self._target_fps.setValue(30.0)
+        self._target_fps.setSingleStep(1.0)
+        self._target_fps.setDecimals(1)
+        self._target_fps.setToolTip("Output frame rate (video will be resampled)")
+        fps_row.addWidget(self._target_fps)
+        output_layout.addLayout(fps_row)
+
+        # FBX Bone Naming
+        naming_row = QHBoxLayout()
+        naming_row.addWidget(QLabel("FBX naming:"))
+        self._fbx_naming = QComboBox()
+        self._fbx_naming.addItems(["Mixamo (Cascadeur)", "UE5 Mannequin"])
+        self._fbx_naming.setToolTip("Bone naming convention for FBX export")
+        naming_row.addWidget(self._fbx_naming)
+        output_layout.addLayout(naming_row)
+
+        # Pitch Adjust
+        pitch_row = QHBoxLayout()
+        pitch_row.addWidget(QLabel("Pitch adjust:"))
+        self._pitch_adjust = QDoubleSpinBox()
+        self._pitch_adjust.setRange(-30.0, 30.0)
+        self._pitch_adjust.setValue(0.0)
+        self._pitch_adjust.setSingleStep(0.5)
+        self._pitch_adjust.setDecimals(1)
+        self._pitch_adjust.setSuffix("°")
+        self._pitch_adjust.setToolTip(
+            "Manual pitch correction on top of auto-tilt removal (-30° to +30°)"
+        )
+        pitch_row.addWidget(self._pitch_adjust)
+        output_layout.addLayout(pitch_row)
+
+        # Body Smoothing
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(QLabel("Body smoothing:"))
+        self._body_smooth = QComboBox()
+        self._body_smooth.addItems(["Light", "Moderate (default)", "Heavy"])
+        self._body_smooth.setCurrentIndex(1)  # Moderate
+        self._body_smooth.setToolTip(
+            "Temporal smoothing strength for body rotations"
+        )
+        smooth_row.addWidget(self._body_smooth)
+        output_layout.addLayout(smooth_row)
+
+        self._left_layout.insertWidget(run_idx + 2, output_group)
 
         # Update run button text
         self._run_btn.setText("Run Pipeline")
@@ -106,7 +190,7 @@ class PerfCaptureTab(SinglePersonTab):
             config=config,
             gvhmr_root=self._gvhmr_root,
             output_dir=output_dir,
-            fps=self._session.fps,
+            fps=config.target_fps,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._on_log_line)
@@ -118,11 +202,38 @@ class PerfCaptureTab(SinglePersonTab):
         self.log_message.emit("Starting full performance capture pipeline...", "info")
 
     # ------------------------------------------------------------------
-    # Settings persistence (extend with hand/face)
+    # Running state (extend to disable new controls)
+    # ------------------------------------------------------------------
+
+    def _set_running(self, running: bool):
+        super()._set_running(running)
+        self._use_hands.setEnabled(not running)
+        self._use_face.setEnabled(not running)
+        self._use_vitpose_face.setEnabled(not running)
+        self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
+        self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
+        self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
+        self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
+        self._target_fps.setEnabled(not running)
+        self._fbx_naming.setEnabled(not running)
+        self._pitch_adjust.setEnabled(not running)
+        self._body_smooth.setEnabled(not running)
+
+    # ------------------------------------------------------------------
+    # Settings persistence (extend with hand/face + pipeline settings)
     # ------------------------------------------------------------------
 
     def get_config(self) -> PipelineConfig:
-        """Return current settings including hand/face options."""
+        """Return current settings including hand/face/pipeline options."""
+        # Map body smoothing combo text to internal key
+        smooth_text = self._body_smooth.currentText()
+        if "Light" in smooth_text:
+            smooth_key = "light"
+        elif "Heavy" in smooth_text:
+            smooth_key = "heavy"
+        else:
+            smooth_key = "moderate"
+
         return PipelineConfig(
             mode="perf",
             static_cam=self._static_cam.isChecked(),
@@ -131,10 +242,16 @@ class PerfCaptureTab(SinglePersonTab):
             use_hands=self._use_hands.isChecked(),
             use_face=self._use_face.isChecked(),
             hand_mode="hybrid" if self._hand_hybrid.isChecked() else "smplestx_only",
+            target_fps=self._target_fps.value(),
+            fbx_naming=self._fbx_naming.currentText(),
+            pitch_adjust=self._pitch_adjust.value(),
+            hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
+            body_smooth_preset=smooth_key,
+            use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
-        """Apply settings including hand/face options."""
+        """Apply settings including hand/face/pipeline options."""
         super().set_config(config)
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
@@ -142,3 +259,21 @@ class PerfCaptureTab(SinglePersonTab):
             self._hand_smplestx.setChecked(True)
         else:
             self._hand_hybrid.setChecked(True)
+
+        # Hand source
+        if config.hand_source == "hamer":
+            self._hand_src_hamer.setChecked(True)
+        else:
+            self._hand_src_smplestx.setChecked(True)
+
+        # Pipeline settings
+        self._target_fps.setValue(config.target_fps)
+        idx = self._fbx_naming.findText(config.fbx_naming)
+        if idx >= 0:
+            self._fbx_naming.setCurrentIndex(idx)
+        self._pitch_adjust.setValue(config.pitch_adjust)
+        self._use_vitpose_face.setChecked(config.use_vitpose_face_crops)
+
+        # Body smoothing
+        smooth_map = {"light": 0, "moderate": 1, "heavy": 2}
+        self._body_smooth.setCurrentIndex(smooth_map.get(config.body_smooth_preset, 1))

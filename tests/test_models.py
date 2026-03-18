@@ -134,6 +134,56 @@ class TestPipelineConfig:
         assert c.render_overlays is True
         assert c.use_inpainting is False
 
+    def test_perf_capture_fields_defaults(self):
+        """Perf capture settings should have correct defaults matching Gradio Tab 2."""
+        c = PipelineConfig()
+        assert c.pitch_adjust == 0.0
+        assert c.hand_source == "smplestx"
+        assert c.body_smooth_preset == "moderate"
+        assert c.use_vitpose_face_crops is True
+
+    def test_perf_capture_fields_round_trip(self, tmp_path):
+        """pitch_adjust, hand_source, body_smooth_preset, use_vitpose_face_crops should persist."""
+        c = PipelineConfig(
+            mode="perf",
+            pitch_adjust=15.0,
+            hand_source="hamer",
+            body_smooth_preset="heavy",
+            use_vitpose_face_crops=False,
+        )
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.pitch_adjust == 15.0
+        assert loaded.hand_source == "hamer"
+        assert loaded.body_smooth_preset == "heavy"
+        assert loaded.use_vitpose_face_crops is False
+
+    def test_perf_capture_fields_in_to_dict(self):
+        """to_dict() should include perf capture fields."""
+        c = PipelineConfig(pitch_adjust=-5.0, hand_source="hamer")
+        d = c.to_dict()
+        assert "pitch_adjust" in d
+        assert "hand_source" in d
+        assert "body_smooth_preset" in d
+        assert "use_vitpose_face_crops" in d
+        assert d["pitch_adjust"] == -5.0
+        assert d["hand_source"] == "hamer"
+
+    def test_perf_capture_fields_from_dict(self):
+        """from_dict() should correctly load perf capture fields."""
+        c = PipelineConfig.from_dict({
+            "mode": "perf",
+            "pitch_adjust": -20.0,
+            "hand_source": "hamer",
+            "body_smooth_preset": "light",
+            "use_vitpose_face_crops": False,
+        })
+        assert c.pitch_adjust == -20.0
+        assert c.hand_source == "hamer"
+        assert c.body_smooth_preset == "light"
+        assert c.use_vitpose_face_crops is False
+
 
 class TestUndoStack:
     """Tests for UndoStack — the command-pattern undo/redo engine.

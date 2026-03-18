@@ -20,11 +20,16 @@ class PipelineConfig:
     hand_mode: str = "hybrid"  # "hybrid" | "smplestx_only"
     max_persons: int = 8
     confidence_threshold: float = 0.5
-    # Multi-person pipeline settings (match Gradio GUI options)
+    # Pipeline settings (match Gradio GUI options)
     target_fps: float = 30.0
     fbx_naming: str = "Mixamo (Cascadeur)"  # "Mixamo (Cascadeur)" | "UE5 Mannequin"
     render_overlays: bool = False
     use_inpainting: bool = True
+    # Perf capture settings (Gradio Tab 2 parity)
+    pitch_adjust: float = 0.0  # -30.0 to +30.0 degrees
+    hand_source: str = "smplestx"  # "smplestx" | "hamer"
+    body_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
+    use_vitpose_face_crops: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +46,10 @@ class PipelineConfig:
             "fbx_naming": self.fbx_naming,
             "render_overlays": self.render_overlays,
             "use_inpainting": self.use_inpainting,
+            "pitch_adjust": self.pitch_adjust,
+            "hand_source": self.hand_source,
+            "body_smooth_preset": self.body_smooth_preset,
+            "use_vitpose_face_crops": self.use_vitpose_face_crops,
         }
 
     @classmethod

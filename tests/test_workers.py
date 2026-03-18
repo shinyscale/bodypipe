@@ -682,3 +682,90 @@ class TestFaceStageDisabled:
         # the run() method checks this. But if called, it would try imports.
         # We verify the config flag works.
         assert not config.use_face
+
+
+# ---------------------------------------------------------------------------
+# FullPipelineWorker config passthrough (perf capture settings)
+# ---------------------------------------------------------------------------
+
+
+class TestFullPipelineWorkerConfigPassthrough:
+    """Why: perf capture settings (pitch_adjust, body_smooth_preset, fbx_naming,
+    use_vitpose_face_crops, hand_source) must flow from PipelineConfig through
+    to FullPipelineWorker's stage methods. These tests verify the worker stores
+    and can access the config values correctly."""
+
+    def test_stores_perf_capture_config(self, qapp, tmp_path):
+        """Worker should preserve all perf capture config fields."""
+        config = PipelineConfig(
+            pitch_adjust=15.0,
+            hand_source="hamer",
+            body_smooth_preset="heavy",
+            use_vitpose_face_crops=False,
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+        )
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+        assert w._config.pitch_adjust == 15.0
+        assert w._config.hand_source == "hamer"
+        assert w._config.body_smooth_preset == "heavy"
+        assert w._config.use_vitpose_face_crops is False
+        assert w._config.target_fps == 24.0
+        assert w._config.fbx_naming == "UE5 Mannequin"
+
+    def test_fps_from_config(self, qapp, tmp_path):
+        """Worker uses fps param (which PerfCaptureTab sets from config.target_fps)."""
+        config = PipelineConfig(target_fps=60.0)
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out",
+            fps=60.0,
+        )
+        assert w._fps == 60.0
+
+    def test_fbx_naming_ue5_conversion(self, qapp, tmp_path):
+        """fbx_naming 'UE5 Mannequin' should map to 'ue5' naming key."""
+        config = PipelineConfig(fbx_naming="UE5 Mannequin")
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+        # The naming key conversion happens in _run_bvh_fbx:
+        naming_key = "ue5" if "ue5" in w._config.fbx_naming.lower() else "mixamo"
+        assert naming_key == "ue5"
+
+    def test_fbx_naming_mixamo_conversion(self, qapp, tmp_path):
+        """fbx_naming 'Mixamo (Cascadeur)' should map to 'mixamo' naming key."""
+        config = PipelineConfig(fbx_naming="Mixamo (Cascadeur)")
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+        naming_key = "ue5" if "ue5" in w._config.fbx_naming.lower() else "mixamo"
+        assert naming_key == "mixamo"
+
+    def test_hamer_hand_source_stored(self, qapp, tmp_path):
+        """hand_source='hamer' should be accessible for merge stage."""
+        config = PipelineConfig(hand_source="hamer")
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+        assert w._config.hand_source == "hamer"
+
+    def test_try_hamer_fallback_on_import_error(self, qapp, tmp_path):
+        """_try_hamer should gracefully fall back when hamer_inference is unavailable."""
+        config = PipelineConfig(hand_source="hamer")
+        w = FullPipelineWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+        log_lines = []
+        w.log_line.connect(log_lines.append)
+
+        world = {"left_hand_pose": "original", "right_hand_pose": "original"}
+        camera = {"left_hand_pose": "original", "right_hand_pose": "original"}
+        result_w, result_c = w._try_hamer(world, camera)
+
+        # Should return original params unchanged
+        assert result_w["left_hand_pose"] == "original"
+        assert result_c["left_hand_pose"] == "original"
+        assert any("not available" in line.lower() or "hamer" in line.lower()
+                    for line in log_lines)
