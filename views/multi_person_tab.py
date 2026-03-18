@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QSpinBox,
     QProgressBar,
@@ -177,6 +178,25 @@ class MultiPersonTab(QWidget):
         focal_row.addWidget(self._focal_mm)
         settings_layout.addLayout(focal_row)
 
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("Target FPS:"))
+        self._target_fps = QDoubleSpinBox()
+        self._target_fps.setRange(1.0, 120.0)
+        self._target_fps.setValue(30.0)
+        self._target_fps.setSingleStep(1.0)
+        self._target_fps.setDecimals(1)
+        self._target_fps.setToolTip("Target frame rate for preprocessing")
+        fps_row.addWidget(self._target_fps)
+        settings_layout.addLayout(fps_row)
+
+        naming_row = QHBoxLayout()
+        naming_row.addWidget(QLabel("FBX naming:"))
+        self._fbx_naming = QComboBox()
+        self._fbx_naming.addItems(["Mixamo (Cascadeur)", "UE5 Mannequin"])
+        self._fbx_naming.setToolTip("Bone naming convention for FBX export")
+        naming_row.addWidget(self._fbx_naming)
+        settings_layout.addLayout(naming_row)
+
         sidebar_layout.addWidget(settings_group)
 
         # Multi-person specific settings
@@ -201,6 +221,21 @@ class MultiPersonTab(QWidget):
         self._confidence_threshold.setToolTip("Minimum confidence to keep a track")
         thresh_row.addWidget(self._confidence_threshold)
         mp_layout.addLayout(thresh_row)
+
+        self._use_inpainting = QCheckBox("SAM2 + ProPainter inpainting")
+        self._use_inpainting.setChecked(True)
+        self._use_inpainting.setToolTip(
+            "Pixel-accurate isolation via segmentation + video inpainting. "
+            "Required for front-crossings / heavy occlusion. Very slow (~5min/person)."
+        )
+        mp_layout.addWidget(self._use_inpainting)
+
+        self._render_overlays = QCheckBox("Render per-person overlays")
+        self._render_overlays.setChecked(False)
+        self._render_overlays.setToolTip(
+            "Render in-camera mesh overlay per person (slower)"
+        )
+        mp_layout.addWidget(self._render_overlays)
 
         sidebar_layout.addWidget(mp_group)
 
@@ -645,6 +680,10 @@ class MultiPersonTab(QWidget):
         self._focal_mm.setEnabled(not running)
         self._max_persons.setEnabled(not running)
         self._confidence_threshold.setEnabled(not running)
+        self._target_fps.setEnabled(not running)
+        self._fbx_naming.setEnabled(not running)
+        self._render_overlays.setEnabled(not running)
+        self._use_inpainting.setEnabled(not running)
         if not running:
             self._progress_bar.setValue(0)
             self._progress_label.setText("")
@@ -703,6 +742,10 @@ class MultiPersonTab(QWidget):
             focal_mm=self._focal_mm.value(),
             max_persons=self._max_persons.value(),
             confidence_threshold=self._confidence_threshold.value(),
+            target_fps=self._target_fps.value(),
+            fbx_naming=self._fbx_naming.currentText(),
+            render_overlays=self._render_overlays.isChecked(),
+            use_inpainting=self._use_inpainting.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -711,3 +754,9 @@ class MultiPersonTab(QWidget):
         self._focal_mm.setValue(config.focal_mm)
         self._max_persons.setValue(config.max_persons)
         self._confidence_threshold.setValue(config.confidence_threshold)
+        self._target_fps.setValue(config.target_fps)
+        idx = self._fbx_naming.findText(config.fbx_naming)
+        if idx >= 0:
+            self._fbx_naming.setCurrentIndex(idx)
+        self._render_overlays.setChecked(config.render_overlays)
+        self._use_inpainting.setChecked(config.use_inpainting)

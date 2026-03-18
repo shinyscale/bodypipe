@@ -61,12 +61,16 @@ class TestMultiPersonTabConstruction:
         assert tab._static_cam is not None
         assert tab._use_dpvo is not None
         assert tab._focal_mm is not None
+        assert tab._target_fps is not None
+        assert tab._fbx_naming is not None
 
     def test_has_multi_person_settings(self, qapp):
         session = Session()
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
         assert tab._max_persons is not None
         assert tab._confidence_threshold is not None
+        assert tab._use_inpainting is not None
+        assert tab._render_overlays is not None
 
     def test_max_persons_defaults(self, qapp):
         session = Session()
@@ -81,6 +85,29 @@ class TestMultiPersonTabConstruction:
         assert tab._confidence_threshold.value() == 0.5
         assert tab._confidence_threshold.minimum() == 0.0
         assert tab._confidence_threshold.maximum() == 1.0
+
+    def test_target_fps_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._target_fps.value() == 30.0
+        assert tab._target_fps.minimum() == 1.0
+        assert tab._target_fps.maximum() == 120.0
+
+    def test_fbx_naming_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._fbx_naming.currentText() == "Mixamo (Cascadeur)"
+        assert tab._fbx_naming.count() == 2
+
+    def test_use_inpainting_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._use_inpainting.isChecked() is True
+
+    def test_render_overlays_defaults(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._render_overlays.isChecked() is False
 
     def test_has_video_player(self, qapp):
         session = Session()
@@ -159,6 +186,10 @@ class TestMultiPersonSettings:
         assert config.focal_mm == 24.0
         assert config.max_persons == 8
         assert config.confidence_threshold == 0.5
+        assert config.target_fps == 30.0
+        assert config.fbx_naming == "Mixamo (Cascadeur)"
+        assert config.render_overlays is False
+        assert config.use_inpainting is True
 
     def test_changed_config(self, qapp):
         session = Session()
@@ -168,6 +199,10 @@ class TestMultiPersonSettings:
         tab._focal_mm.setValue(50.0)
         tab._max_persons.setValue(4)
         tab._confidence_threshold.setValue(0.7)
+        tab._target_fps.setValue(24.0)
+        tab._fbx_naming.setCurrentText("UE5 Mannequin")
+        tab._render_overlays.setChecked(True)
+        tab._use_inpainting.setChecked(False)
 
         config = tab.get_config()
         assert config.static_cam is False
@@ -175,6 +210,10 @@ class TestMultiPersonSettings:
         assert config.focal_mm == 50.0
         assert config.max_persons == 4
         assert config.confidence_threshold == 0.7
+        assert config.target_fps == 24.0
+        assert config.fbx_naming == "UE5 Mannequin"
+        assert config.render_overlays is True
+        assert config.use_inpainting is False
 
     def test_set_config(self, qapp):
         session = Session()
@@ -185,12 +224,20 @@ class TestMultiPersonSettings:
             focal_mm=85.0,
             max_persons=3,
             confidence_threshold=0.8,
+            target_fps=60.0,
+            fbx_naming="UE5 Mannequin",
+            render_overlays=True,
+            use_inpainting=False,
         ))
         assert tab._static_cam.isChecked() is False
         assert tab._use_dpvo.isChecked() is True
         assert tab._focal_mm.value() == 85.0
         assert tab._max_persons.value() == 3
         assert tab._confidence_threshold.value() == 0.8
+        assert tab._target_fps.value() == 60.0
+        assert tab._fbx_naming.currentText() == "UE5 Mannequin"
+        assert tab._render_overlays.isChecked() is True
+        assert tab._use_inpainting.isChecked() is False
 
     def test_config_round_trip(self, qapp):
         session = Session()
@@ -202,6 +249,10 @@ class TestMultiPersonSettings:
             focal_mm=35.0,
             max_persons=5,
             confidence_threshold=0.65,
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+            render_overlays=True,
+            use_inpainting=False,
         )
         tab.set_config(original)
         recovered = tab.get_config()
@@ -211,6 +262,10 @@ class TestMultiPersonSettings:
         assert recovered.focal_mm == original.focal_mm
         assert recovered.max_persons == original.max_persons
         assert recovered.confidence_threshold == original.confidence_threshold
+        assert recovered.target_fps == original.target_fps
+        assert recovered.fbx_naming == original.fbx_naming
+        assert recovered.render_overlays == original.render_overlays
+        assert recovered.use_inpainting == original.use_inpainting
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +374,10 @@ class TestRunningState:
         assert not tab._focal_mm.isEnabled()
         assert not tab._max_persons.isEnabled()
         assert not tab._confidence_threshold.isEnabled()
+        assert not tab._target_fps.isEnabled()
+        assert not tab._fbx_naming.isEnabled()
+        assert not tab._render_overlays.isEnabled()
+        assert not tab._use_inpainting.isEnabled()
 
     def test_set_running_false(self, qapp):
         session = Session()
@@ -337,6 +396,10 @@ class TestRunningState:
         assert tab._focal_mm.isEnabled()
         assert tab._max_persons.isEnabled()
         assert tab._confidence_threshold.isEnabled()
+        assert tab._target_fps.isEnabled()
+        assert tab._fbx_naming.isEnabled()
+        assert tab._render_overlays.isEnabled()
+        assert tab._use_inpainting.isEnabled()
 
     def test_set_running_false_resets_progress(self, qapp):
         session = Session()

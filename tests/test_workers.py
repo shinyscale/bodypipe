@@ -345,6 +345,22 @@ class TestMultiPersonWorker:
         assert hasattr(w, "finished")
         assert hasattr(w, "error")
 
+    def test_config_stores_new_fields(self, qapp):
+        """Worker should preserve render_overlays and use_inpainting from config."""
+        config = PipelineConfig(
+            render_overlays=True,
+            use_inpainting=False,
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+        )
+        w = MultiPersonWorker(
+            Path("/tmp/v.mp4"), config, Path("/tmp/GVHMR"), Path("/tmp/out")
+        )
+        assert w._config.render_overlays is True
+        assert w._config.use_inpainting is False
+        assert w._config.target_fps == 24.0
+        assert w._config.fbx_naming == "UE5 Mannequin"
+
 
 # ---------------------------------------------------------------------------
 # find_smplestx_result (module-level helper)

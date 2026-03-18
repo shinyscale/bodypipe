@@ -84,6 +84,56 @@ class TestPipelineConfig:
         c = PipelineConfig.from_dict({"mode": "multi", "unknown_key": 42})
         assert c.mode == "multi"
 
+    def test_new_multi_person_fields_defaults(self):
+        """New multi-person settings should have correct defaults matching Gradio GUI."""
+        c = PipelineConfig()
+        assert c.target_fps == 30.0
+        assert c.fbx_naming == "Mixamo (Cascadeur)"
+        assert c.render_overlays is False
+        assert c.use_inpainting is True
+
+    def test_new_fields_round_trip(self, tmp_path):
+        """target_fps, fbx_naming, render_overlays, use_inpainting should persist."""
+        c = PipelineConfig(
+            mode="multi",
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+            render_overlays=True,
+            use_inpainting=False,
+        )
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.target_fps == 24.0
+        assert loaded.fbx_naming == "UE5 Mannequin"
+        assert loaded.render_overlays is True
+        assert loaded.use_inpainting is False
+
+    def test_new_fields_in_to_dict(self):
+        """to_dict() should include all new fields."""
+        c = PipelineConfig(target_fps=60.0, fbx_naming="UE5 Mannequin")
+        d = c.to_dict()
+        assert "target_fps" in d
+        assert "fbx_naming" in d
+        assert "render_overlays" in d
+        assert "use_inpainting" in d
+        assert d["target_fps"] == 60.0
+        assert d["fbx_naming"] == "UE5 Mannequin"
+
+    def test_from_dict_with_new_fields(self):
+        """from_dict() should correctly load new fields."""
+        c = PipelineConfig.from_dict({
+            "mode": "multi",
+            "target_fps": 25.0,
+            "fbx_naming": "UE5 Mannequin",
+            "render_overlays": True,
+            "use_inpainting": False,
+        })
+        assert c.target_fps == 25.0
+        assert c.fbx_naming == "UE5 Mannequin"
+        assert c.render_overlays is True
+        assert c.use_inpainting is False
+
 
 class TestUndoStack:
     """Tests for UndoStack — the command-pattern undo/redo engine.

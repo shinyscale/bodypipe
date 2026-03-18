@@ -20,6 +20,11 @@ class PipelineConfig:
     hand_mode: str = "hybrid"  # "hybrid" | "smplestx_only"
     max_persons: int = 8
     confidence_threshold: float = 0.5
+    # Multi-person pipeline settings (match Gradio GUI options)
+    target_fps: float = 30.0
+    fbx_naming: str = "Mixamo (Cascadeur)"  # "Mixamo (Cascadeur)" | "UE5 Mannequin"
+    render_overlays: bool = False
+    use_inpainting: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -32,6 +37,10 @@ class PipelineConfig:
             "hand_mode": self.hand_mode,
             "max_persons": self.max_persons,
             "confidence_threshold": self.confidence_threshold,
+            "target_fps": self.target_fps,
+            "fbx_naming": self.fbx_naming,
+            "render_overlays": self.render_overlays,
+            "use_inpainting": self.use_inpainting,
         }
 
     @classmethod

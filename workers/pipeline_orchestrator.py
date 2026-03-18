@@ -625,10 +625,11 @@ class MultiPersonWorker(QThread):
             result = split_multi_person_video(
                 video_path=str(self._video_path),
                 output_dir=str(self._output_dir),
-                gvhmr_dir=str(self._gvhmr_root),
                 static_cam=self._config.static_cam,
                 use_dpvo=self._config.use_dpvo,
                 max_persons=self._config.max_persons,
+                render_overlays=self._config.render_overlays,
+                use_inpainting=self._config.use_inpainting,
                 progress_callback=progress_callback,
             )
 
