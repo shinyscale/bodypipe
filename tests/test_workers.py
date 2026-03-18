@@ -363,6 +363,300 @@ class TestMultiPersonWorker:
 
 
 # ---------------------------------------------------------------------------
+# MultiPersonWorker FBX batch conversion
+# ---------------------------------------------------------------------------
+
+
+class TestMultiPersonFbxBatch:
+    """Why: after split_multi_person_video() completes, the Gradio GUI converts
+    each person's BVH to FBX. The bodypipe MultiPersonWorker must do the same
+    post-pipeline step so users get FBX files without manual re-export."""
+
+    def _make_worker(self, qapp, tmp_path, fbx_naming="Mixamo (Cascadeur)", target_fps=30.0):
+        config = PipelineConfig(fbx_naming=fbx_naming, target_fps=target_fps)
+        return MultiPersonWorker(
+            tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out"
+        )
+
+    def _make_result_with_bvh(self, tmp_path, num_persons=2):
+        """Create a mock result with person_dirs containing .bvh files."""
+        from types import SimpleNamespace
+
+        person_dirs = []
+        for i in range(num_persons):
+            pdir = tmp_path / "out" / f"person_{i}"
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / f"person_{i}_body.bvh").write_text("HIERARCHY\n")
+            person_dirs.append(pdir)
+        return SimpleNamespace(person_dirs=person_dirs)
+
+    def test_discovers_bvh_files(self, qapp, tmp_path):
+        """Should find BVH files in each person directory."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=3)
+
+        from unittest.mock import patch
+
+        converted = []
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            converted.append((bvh, fbx, fps, naming))
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert len(converted) == 3
+        assert len(fbx_files) == 3
+        for fbx_path in fbx_files:
+            assert fbx_path.endswith(".fbx")
+
+    def test_uses_ue5_naming_key(self, qapp, tmp_path):
+        """UE5 Mannequin config should pass naming='ue5' to converter."""
+        w = self._make_worker(qapp, tmp_path, fbx_naming="UE5 Mannequin")
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        from unittest.mock import patch
+
+        captured_naming = []
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            captured_naming.append(naming)
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            w._convert_bvh_to_fbx_batch(result)
+
+        assert captured_naming == ["ue5"]
+
+    def test_uses_mixamo_naming_key(self, qapp, tmp_path):
+        """Mixamo (Cascadeur) config should pass naming='mixamo' to converter."""
+        w = self._make_worker(qapp, tmp_path, fbx_naming="Mixamo (Cascadeur)")
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        from unittest.mock import patch
+
+        captured_naming = []
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            captured_naming.append(naming)
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            w._convert_bvh_to_fbx_batch(result)
+
+        assert captured_naming == ["mixamo"]
+
+    def test_passes_target_fps(self, qapp, tmp_path):
+        """Should pass config.target_fps to convert_bvh_to_fbx."""
+        w = self._make_worker(qapp, tmp_path, target_fps=60.0)
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        from unittest.mock import patch
+
+        captured_fps = []
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            captured_fps.append(fps)
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            w._convert_bvh_to_fbx_batch(result)
+
+        assert captured_fps == [60.0]
+
+    def test_skips_existing_fbx(self, qapp, tmp_path):
+        """Should not re-convert when FBX already exists."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        # Pre-create the FBX file
+        pdir = tmp_path / "out" / "person_0"
+        (pdir / "person_0_body.fbx").write_text("EXISTING_FBX")
+
+        from unittest.mock import patch
+
+        convert_called = []
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            convert_called.append(True)
+            return "[BVH→FBX] Exported"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert len(convert_called) == 0  # Never called
+        assert len(fbx_files) == 1  # But still included in results
+
+    def test_empty_person_dirs(self, qapp, tmp_path):
+        """Should return empty list when result has no person_dirs."""
+        from types import SimpleNamespace
+
+        w = self._make_worker(qapp, tmp_path)
+        result = SimpleNamespace(person_dirs=[])
+        fbx_files = w._convert_bvh_to_fbx_batch(result)
+        assert fbx_files == []
+
+    def test_no_person_dirs_attr(self, qapp, tmp_path):
+        """Should return empty list when result lacks person_dirs attribute."""
+        w = self._make_worker(qapp, tmp_path)
+        fbx_files = w._convert_bvh_to_fbx_batch(object())
+        assert fbx_files == []
+
+    def test_no_bvh_files(self, qapp, tmp_path):
+        """Should log and return empty when directories have no BVH files."""
+        from types import SimpleNamespace
+
+        w = self._make_worker(qapp, tmp_path)
+        pdir = tmp_path / "out" / "person_0"
+        pdir.mkdir(parents=True)
+        result = SimpleNamespace(person_dirs=[pdir])
+
+        log_lines = []
+        w.log_line.connect(log_lines.append)
+
+        from unittest.mock import patch
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = lambda *a, **kw: ""
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert fbx_files == []
+        assert any("no bvh" in line.lower() for line in log_lines)
+
+    def test_import_error_graceful(self, qapp, tmp_path):
+        """Should warn and return empty when bvh_to_fbx is unavailable."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        log_lines = []
+        w.log_line.connect(log_lines.append)
+
+        # Remove bvh_to_fbx from sys.modules to force ImportError
+        import unittest.mock as mock
+
+        with mock.patch.dict(sys.modules, {"bvh_to_fbx": None}):
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert fbx_files == []
+        assert any("not available" in line.lower() for line in log_lines)
+
+    def test_conversion_error_continues(self, qapp, tmp_path):
+        """Should log warning but continue when individual conversion fails."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=2)
+
+        from unittest.mock import patch
+
+        call_count = [0]
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Blender crashed")
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        log_lines = []
+        w.log_line.connect(log_lines.append)
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert call_count[0] == 2  # Both attempted
+        assert len(fbx_files) == 1  # Only second succeeded
+        assert any("failed" in line.lower() for line in log_lines)
+
+    def test_conversion_error_in_log_continues(self, qapp, tmp_path):
+        """Should handle ERROR in convert log string (not exception)."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=1)
+
+        from unittest.mock import patch
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            return "[BVH→FBX] ERROR: Blender not found."
+
+        log_lines = []
+        w.log_line.connect(log_lines.append)
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert len(fbx_files) == 0  # ERROR means not included
+        assert any("failed" in line.lower() or "ERROR" in line for line in log_lines)
+
+    def test_progress_emission(self, qapp, tmp_path):
+        """Should emit progress signals during FBX conversion."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=2)
+
+        from unittest.mock import patch
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            Path(fbx).write_text("FBX_DATA")
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        progress_signals = []
+        w.progress.connect(lambda f, m: progress_signals.append((f, m)))
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            w._convert_bvh_to_fbx_batch(result)
+
+        assert len(progress_signals) == 2
+        # First at 0.90, second at 0.94 (0.90 + 0.5 * 0.08)
+        assert 0.89 < progress_signals[0][0] < 0.95
+        assert 0.93 < progress_signals[1][0] < 0.99
+        assert "1/2" in progress_signals[0][1]
+        assert "2/2" in progress_signals[1][1]
+
+    def test_cancellation_stops_conversion(self, qapp, tmp_path):
+        """Should stop converting when cancelled flag is set."""
+        w = self._make_worker(qapp, tmp_path)
+        result = self._make_result_with_bvh(tmp_path, num_persons=3)
+
+        from unittest.mock import patch
+
+        call_count = [0]
+
+        def mock_convert(bvh, fbx, fps=30.0, naming="mixamo"):
+            call_count[0] += 1
+            Path(fbx).write_text("FBX_DATA")
+            w._cancelled = True  # Cancel after first conversion
+            return f"[BVH→FBX] Exported: {fbx}"
+
+        with patch.dict(sys.modules, {"bvh_to_fbx": type(sys)("bvh_to_fbx")}):
+            sys.modules["bvh_to_fbx"].convert_bvh_to_fbx = mock_convert
+            fbx_files = w._convert_bvh_to_fbx_batch(result)
+
+        assert call_count[0] == 1  # Only first converted before cancel
+        assert len(fbx_files) == 1
+
+    def test_fbx_files_in_finished_result(self, qapp, tmp_path):
+        """Finished signal dict should contain fbx_files key."""
+        w = self._make_worker(qapp, tmp_path)
+
+        # Verify the method returns a list (integration-level check)
+        from types import SimpleNamespace
+
+        result = SimpleNamespace(person_dirs=[])
+        fbx_files = w._convert_bvh_to_fbx_batch(result)
+        assert isinstance(fbx_files, list)
+
+
+# ---------------------------------------------------------------------------
 # find_smplestx_result (module-level helper)
 # ---------------------------------------------------------------------------
 

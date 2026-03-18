@@ -681,14 +681,89 @@ class MultiPersonWorker(QThread):
             if self._cancelled:
                 return
 
+            # ── Post-pipeline FBX batch conversion ──
+            fbx_files = self._convert_bvh_to_fbx_batch(result)
+
             self.progress.emit(1.0, "Multi-person pipeline complete")
             self.finished.emit({
                 "output_dir": str(self._output_dir),
                 "result": result,
+                "fbx_files": fbx_files,
             })
 
         except Exception as e:
             self.error.emit(str(e))
+
+    def _convert_bvh_to_fbx_batch(self, result) -> list[str]:
+        """Convert per-person BVH files to FBX after split pipeline completes.
+
+        Mirrors Gradio's ``run_multi_person_pipeline()`` post-pipeline step:
+        scan each person directory for BVH files and convert using Blender
+        with the user-chosen naming convention (Mixamo vs UE5).
+        """
+        fbx_files: list[str] = []
+        person_dirs = getattr(result, "person_dirs", None) or []
+        if not person_dirs:
+            return fbx_files
+
+        try:
+            from bvh_to_fbx import convert_bvh_to_fbx
+        except ImportError:
+            self.log_line.emit(
+                "WARNING: bvh_to_fbx not available, skipping FBX conversion."
+            )
+            return fbx_files
+
+        naming_key = (
+            "ue5" if "ue5" in self._config.fbx_naming.lower() else "mixamo"
+        )
+        fps = self._config.target_fps
+
+        # Collect all BVH files across person directories
+        bvh_paths: list[Path] = []
+        for person_dir in person_dirs:
+            person_dir = Path(person_dir)
+            bvh_paths.extend(sorted(person_dir.rglob("*.bvh")))
+
+        if not bvh_paths:
+            self.log_line.emit("[FBX] No BVH files found, skipping FBX conversion.")
+            return fbx_files
+
+        for i, bvh_path in enumerate(bvh_paths):
+            if self._cancelled:
+                return fbx_files
+
+            fbx_path = str(bvh_path.with_suffix(".fbx"))
+
+            # Skip if FBX already exists
+            if Path(fbx_path).exists():
+                fbx_files.append(fbx_path)
+                self.log_line.emit(f"[FBX] Already exists: {fbx_path}")
+                continue
+
+            frac = 0.90 + (i / max(len(bvh_paths), 1)) * 0.08
+            self.progress.emit(
+                frac,
+                f"Converting BVH to FBX ({i + 1}/{len(bvh_paths)})...",
+            )
+
+            try:
+                fbx_log = convert_bvh_to_fbx(
+                    str(bvh_path), fbx_path, fps=fps, naming=naming_key,
+                )
+                self.log_line.emit(fbx_log)
+                if "ERROR" not in fbx_log:
+                    fbx_files.append(fbx_path)
+                else:
+                    self.log_line.emit(
+                        f"WARNING: FBX conversion failed for {bvh_path.name}"
+                    )
+            except Exception as exc:
+                self.log_line.emit(
+                    f"WARNING: FBX conversion failed for {bvh_path.name}: {exc}"
+                )
+
+        return fbx_files
 
     def cancel(self):
         self._cancelled = True
