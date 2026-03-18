@@ -1,5 +1,5 @@
 """Pose Corrector panel — joint selection, euler sliders, quick-fix buttons,
-corrections table, and real-time preview.
+corrections table, space overrides, BVH/FBX export, and real-time preview.
 
 Why: The pose corrector enables interactive correction of bad GVHMR poses
 (flipped orientations, impossible limb positions during lifts). Users select
@@ -8,12 +8,13 @@ a joint via viewport click or dropdown, adjust rotation with euler sliders
 Quick-fix buttons handle common operations: flip body 180° on an axis,
 invert upside-down poses, mirror L/R joints, or copy pose from another frame.
 The corrections table shows all keyframes for the current person with
-Go/Delete actions. Corrections are interpolated between keyframes via SLERP
-and re-exported to BVH/FBX.
+Go/Delete actions. Space overrides control per-frame coordinate space
+(world/camera/carried) for complex multi-person scenarios like lifts.
+BVH/FBX re-export applies all corrections and space overrides.
 
 Phase 3.4: Person selector, joint selector, euler sliders, apply, reset.
 Phase 3.5: Quick-fix buttons (flip, invert, mirror, copy) + corrections table.
-Phase 3.6 will add space overrides and BVH/FBX export.
+Phase 3.6: Space overrides table + BVH/FBX export.
 """
 
 from __future__ import annotations
@@ -32,11 +33,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDoubleSpinBox,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
     QInputDialog,
+    QMessageBox,
+    QFileDialog,
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -111,6 +115,42 @@ def _safe_import_quick_fix():
         return flip_global_orient, mirror_lr_pose, copy_pose_from_frame
     except ImportError:
         return None, None, None
+
+
+def _safe_import_space_override():
+    """Lazily import FrameSpaceOverride from GVHMR backend.
+
+    Returns FrameSpaceOverride class or None.
+    """
+    try:
+        from pose_correction import FrameSpaceOverride
+        return FrameSpaceOverride
+    except ImportError:
+        return None
+
+
+def _safe_import_bvh_export():
+    """Lazily import BVH export function from GVHMR backend.
+
+    Returns convert_params_to_bvh or None.
+    """
+    try:
+        from smplx_to_bvh import convert_params_to_bvh
+        return convert_params_to_bvh
+    except ImportError:
+        return None
+
+
+def _safe_import_fbx_export():
+    """Lazily import FBX export function from GVHMR backend.
+
+    Returns convert_bvh_to_fbx or None.
+    """
+    try:
+        from bvh_to_fbx import convert_bvh_to_fbx
+        return convert_bvh_to_fbx
+    except ImportError:
+        return None
 
 
 def flip_global_orient_fallback(
@@ -243,6 +283,7 @@ class PoseCorrectorPanel(QWidget):
     joint_selected = Signal(int)
     correction_applied = Signal(int, int)
     frame_requested = Signal(int)  # corrections table "Go" → seek to frame
+    export_requested = Signal(str)  # "bvh" or "fbx"
 
     def __init__(self, session: Session, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
@@ -307,6 +348,23 @@ class PoseCorrectorPanel(QWidget):
         self._corrections_table.setMaximumHeight(160)
         corr_layout.addWidget(self._corrections_table)
         vp_layout.addWidget(corr_group)
+
+        # Export group
+        export_group = QGroupBox("Export")
+        export_layout = QVBoxLayout(export_group)
+        export_row = QHBoxLayout()
+        self._reexport_bvh_btn = QPushButton("Re-export BVH")
+        self._reexport_bvh_btn.setToolTip("Apply corrections + space overrides and export to BVH")
+        export_row.addWidget(self._reexport_bvh_btn)
+        self._reexport_fbx_btn = QPushButton("Re-export FBX")
+        self._reexport_fbx_btn.setToolTip("Export BVH then convert to FBX via Blender")
+        export_row.addWidget(self._reexport_fbx_btn)
+        export_layout.addLayout(export_row)
+        self._export_status = QLabel("")
+        self._export_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._export_status.setWordWrap(True)
+        export_layout.addWidget(self._export_status)
+        vp_layout.addWidget(export_group)
 
         splitter.addWidget(viewport_widget)
 
@@ -385,6 +443,63 @@ class PoseCorrectorPanel(QWidget):
         qf_layout.addLayout(qf_row2)
 
         ctrl_layout.addWidget(qf_group)
+
+        # Space Overrides group
+        so_group = QGroupBox("Space Overrides")
+        so_layout = QVBoxLayout(so_group)
+
+        so_row1 = QHBoxLayout()
+        so_row1.addWidget(QLabel("Space:"))
+        self._space_combo = QComboBox()
+        self._space_combo.addItems(["World", "Camera", "Carried"])
+        so_row1.addWidget(self._space_combo)
+        so_layout.addLayout(so_row1)
+
+        so_row2 = QHBoxLayout()
+        so_row2.addWidget(QLabel("Start:"))
+        self._space_start = QSpinBox()
+        self._space_start.setRange(0, 999999)
+        so_row2.addWidget(self._space_start)
+        so_row2.addWidget(QLabel("End:"))
+        self._space_end = QSpinBox()
+        self._space_end.setRange(0, 999999)
+        so_row2.addWidget(self._space_end)
+        so_layout.addLayout(so_row2)
+
+        so_row3 = QHBoxLayout()
+        so_row3.addWidget(QLabel("Ref Person:"))
+        self._space_ref_combo = QComboBox()
+        self._space_ref_combo.addItem("—", userData=None)
+        so_row3.addWidget(self._space_ref_combo)
+        so_row3.addWidget(QLabel("Y offset:"))
+        self._space_y_offset = QDoubleSpinBox()
+        self._space_y_offset.setRange(0.0, 5.0)
+        self._space_y_offset.setValue(0.4)
+        self._space_y_offset.setDecimals(2)
+        self._space_y_offset.setSuffix(" m")
+        so_row3.addWidget(self._space_y_offset)
+        so_layout.addLayout(so_row3)
+
+        so_btn_row = QHBoxLayout()
+        self._add_override_btn = QPushButton("Add Override")
+        so_btn_row.addWidget(self._add_override_btn)
+        self._del_override_btn = QPushButton("Delete Selected")
+        so_btn_row.addWidget(self._del_override_btn)
+        so_layout.addLayout(so_btn_row)
+
+        self._space_table = QTableWidget(0, 5)
+        self._space_table.setHorizontalHeaderLabels(
+            ["Start", "End", "Space", "Ref Person", "Y Offset"]
+        )
+        self._space_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self._space_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._space_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._space_table.setMaximumHeight(120)
+        so_layout.addWidget(self._space_table)
+
+        ctrl_layout.addWidget(so_group)
 
         ctrl_layout.addStretch()
 
@@ -469,6 +584,14 @@ class PoseCorrectorPanel(QWidget):
         self._mirror_btn.clicked.connect(self._on_mirror_lr)
         self._copy_from_btn.clicked.connect(self._on_copy_from_frame)
 
+        # Space override buttons
+        self._add_override_btn.clicked.connect(self._on_add_space_override)
+        self._del_override_btn.clicked.connect(self._on_delete_space_override)
+
+        # Export buttons
+        self._reexport_bvh_btn.clicked.connect(self._on_reexport_bvh)
+        self._reexport_fbx_btn.clicked.connect(self._on_reexport_fbx)
+
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
     # ------------------------------------------------------------------
@@ -494,6 +617,7 @@ class PoseCorrectorPanel(QWidget):
         self._person_combo.blockSignals(False)
         self._update_sliders()
         self._refresh_corrections_table()
+        self._refresh_space_table()
 
     def on_frame_changed(self, frame_idx: int):
         """Update frame externally."""
@@ -506,7 +630,9 @@ class PoseCorrectorPanel(QWidget):
     def refresh(self):
         """Refresh person list from session."""
         self._update_person_dropdown()
+        self._update_space_ref_dropdown()
         self._refresh_corrections_table()
+        self._refresh_space_table()
 
     # ------------------------------------------------------------------
     # Dropdown handlers
@@ -546,6 +672,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.set_pose_override(None)
         self._update_sliders()
         self._refresh_corrections_table()
+        self._refresh_space_table()
 
     def _on_camera_mode_changed(self, idx: int):
         """Handle camera mode dropdown change."""
@@ -1012,6 +1139,260 @@ class PoseCorrectorPanel(QWidget):
         self._refresh_corrections_table()
 
     # ------------------------------------------------------------------
+    # Space overrides
+    # ------------------------------------------------------------------
+
+    def _refresh_space_table(self):
+        """Populate space overrides table from current person's CorrectionTrack."""
+        self._space_table.setRowCount(0)
+
+        if self._current_person < 0:
+            return
+
+        ct = self._session.correction_tracks.get(self._current_person)
+        if ct is None or not ct.space_overrides:
+            return
+
+        overrides = sorted(ct.space_overrides, key=lambda o: o.frame_start)
+        self._space_table.setRowCount(len(overrides))
+
+        for row, ovr in enumerate(overrides):
+            self._space_table.setItem(row, 0, QTableWidgetItem(str(ovr.frame_start)))
+            self._space_table.setItem(row, 1, QTableWidgetItem(str(ovr.frame_end)))
+            self._space_table.setItem(row, 2, QTableWidgetItem(ovr.space))
+            ref_str = f"Person {ovr.reference_person}" if ovr.reference_person is not None else "—"
+            self._space_table.setItem(row, 3, QTableWidgetItem(ref_str))
+            self._space_table.setItem(row, 4, QTableWidgetItem(f"{ovr.y_offset:.2f}"))
+
+    def _on_add_space_override(self):
+        """Add a frame-space override for the current person."""
+        if self._current_person < 0:
+            return
+
+        FrameSpaceOverride = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FrameSpaceOverride is None or CorrectionTrack is None:
+            log.warning("Cannot add space override: backend unavailable")
+            return
+
+        pid = self._current_person
+        space_map = {"World": "world", "Camera": "camera", "Carried": "carried"}
+        space = space_map.get(self._space_combo.currentText(), "world")
+
+        f_start = self._space_start.value()
+        f_end = self._space_end.value()
+        if f_end < f_start:
+            f_start, f_end = f_end, f_start
+
+        ref_person = self._space_ref_combo.currentData()
+        y_offset = self._space_y_offset.value()
+
+        override = FrameSpaceOverride(
+            frame_start=f_start,
+            frame_end=f_end,
+            space=space,
+            reference_person=ref_person,
+            y_offset=y_offset,
+        )
+
+        if pid not in self._session.correction_tracks:
+            self._session.correction_tracks[pid] = CorrectionTrack(person_id=pid)
+
+        ct = self._session.correction_tracks[pid]
+        ct.add_space_override(override)
+        self._save_correction_track(pid)
+        self._refresh_space_table()
+
+        log.info("Space override added: person=%d, frames=%d-%d, space=%s",
+                 pid, f_start, f_end, space)
+
+    def _on_delete_space_override(self):
+        """Delete the selected space override."""
+        if self._current_person < 0:
+            return
+
+        row = self._space_table.currentRow()
+        if row < 0:
+            return
+
+        ct = self._session.correction_tracks.get(self._current_person)
+        if ct is None:
+            return
+
+        overrides = sorted(ct.space_overrides, key=lambda o: o.frame_start)
+        if row >= len(overrides):
+            return
+
+        ovr = overrides[row]
+        ct.remove_space_override(ovr.frame_start, ovr.frame_end)
+        self._save_correction_track(self._current_person)
+        self._refresh_space_table()
+
+        log.info("Space override deleted: person=%d, frames=%d-%d",
+                 self._current_person, ovr.frame_start, ovr.frame_end)
+
+    def _update_space_ref_dropdown(self):
+        """Populate reference person dropdown for space overrides."""
+        self._space_ref_combo.blockSignals(True)
+        self._space_ref_combo.clear()
+        self._space_ref_combo.addItem("—", userData=None)
+        if self._session:
+            for pid in sorted(self._session.person_tracks.keys()):
+                if pid not in self._session.inactive_tracks:
+                    self._space_ref_combo.addItem(f"Person {pid}", userData=pid)
+        self._space_ref_combo.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # BVH/FBX export
+    # ------------------------------------------------------------------
+
+    def _on_reexport_bvh(self):
+        """Re-export corrected BVH for the current person."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            self._export_status.setText("No SMPL-X params for this person.")
+            return
+
+        convert_fn = _safe_import_bvh_export()
+        if convert_fn is None:
+            self._export_status.setText("BVH export unavailable (backend missing).")
+            return
+
+        pid = self._current_person
+        ct = self._session.correction_tracks.get(pid)
+
+        # Save corrections first
+        self._save_correction_track(pid)
+
+        # Determine output path
+        if track.person_dir is not None:
+            out_path = str(Path(track.person_dir) / "corrected_body.bvh")
+        else:
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Save BVH", "corrected_body.bvh", "BVH files (*.bvh)",
+            )
+            if not out_path:
+                return
+
+        # Build reference_params for "carried" space overrides
+        ref_params = None
+        if ct is not None and ct.space_overrides:
+            ref_pids = {
+                o.reference_person for o in ct.space_overrides
+                if o.space == "carried" and o.reference_person is not None
+            }
+            if ref_pids:
+                ref_params = {}
+                for rpid in ref_pids:
+                    rp = self._session.person_tracks.get(rpid)
+                    if rp is not None and rp.smplx_params is not None:
+                        ref_params[rpid] = rp.smplx_params
+
+        try:
+            self._export_status.setText("Exporting BVH...")
+            result = convert_fn(
+                track.smplx_params,
+                out_path,
+                fps=self._session.fps,
+                skip_world_grounding=True,
+                corrections=ct,
+                reference_params=ref_params,
+            )
+            self._export_status.setText(f"BVH exported: {result}")
+            log.info("BVH exported: %s", result)
+            self.export_requested.emit("bvh")
+        except Exception as e:
+            self._export_status.setText(f"BVH export failed: {e}")
+            log.error("BVH export failed: %s", e)
+
+    def _on_reexport_fbx(self):
+        """Re-export corrected BVH + FBX via Blender subprocess."""
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            self._export_status.setText("No SMPL-X params for this person.")
+            return
+
+        convert_bvh = _safe_import_bvh_export()
+        convert_fbx = _safe_import_fbx_export()
+        if convert_bvh is None:
+            self._export_status.setText("BVH export unavailable (backend missing).")
+            return
+
+        pid = self._current_person
+        ct = self._session.correction_tracks.get(pid)
+
+        # Save corrections first
+        self._save_correction_track(pid)
+
+        # Determine output paths
+        if track.person_dir is not None:
+            bvh_path = str(Path(track.person_dir) / "corrected_body.bvh")
+        else:
+            bvh_path, _ = QFileDialog.getSaveFileName(
+                self, "Save BVH", "corrected_body.bvh", "BVH files (*.bvh)",
+            )
+            if not bvh_path:
+                return
+
+        # Build reference_params for "carried" space overrides
+        ref_params = None
+        if ct is not None and ct.space_overrides:
+            ref_pids = {
+                o.reference_person for o in ct.space_overrides
+                if o.space == "carried" and o.reference_person is not None
+            }
+            if ref_pids:
+                ref_params = {}
+                for rpid in ref_pids:
+                    rp = self._session.person_tracks.get(rpid)
+                    if rp is not None and rp.smplx_params is not None:
+                        ref_params[rpid] = rp.smplx_params
+
+        try:
+            self._export_status.setText("Exporting BVH...")
+            bvh_result = convert_bvh(
+                track.smplx_params,
+                bvh_path,
+                fps=self._session.fps,
+                skip_world_grounding=True,
+                corrections=ct,
+                reference_params=ref_params,
+            )
+            self._export_status.setText(f"BVH exported: {bvh_result}")
+            log.info("BVH exported: %s", bvh_result)
+        except Exception as e:
+            self._export_status.setText(f"BVH export failed: {e}")
+            log.error("BVH export failed: %s", e)
+            return
+
+        if convert_fbx is None:
+            self._export_status.setText(
+                f"BVH exported: {bvh_result}\nFBX conversion unavailable (Blender not found)."
+            )
+            self.export_requested.emit("bvh")
+            return
+
+        try:
+            fbx_path = str(Path(bvh_path).with_suffix(".fbx"))
+            self._export_status.setText("Converting to FBX via Blender...")
+            fbx_log = convert_fbx(bvh_path, fbx_path)
+            self._export_status.setText(f"FBX exported: {fbx_path}")
+            log.info("FBX exported: %s (%s)", fbx_path, fbx_log)
+            self.export_requested.emit("fbx")
+        except Exception as e:
+            self._export_status.setText(
+                f"BVH exported: {bvh_result}\nFBX conversion failed: {e}"
+            )
+            log.error("FBX export failed: %s", e)
+            self.export_requested.emit("bvh")
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -1024,6 +1405,7 @@ class PoseCorrectorPanel(QWidget):
                 if pid not in self._session.inactive_tracks:
                     self._person_combo.addItem(f"Person {pid}", userData=pid)
         self._person_combo.blockSignals(False)
+        self._update_space_ref_dropdown()
 
     def _update_sliders(self):
         """Update euler sliders to reflect current joint's rotation."""

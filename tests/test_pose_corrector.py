@@ -36,6 +36,9 @@ from views.pose_corrector_panel import (
     _get_joint_axis_angle,
     _safe_import_pose_correction,
     _safe_import_quick_fix,
+    _safe_import_space_override,
+    _safe_import_bvh_export,
+    _safe_import_fbx_export,
     axis_angle_to_euler_deg_fallback,
     euler_deg_to_axis_angle_fallback,
     flip_global_orient_fallback,
@@ -1565,3 +1568,549 @@ class TestQuickFixTableIntegration:
         panel._on_mirror_lr()
         assert panel._corrections_table.rowCount() == 1
         assert panel._corrections_table.item(0, 1).text() == "mirror"
+
+
+# ======================================================================
+# Phase 3.6: Space overrides + BVH/FBX export
+#
+# Why: Space overrides control per-frame coordinate space (world/camera/
+# carried) for complex multi-person scenarios like lifts. BVH/FBX export
+# applies all corrections and space overrides to produce clean output.
+# These tests verify the UI CRUD operations, table rendering, backend
+# wiring, and export signal emission.
+# ======================================================================
+
+
+class TestSpaceOverrideImports:
+    """Verify lazy import helpers for space overrides and export."""
+
+    def test_space_override_import(self):
+        """FrameSpaceOverride should be importable from backend."""
+        FSO = _safe_import_space_override()
+        # May be None if backend not on path, but function shouldn't crash
+        assert FSO is None or callable(FSO)
+
+    def test_bvh_export_import(self):
+        """convert_params_to_bvh should be importable from backend."""
+        fn = _safe_import_bvh_export()
+        assert fn is None or callable(fn)
+
+    def test_fbx_export_import(self):
+        """convert_bvh_to_fbx should be importable from backend."""
+        fn = _safe_import_fbx_export()
+        assert fn is None or callable(fn)
+
+
+class TestSpaceOverrideUIWidgets:
+    """Space override UI widgets exist with correct properties."""
+
+    def test_space_combo_exists(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_space_combo")
+        assert panel._space_combo.count() == 3
+        assert panel._space_combo.itemText(0) == "World"
+        assert panel._space_combo.itemText(1) == "Camera"
+        assert panel._space_combo.itemText(2) == "Carried"
+
+    def test_space_start_end_spinboxes(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_space_start")
+        assert hasattr(panel, "_space_end")
+        assert panel._space_start.minimum() == 0
+        assert panel._space_end.minimum() == 0
+
+    def test_space_ref_combo_default(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_space_ref_combo")
+        # Default has "—" placeholder
+        assert panel._space_ref_combo.count() >= 1
+        assert panel._space_ref_combo.itemData(0) is None
+
+    def test_space_y_offset_default(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_space_y_offset")
+        assert panel._space_y_offset.value() == pytest.approx(0.4, abs=0.01)
+
+    def test_space_table_columns(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._space_table.columnCount() == 5
+        headers = [
+            panel._space_table.horizontalHeaderItem(i).text()
+            for i in range(5)
+        ]
+        assert headers == ["Start", "End", "Space", "Ref Person", "Y Offset"]
+
+    def test_add_delete_buttons_exist(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_add_override_btn")
+        assert hasattr(panel, "_del_override_btn")
+        assert panel._add_override_btn.text() == "Add Override"
+        assert panel._del_override_btn.text() == "Delete Selected"
+
+    def test_export_buttons_exist(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_reexport_bvh_btn")
+        assert hasattr(panel, "_reexport_fbx_btn")
+        assert "BVH" in panel._reexport_bvh_btn.text()
+        assert "FBX" in panel._reexport_fbx_btn.text()
+
+    def test_export_status_label_exists(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_export_status")
+        assert panel._export_status.text() == ""
+
+    def test_export_requested_signal_exists(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "export_requested")
+
+
+class TestSpaceOverrideCRUD:
+    """Add, display, and delete space overrides via the panel."""
+
+    def test_add_override_requires_person(self, qapp):
+        """Adding override with no person selected should be a no-op."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_add_space_override()
+        assert panel._space_table.rowCount() == 0
+
+    def test_add_override_creates_entry(self, qapp):
+        """Adding a space override should populate the table."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        panel._space_start.setValue(10)
+        panel._space_end.setValue(50)
+        panel._space_combo.setCurrentIndex(1)  # Camera
+
+        panel._on_add_space_override()
+
+        assert panel._space_table.rowCount() == 1
+        assert panel._space_table.item(0, 0).text() == "10"
+        assert panel._space_table.item(0, 1).text() == "50"
+        assert panel._space_table.item(0, 2).text() == "camera"
+
+    def test_add_override_persists_to_correction_track(self, qapp):
+        """Override should be stored in CorrectionTrack."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        panel._space_start.setValue(20)
+        panel._space_end.setValue(40)
+        panel._space_combo.setCurrentIndex(0)  # World
+
+        panel._on_add_space_override()
+
+        ct = session.correction_tracks.get(0)
+        assert ct is not None
+        assert len(ct.space_overrides) == 1
+        assert ct.space_overrides[0].frame_start == 20
+        assert ct.space_overrides[0].frame_end == 40
+        assert ct.space_overrides[0].space == "world"
+
+    def test_add_carried_with_reference(self, qapp):
+        """Carried override should store reference person and y_offset."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        # Populate ref dropdown
+        panel._update_space_ref_dropdown()
+
+        panel._space_start.setValue(5)
+        panel._space_end.setValue(25)
+        panel._space_combo.setCurrentIndex(2)  # Carried
+        panel._space_y_offset.setValue(0.6)
+
+        # Select Person 1 as reference
+        for i in range(panel._space_ref_combo.count()):
+            if panel._space_ref_combo.itemData(i) == 1:
+                panel._space_ref_combo.setCurrentIndex(i)
+                break
+
+        panel._on_add_space_override()
+
+        ct = session.correction_tracks[0]
+        assert len(ct.space_overrides) == 1
+        ovr = ct.space_overrides[0]
+        assert ovr.space == "carried"
+        assert ovr.reference_person == 1
+        assert ovr.y_offset == pytest.approx(0.6, abs=0.01)
+
+    def test_add_swapped_range(self, qapp):
+        """If start > end, they should be auto-swapped."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        panel._space_start.setValue(50)
+        panel._space_end.setValue(10)
+
+        panel._on_add_space_override()
+
+        ct = session.correction_tracks[0]
+        assert ct.space_overrides[0].frame_start == 10
+        assert ct.space_overrides[0].frame_end == 50
+
+    def test_delete_override(self, qapp):
+        """Deleting a selected override should remove it."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        # Add two overrides
+        panel._space_start.setValue(10)
+        panel._space_end.setValue(20)
+        panel._on_add_space_override()
+
+        panel._space_start.setValue(30)
+        panel._space_end.setValue(40)
+        panel._on_add_space_override()
+
+        assert panel._space_table.rowCount() == 2
+
+        # Select first row and delete
+        panel._space_table.setCurrentCell(0, 0)
+        panel._on_delete_space_override()
+
+        assert panel._space_table.rowCount() == 1
+        ct = session.correction_tracks[0]
+        assert len(ct.space_overrides) == 1
+        assert ct.space_overrides[0].frame_start == 30
+
+    def test_delete_no_selection(self, qapp):
+        """Delete with no selection should be a no-op."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        panel._space_start.setValue(10)
+        panel._space_end.setValue(20)
+        panel._on_add_space_override()
+
+        # No row selected (deselect)
+        panel._space_table.setCurrentCell(-1, -1)
+        panel._on_delete_space_override()
+
+        # Should still have the override
+        ct = session.correction_tracks[0]
+        assert len(ct.space_overrides) == 1
+
+    def test_overlapping_override_replaces(self, qapp):
+        """Adding an overlapping override should replace the existing one."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        panel._space_start.setValue(10)
+        panel._space_end.setValue(30)
+        panel._on_add_space_override()
+
+        # Add overlapping
+        panel._space_start.setValue(20)
+        panel._space_end.setValue(40)
+        panel._space_combo.setCurrentIndex(1)  # Camera
+        panel._on_add_space_override()
+
+        ct = session.correction_tracks[0]
+        assert len(ct.space_overrides) == 1
+        assert ct.space_overrides[0].frame_start == 20
+        assert ct.space_overrides[0].space == "camera"
+
+    def test_person_change_refreshes_space_table(self, qapp):
+        """Switching person should refresh the space overrides table."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+
+        # Add override for person 0
+        panel._space_start.setValue(10)
+        panel._space_end.setValue(20)
+        panel._on_add_space_override()
+        assert panel._space_table.rowCount() == 1
+
+        # Switch to person 1 (no overrides)
+        panel.set_person(1)
+        assert panel._space_table.rowCount() == 0
+
+        # Switch back to person 0
+        panel.set_person(0)
+        assert panel._space_table.rowCount() == 1
+
+
+class TestSpaceRefDropdown:
+    """Reference person dropdown for space overrides."""
+
+    def test_ref_dropdown_populated_on_refresh(self, qapp):
+        session = _make_session_with_params(n_persons=3)
+        panel = PoseCorrectorPanel(session=session)
+        panel.refresh()
+
+        # Should have "—" + 3 persons
+        assert panel._space_ref_combo.count() == 4
+        assert panel._space_ref_combo.itemData(0) is None
+        assert panel._space_ref_combo.itemData(1) == 0
+        assert panel._space_ref_combo.itemData(2) == 1
+        assert panel._space_ref_combo.itemData(3) == 2
+
+    def test_ref_dropdown_excludes_inactive(self, qapp):
+        session = _make_session_with_params(n_persons=3)
+        session.inactive_tracks.add(1)
+        panel = PoseCorrectorPanel(session=session)
+        panel.refresh()
+
+        # Should have "—" + 2 active persons
+        assert panel._space_ref_combo.count() == 3
+        data = [panel._space_ref_combo.itemData(i)
+                for i in range(panel._space_ref_combo.count())]
+        assert 1 not in data
+
+
+class TestBVHExport:
+    """BVH re-export button handler."""
+
+    def test_no_person_is_noop(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_reexport_bvh()
+        assert panel._export_status.text() == ""
+
+    def test_no_params_shows_error(self, qapp):
+        session = _make_session_with_params()
+        session.person_tracks[0].smplx_params = None
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        panel._on_reexport_bvh()
+        assert "No SMPL-X params" in panel._export_status.text()
+
+    def test_export_with_mock_backend(self, qapp):
+        """Mock the BVH converter to verify it gets called correctly."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        mock_convert = MagicMock(return_value="/tmp/test_person_0/corrected_body.bvh")
+
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_convert,
+        ):
+            panel._on_reexport_bvh()
+
+        mock_convert.assert_called_once()
+        call_kwargs = mock_convert.call_args
+        assert call_kwargs[0][0] is session.person_tracks[0].smplx_params
+        assert "corrected_body.bvh" in call_kwargs[0][1]
+        assert call_kwargs[1]["fps"] == 30.0
+        assert call_kwargs[1]["skip_world_grounding"] is True
+        assert "exported" in panel._export_status.text().lower()
+
+    def test_export_with_space_overrides_builds_ref_params(self, qapp):
+        """BVH export with carried overrides should build reference_params."""
+        FSO = _safe_import_space_override()
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if FSO is None or CorrectionTrack is None:
+            pytest.skip("pose_correction backend not available")
+
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        # Add carried override referencing person 1
+        ct = CorrectionTrack(person_id=0)
+        ct.add_space_override(FSO(
+            frame_start=10, frame_end=30, space="carried",
+            reference_person=1, y_offset=0.5,
+        ))
+        session.correction_tracks[0] = ct
+
+        mock_convert = MagicMock(return_value="/tmp/corrected.bvh")
+
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_convert,
+        ):
+            panel._on_reexport_bvh()
+
+        mock_convert.assert_called_once()
+        ref_params = mock_convert.call_args[1]["reference_params"]
+        assert ref_params is not None
+        assert 1 in ref_params
+
+    def test_export_signal_emitted(self, qapp):
+        """export_requested signal should be emitted on success."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        signals = []
+        panel.export_requested.connect(lambda s: signals.append(s))
+
+        mock_convert = MagicMock(return_value="/tmp/corrected.bvh")
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_convert,
+        ):
+            panel._on_reexport_bvh()
+
+        assert signals == ["bvh"]
+
+    def test_export_failure_shows_error(self, qapp):
+        """Export failure should show error status, not crash."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        mock_convert = MagicMock(side_effect=RuntimeError("test error"))
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_convert,
+        ):
+            panel._on_reexport_bvh()
+
+        assert "failed" in panel._export_status.text().lower()
+
+
+class TestFBXExport:
+    """FBX re-export button handler."""
+
+    def test_no_person_is_noop(self, qapp):
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = -1
+        panel._on_reexport_fbx()
+        assert panel._export_status.text() == ""
+
+    def test_fbx_with_mock_backend(self, qapp):
+        """Mock both BVH and FBX converters."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        signals = []
+        panel.export_requested.connect(lambda s: signals.append(s))
+
+        mock_bvh = MagicMock(return_value="/tmp/corrected.bvh")
+        mock_fbx = MagicMock(return_value="FBX converted")
+
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_bvh,
+        ), patch(
+            "views.pose_corrector_panel._safe_import_fbx_export",
+            return_value=mock_fbx,
+        ):
+            panel._on_reexport_fbx()
+
+        mock_bvh.assert_called_once()
+        mock_fbx.assert_called_once()
+        assert signals == ["fbx"]
+        assert "fbx" in panel._export_status.text().lower()
+
+    def test_fbx_unavailable_falls_back_to_bvh(self, qapp):
+        """If FBX converter unavailable, BVH should still export."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        signals = []
+        panel.export_requested.connect(lambda s: signals.append(s))
+
+        mock_bvh = MagicMock(return_value="/tmp/corrected.bvh")
+
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_bvh,
+        ), patch(
+            "views.pose_corrector_panel._safe_import_fbx_export",
+            return_value=None,
+        ):
+            panel._on_reexport_fbx()
+
+        mock_bvh.assert_called_once()
+        assert signals == ["bvh"]
+        assert "unavailable" in panel._export_status.text().lower()
+
+    def test_fbx_failure_shows_error(self, qapp):
+        """FBX conversion failure should show error but BVH signal still emitted."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._current_person = 0
+        session.person_tracks[0].person_dir = Path("/tmp/test_person_0")
+
+        signals = []
+        panel.export_requested.connect(lambda s: signals.append(s))
+
+        mock_bvh = MagicMock(return_value="/tmp/corrected.bvh")
+        mock_fbx = MagicMock(side_effect=RuntimeError("blender not found"))
+
+        with patch(
+            "views.pose_corrector_panel._safe_import_bvh_export",
+            return_value=mock_bvh,
+        ), patch(
+            "views.pose_corrector_panel._safe_import_fbx_export",
+            return_value=mock_fbx,
+        ):
+            panel._on_reexport_fbx()
+
+        assert signals == ["bvh"]
+        assert "failed" in panel._export_status.text().lower()
