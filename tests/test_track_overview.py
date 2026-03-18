@@ -422,3 +422,59 @@ class TestPersonColors:
         for c in PERSON_COLORS:
             assert c.startswith("#")
             assert len(c) == 7
+
+
+# ---------------------------------------------------------------------------
+# Speed Chips Footer (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class TestTrackOverviewSpeedChips:
+    """Phase 3: speed toggle chips in the track timeline footer."""
+
+    def test_speed_chips_exist(self, qapp):
+        w = TrackOverview()
+        assert len(w._speed_chips) == 5
+        for speed in (0.25, 0.5, 1.0, 2.0, 4.0):
+            assert speed in w._speed_chips
+
+    def test_default_speed_1x(self, qapp):
+        w = TrackOverview()
+        assert w._speed_chips[1.0].isChecked()
+
+    def test_speed_changed_signal(self, qapp):
+        w = TrackOverview()
+        received = []
+        w.speed_changed.connect(received.append)
+        w._speed_chips[2.0].click()
+        assert received == [2.0]
+
+    def test_set_speed_updates_chip(self, qapp):
+        w = TrackOverview()
+        w.set_speed(0.5)
+        assert w._speed_chips[0.5].isChecked()
+
+    def test_set_speed_no_signal(self, qapp):
+        """set_speed does NOT emit speed_changed (prevents loop)."""
+        w = TrackOverview()
+        received = []
+        w.speed_changed.connect(received.append)
+        w.set_speed(4.0)
+        assert received == []
+
+    def test_set_speed_invalid_no_crash(self, qapp):
+        """Invalid speed is silently ignored."""
+        w = TrackOverview()
+        w.set_speed(3.0)  # Not in presets
+        assert w._speed_chips[1.0].isChecked()  # Default unchanged
+
+    def test_footer_widget_exists(self, qapp):
+        w = TrackOverview()
+        assert w._footer is not None
+        assert w._footer.height() == 24
+
+    def test_chips_are_exclusive(self, qapp):
+        w = TrackOverview()
+        w._speed_chips[4.0].setChecked(True)
+        assert w._speed_chips[4.0].isChecked()
+        assert not w._speed_chips[1.0].isChecked()

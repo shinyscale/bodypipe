@@ -206,11 +206,27 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** `views/track_overview.py` (rewrite), `views/dock_widgets.py`, `app_window.py`, `tests/test_track_overview.py` (new), `tests/test_multi_person_tab.py`, `tests/test_dock_widgets.py`
 
+### Phase 3: Transport & Scrubbing Polish *(DONE)*
+
+- [x] `_TransportOverlay` widget — semi-transparent floating bar at bottom of video display with rounded rect background (QColor(0,0,0,180))
+- [x] Auto-hide: QTimer single-shot 2000ms, pauses on overlay enterEvent, resumes on leaveEvent
+- [x] Show on mouse activity: FrameDisplay mouse tracking + eventFilter on VideoPlayer for MouseMove/Enter events
+- [x] Overlay contents: back1/play/fwd1 buttons, frame counter (synced with slider row), timecode (MM:SS:FF via frame_to_timecode()), speed chips
+- [x] Speed toggle chips: 0.25x | 0.5x | 1x | 2x | 4x as exclusive QButtonGroup in both overlay and track timeline footer
+- [x] Bidirectional speed sync: VideoPlayer.speed_changed ↔ TrackOverview.speed_changed, wired in AppWindow._setup_signal_hub(), loop-safe via blockSignals()
+- [x] FrameCache adaptive read-ahead: DEFAULT_READAHEAD=15 at rest, PLAYBACK_READAHEAD=30 during playback, switched in _toggle_play()
+- [x] Hidden transport buttons: first/back10/fwd10/last remain as keyboard-only QToolButtons for backward compat
+- [x] TrackOverview footer: QVBoxLayout wrapping _TimelineView + footer QWidget with speed chips
+- [x] 44 new tests: TestTimecode (6), TestTransportOverlay (4), TestSpeedChips (10), TestFrameCacheReadahead (5), TestOverlayLabels (4), TestTrackOverviewSpeedChips (8), TestSpeedSync (3), plus 4 inline tests in TestVideoPlayer
+- [x] All 1399 tests pass (1355 original + 44 new)
+
+**Files:** `views/video_player.py` (major rewrite — _TransportOverlay, speed chips, timecode, adaptive cache), `views/track_overview.py` (footer speed chips), `app_window.py` (speed sync wiring), `tests/test_video_player.py`, `tests/test_track_overview.py`, `tests/test_app_window.py`
+
 ---
 
 ## Execution Order
 
-1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3
 
 ## Current Task Queue
 
@@ -237,12 +253,6 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 - `_refresh_all_panels()` — centralised "populate everything" (replaces ad-hoc calls in _on_multi_pipeline_finished, etc.)
 24 new tests in tests/test_app_window.py. All 1355 tests pass.
 
-### Phase 3: Transport & Scrubbing Polish
-
-- [ ] Overlay transport controls semi-transparently on the Video Player dock (like Mocha Pro). Auto-hide after 2s of mouse inactivity. Show on mouse enter. Contents: play/pause, frame-back/forward, current frame / total, timecode, speed selector.
-- [ ] Replace freeform speed control with toggle chips: 0.25x | 0.5x | 1x | 2x | 4x. Display in transport bar and track timeline footer.
-- [ ] Increase frame cache read-ahead from 15 to 30 during playback.
-
 ### Phase 5: Pose Correction UX Upgrades
 
 - [ ] **Preview range slider** — below Euler spinboxes, ±N frames (default ±15). When adjusting a correction, auto-play the range so artist sees temporal impact.
@@ -268,10 +278,11 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1355 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1399 tests pass
 2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts with populated panels
 5. 3D viewport: chain highlights, heatmap toggle, quality modes (wireframe/fast/full)
 6. Full end-to-end: load video → run pipeline → results populate all panels → corrections workflow functional
 7. Track timeline: zoom (scroll wheel), pan (middle-drag), click to select person + seek, collapsible lanes, marker overlays
+8. Transport overlay: auto-hide after 2s, speed chips sync between video player and track timeline, adaptive read-ahead during playback

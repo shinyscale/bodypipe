@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QGraphicsItem,
     QGraphicsScene,
@@ -56,6 +57,7 @@ LANE_SPACING = 4
 HEADER_WIDTH = 100
 _MIN_ZOOM = 0.01
 _MAX_ZOOM = 50.0
+_SPEED_PRESETS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 # Pre-built QColor objects for hot-path painting
 _COLOR_SUCCESS = QColor(COLORS["success"])
@@ -447,6 +449,7 @@ class TrackOverview(QWidget):
     """
 
     person_clicked = Signal(int, int)  # (person_id, frame_index)
+    speed_changed = Signal(float)  # emitted on user speed chip click
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -473,11 +476,53 @@ class TrackOverview(QWidget):
         sep.setStyleSheet(f"color: {COLORS.get('border', '#76797C')};")
         main.addWidget(sep)
 
+        # Right side: timeline view + speed chip footer
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+
         # QGraphicsView timeline
         self._scene = QGraphicsScene(self)
         self._view = _TimelineView(self._scene, self)
         self._view.frame_clicked.connect(self.person_clicked)
-        main.addWidget(self._view, 1)
+        right.addWidget(self._view, 1)
+
+        # Footer — speed chips (synced with VideoPlayer overlay)
+        self._footer = QWidget()
+        self._footer.setFixedHeight(24)
+        footer_layout = QHBoxLayout(self._footer)
+        footer_layout.setContentsMargins(4, 2, 4, 2)
+        footer_layout.setSpacing(4)
+        footer_layout.addStretch()
+
+        self._speed_group = QButtonGroup(self)
+        self._speed_group.setExclusive(True)
+        self._speed_chips: dict[float, QToolButton] = {}
+
+        _chip_style = (
+            "QToolButton { background: transparent; color: #76797C; "
+            "border: 1px solid rgba(118,121,124,60); border-radius: 2px; "
+            "padding: 0px 3px; font-size: 9px; }"
+            "QToolButton:checked { background: rgba(202,149,46,180); "
+            "color: #eff0f1; border-color: #ca952e; }"
+            "QToolButton:hover { border-color: #ca952e; }"
+        )
+        for speed in _SPEED_PRESETS:
+            label = f"{int(speed)}x" if speed == int(speed) else f"{speed}x"
+            chip = QToolButton()
+            chip.setText(label)
+            chip.setCheckable(True)
+            chip.setFixedHeight(18)
+            chip.setStyleSheet(_chip_style)
+            chip.setFocusPolicy(Qt.NoFocus)
+            self._speed_group.addButton(chip)
+            self._speed_chips[speed] = chip
+            footer_layout.addWidget(chip)
+        self._speed_chips[1.0].setChecked(True)
+        self._speed_group.buttonClicked.connect(self._on_speed_chip_clicked)
+
+        right.addWidget(self._footer)
+        main.addLayout(right, 1)
 
         # Playhead (always on top)
         self._playhead = _PlayheadItem(1)
@@ -559,6 +604,26 @@ class TrackOverview(QWidget):
             0, 0, self._num_frames, self._scene.sceneRect().height(),
         )
         self._view.set_num_frames(self._num_frames)
+
+    # -- speed chips ------------------------------------------------------
+
+    def set_speed(self, speed: float):
+        """Set the selected speed chip (called externally to sync).
+
+        Why blockSignals: prevents signal loop when synced with VideoPlayer.
+        """
+        chip = self._speed_chips.get(speed)
+        if chip:
+            self._speed_group.blockSignals(True)
+            chip.setChecked(True)
+            self._speed_group.blockSignals(False)
+
+    def _on_speed_chip_clicked(self, button):
+        """User clicked a speed chip — emit signal for sync."""
+        for speed, chip in self._speed_chips.items():
+            if chip is button:
+                self.speed_changed.emit(speed)
+                break
 
     # -- internal ---------------------------------------------------------
 

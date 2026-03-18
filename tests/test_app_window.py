@@ -896,6 +896,33 @@ class TestWorkspacePresets:
         assert names == []
 
 
+class TestSpeedSync:
+    """Phase 3: speed chips synced between video player and track overview.
+
+    Why sync: the user may change playback speed in either the video overlay
+    or the track timeline footer — both should stay in agreement.
+    """
+
+    def test_video_speed_updates_track_overview(self, app_window):
+        """Changing speed in video player updates track overview chips."""
+        app_window._video_player.speed_changed.emit(2.0)
+        assert app_window._track_overview._speed_chips[2.0].isChecked()
+
+    def test_track_overview_speed_updates_video_player(self, app_window):
+        """Changing speed in track overview updates video player."""
+        app_window._track_overview.speed_changed.emit(0.5)
+        assert app_window._video_player._playback_speed == 0.5
+        assert app_window._video_player._speed_chips[0.5].isChecked()
+
+    def test_no_infinite_loop(self, app_window):
+        """Bidirectional sync doesn't cause infinite recursion."""
+        # Simulate actual chip click (not just signal emit) to exercise full path
+        app_window._video_player._speed_chips[4.0].click()
+        assert app_window._track_overview._speed_chips[4.0].isChecked()
+        assert app_window._video_player._speed_chips[4.0].isChecked()
+        assert app_window._video_player._playback_speed == 4.0
+
+
 class TestScrubAutoSwitch:
     """Verify that scrubbing/playback auto-switches the viewport to wireframe.
 

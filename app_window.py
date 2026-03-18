@@ -737,6 +737,10 @@ class AppWindow(QMainWindow):
         self._identity_inspector.reprocess_requested.connect(self._on_reprocess_requested)
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
 
+        # Speed sync between video player and track timeline
+        self._video_player.speed_changed.connect(self._track_overview.set_speed)
+        self._track_overview.speed_changed.connect(self._video_player.set_playback_speed)
+
         # Mode selector
         self._pipeline_dock.mode_changed.connect(self._on_mode_changed)
 
