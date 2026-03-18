@@ -104,10 +104,11 @@ class TestMultiPersonTabConstruction:
         assert tab._identity_panel is not None
         assert isinstance(tab._identity_panel, IdentityInspector)
 
-    def test_has_pose_panel_placeholder(self, qapp):
+    def test_has_mesh_viewport(self, qapp):
         session = Session()
         tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._pose_panel is not None
+        from views.mesh_viewport import MeshViewport
+        assert isinstance(tab._mesh_viewport, MeshViewport)
 
     def test_has_vertical_splitter(self, qapp):
         session = Session()

@@ -41,6 +41,7 @@ from views.confidence_timeline import ConfidenceTimeline
 from views.identity_inspector import IdentityInspector
 from views.single_person_tab import _DropArea, VIDEO_EXTENSIONS
 from views.bbox_overlay import render_bbox_overlay, render_edit_preview
+from views.mesh_viewport import MeshViewport
 from workers.pipeline_orchestrator import MultiPersonWorker
 from workers.reprocess_worker import ReprocessWorker
 
@@ -252,13 +253,10 @@ class MultiPersonTab(QWidget):
         self._identity_panel = IdentityInspector(self._session)
         self._bottom_splitter.addWidget(self._identity_panel)
 
-        # Placeholder: Pose Corrector
-        self._pose_panel = QWidget()
-        pose_layout = QVBoxLayout(self._pose_panel)
-        pose_layout.addWidget(QLabel("Pose Corrector"))
-        pose_layout.addWidget(QLabel("(will be implemented in Phase 3)"))
-        pose_layout.addStretch()
-        self._bottom_splitter.addWidget(self._pose_panel)
+        # 3D Mesh Viewport (Phase 3 — will be wrapped by PoseCorrectorPanel later)
+        self._mesh_viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
+        self._mesh_viewport.set_session(self._session)
+        self._bottom_splitter.addWidget(self._mesh_viewport)
 
         self._bottom_splitter.setStretchFactor(0, 1)
         self._bottom_splitter.setStretchFactor(1, 1)
@@ -303,6 +301,7 @@ class MultiPersonTab(QWidget):
         self._session.current_frame = frame_idx
         self._track_overview.set_current_frame(frame_idx)
         self._identity_panel.set_frame(frame_idx)
+        self._mesh_viewport.on_frame_changed(frame_idx)
         self._show_frame(frame_idx)
         self.frame_changed.emit(frame_idx)
 
@@ -310,6 +309,7 @@ class MultiPersonTab(QWidget):
         """Select person and seek to frame from track overview."""
         self._session.selected_person = person_id
         self._identity_panel.set_person(person_id)
+        self._mesh_viewport.set_person(person_id)
         self._video_player.seek(frame_idx)
         self.person_selected.emit(person_id)
         self.status_message.emit(f"Selected Person {person_id} at frame {frame_idx}")
@@ -317,6 +317,7 @@ class MultiPersonTab(QWidget):
     def _on_identity_person_changed(self, person_id: int):
         """Handle person change from identity inspector — redraw overlay."""
         self._session.selected_person = person_id
+        self._mesh_viewport.set_person(person_id)
         self.person_selected.emit(person_id)
         self._show_frame(self._session.current_frame)
 
