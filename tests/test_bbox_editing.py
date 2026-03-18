@@ -746,57 +746,52 @@ class TestEditPreviewRendering:
 
 
 # ---------------------------------------------------------------------------
-# MultiPersonTab wiring
+# AppWindow bbox overlay wiring (migrated from deleted MultiPersonTab)
 # ---------------------------------------------------------------------------
 
 
-class TestMultiPersonTabBBoxWiring:
-    """Verify that MultiPersonTab correctly wires bbox editing signals."""
+class TestAppWindowBBoxWiring:
+    """Verify that AppWindow correctly wires bbox editing signals."""
 
-    def test_frame_clicked_wired_to_inspector(self, qapp, session):
-        from views.multi_person_tab import MultiPersonTab
+    def test_frame_clicked_wired_to_inspector(self, qapp):
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        # The frame_clicked signal should be connected to identity panel
-        # Verify by checking the connection exists
-        assert tab._video_player.frame_clicked is not None
-        assert tab._identity_panel.on_frame_click is not None
+        # The frame_clicked signal should be connected to identity inspector
+        assert window._video_player.frame_clicked is not None
+        assert window._identity_inspector.on_frame_click is not None
 
-    def test_edit_preview_stored_in_tab(self, qapp, session):
-        from views.multi_person_tab import MultiPersonTab
+    def test_edit_preview_stored_in_window(self, qapp):
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        tab._on_bbox_overlay_changed({"edit_preview": {"corner1": (100, 200)}})
-        assert tab._edit_preview == {"corner1": (100, 200)}
+        window._on_bbox_overlay_changed({"edit_preview": {"corner1": (100, 200)}})
+        assert window._edit_preview == {"corner1": (100, 200)}
 
-    def test_edit_preview_cleared(self, qapp, session):
-        from views.multi_person_tab import MultiPersonTab
+    def test_edit_preview_cleared(self, qapp):
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        tab._on_bbox_overlay_changed({"edit_preview": {"corner1": (100, 200)}})
-        tab._on_bbox_overlay_changed({"edit_preview": None})
-        assert tab._edit_preview is None
+        window._on_bbox_overlay_changed({"edit_preview": {"corner1": (100, 200)}})
+        window._on_bbox_overlay_changed({"edit_preview": None})
+        assert window._edit_preview is None
 
-    def test_show_all_and_edit_preview_independent(self, qapp, session):
+    def test_show_all_and_edit_preview_independent(self, qapp):
         """show_all and edit_preview should update independently."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        tab._on_bbox_overlay_changed({"show_all": True})
-        assert tab._show_all_tracks is True
-        assert tab._edit_preview is None
+        window._on_bbox_overlay_changed({"show_all": True})
+        assert window._show_all_tracks is True
+        assert window._edit_preview is None
 
-        tab._on_bbox_overlay_changed({"edit_preview": {"corner1": (50, 50)}})
-        assert tab._show_all_tracks is True  # unchanged
-        assert tab._edit_preview == {"corner1": (50, 50)}
+        window._on_bbox_overlay_changed({"edit_preview": {"corner1": (50, 50)}})
+        assert window._show_all_tracks is True  # unchanged
+        assert window._edit_preview == {"corner1": (50, 50)}
 
 
 # ---------------------------------------------------------------------------

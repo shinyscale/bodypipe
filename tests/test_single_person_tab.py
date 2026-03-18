@@ -1,9 +1,13 @@
-"""Tests for single-person tab UI.
+"""Tests for SinglePipelineSettings — the single-person pipeline settings widget.
 
-Why: The SinglePersonTab is the primary pipeline entry point. These tests
-verify that the widget assembles correctly, responds to settings changes,
-produces the correct PipelineConfig, wires worker lifecycle (run/cancel),
-and populates output files — all without needing a real video or GPU.
+Why: These tests verify settings assembly, config round-trip, solve_config
+persistence, and worker lifecycle for the single-person GVHMR body capture
+pipeline — the primary entry point for the application.
+
+History: Originally tested the now-deleted SinglePersonTab; migrated to test
+SinglePipelineSettings directly as part of the tab-to-dock cleanup (Commit 1E).
+Tests that were unique to the tab's output preview panel (file list, preview
+player) were removed since that UI no longer exists in the dock layout.
 """
 
 import sys
@@ -16,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.session import Session
 from models.pipeline_config import PipelineConfig
-from views.single_person_tab import SinglePersonTab, _DropArea
+from views.pipeline_settings import SinglePipelineSettings, _DropArea
 
 
 # ---------------------------------------------------------------------------
@@ -24,45 +28,35 @@ from views.single_person_tab import SinglePersonTab, _DropArea
 # ---------------------------------------------------------------------------
 
 
-class TestSinglePersonTabConstruction:
-    """Verify that the tab can be created and has the expected child widgets."""
+class TestSinglePipelineSettingsConstruction:
+    """Verify that the widget can be created and has the expected child widgets."""
 
     def test_creates_without_error(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab is not None
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w is not None
 
     def test_run_button_disabled_initially(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert not tab._run_btn.isEnabled()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert not w._run_btn.isEnabled()
 
     def test_cancel_button_hidden_initially(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._cancel_btn.isHidden()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._cancel_btn.isHidden()
 
     def test_progress_bar_hidden_initially(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._progress_bar.isHidden()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._progress_bar.isHidden()
 
     def test_has_settings_widgets(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._static_cam is not None
-        assert tab._use_dpvo is not None
-        assert tab._focal_mm is not None
-
-    def test_has_preview_player(self, qapp):
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._preview_player is not None
-
-    def test_has_file_list(self, qapp):
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._file_list is not None
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._static_cam is not None
+        assert w._use_dpvo is not None
+        assert w._focal_mm is not None
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +69,8 @@ class TestSettingsConfig:
 
     def test_default_config(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        config = tab.get_config()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        config = w.get_config()
         assert config.mode == "single"
         assert config.static_cam is True
         assert config.use_dpvo is False
@@ -84,39 +78,39 @@ class TestSettingsConfig:
 
     def test_changed_config(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._static_cam.setChecked(False)
-        tab._use_dpvo.setChecked(True)
-        tab._focal_mm.setValue(50.0)
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._static_cam.setChecked(False)
+        w._use_dpvo.setChecked(True)
+        w._focal_mm.setValue(50.0)
 
-        config = tab.get_config()
+        config = w.get_config()
         assert config.static_cam is False
         assert config.use_dpvo is True
         assert config.focal_mm == 50.0
 
     def test_set_config(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab.set_config(PipelineConfig(
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(
             static_cam=False, use_dpvo=True, focal_mm=85.0,
         ))
-        assert tab._static_cam.isChecked() is False
-        assert tab._use_dpvo.isChecked() is True
-        assert tab._focal_mm.value() == 85.0
+        assert w._static_cam.isChecked() is False
+        assert w._use_dpvo.isChecked() is True
+        assert w._focal_mm.value() == 85.0
 
     def test_config_round_trip(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
         original = PipelineConfig(static_cam=False, use_dpvo=True, focal_mm=35.0)
-        tab.set_config(original)
-        recovered = tab.get_config()
+        w.set_config(original)
+        recovered = w.get_config()
         assert recovered.static_cam == original.static_cam
         assert recovered.use_dpvo == original.use_dpvo
         assert recovered.focal_mm == original.focal_mm
 
 
 # ---------------------------------------------------------------------------
-# Static cam → DPVO auto-disable
+# Static cam -> DPVO auto-disable
 # ---------------------------------------------------------------------------
 
 
@@ -130,47 +124,47 @@ class TestStaticCamDpvoInterlock:
     def test_dpvo_disabled_by_default(self, qapp):
         """DPVO starts disabled because static_cam defaults to True."""
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert tab._static_cam.isChecked() is True
-        assert tab._use_dpvo.isChecked() is False
-        assert not tab._use_dpvo.isEnabled()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._static_cam.isChecked() is True
+        assert w._use_dpvo.isChecked() is False
+        assert not w._use_dpvo.isEnabled()
 
     def test_uncheck_static_cam_enables_dpvo(self, qapp):
         """Unchecking static camera re-enables DPVO."""
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._static_cam.setChecked(False)
-        assert tab._use_dpvo.isEnabled()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._static_cam.setChecked(False)
+        assert w._use_dpvo.isEnabled()
 
     def test_check_static_cam_disables_and_unchecks_dpvo(self, qapp):
         """Checking static camera disables DPVO and forces it unchecked."""
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._static_cam.setChecked(False)
-        tab._use_dpvo.setChecked(True)
-        assert tab._use_dpvo.isChecked() is True
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._static_cam.setChecked(False)
+        w._use_dpvo.setChecked(True)
+        assert w._use_dpvo.isChecked() is True
 
-        tab._static_cam.setChecked(True)
-        assert tab._use_dpvo.isChecked() is False
-        assert not tab._use_dpvo.isEnabled()
+        w._static_cam.setChecked(True)
+        assert w._use_dpvo.isChecked() is False
+        assert not w._use_dpvo.isEnabled()
 
     def test_dpvo_stays_disabled_after_run_with_static_cam(self, qapp):
         """After pipeline run ends, DPVO remains disabled if static_cam is on."""
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")
-        tab._set_running(True)
-        tab._set_running(False)
-        assert tab._static_cam.isChecked() is True
-        assert not tab._use_dpvo.isEnabled()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
+        w._set_running(False)
+        assert w._static_cam.isChecked() is True
+        assert not w._use_dpvo.isEnabled()
 
     def test_set_config_respects_interlock(self, qapp):
         """set_config with static_cam=False allows DPVO to be True."""
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab.set_config(PipelineConfig(static_cam=False, use_dpvo=True, focal_mm=24.0))
-        assert tab._use_dpvo.isEnabled()
-        assert tab._use_dpvo.isChecked() is True
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(static_cam=False, use_dpvo=True, focal_mm=24.0))
+        assert w._use_dpvo.isEnabled()
+        assert w._use_dpvo.isChecked() is True
 
 
 # ---------------------------------------------------------------------------
@@ -182,28 +176,27 @@ class TestVideoLoading:
     """Verify that loading a video updates session state and enables run."""
 
     def test_load_video_updates_session(self, qapp, tmp_path):
-        # Create a tiny valid video file
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._load_video(str(video_path))
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._load_video(str(video_path))
 
         assert session.video_path == video_path
         assert session.num_frames > 0
         assert session.img_width > 0
         assert session.img_height > 0
-        assert tab._run_btn.isEnabled()
+        assert w._run_btn.isEnabled()
 
     def test_load_nonexistent_video(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
 
         messages = []
-        tab.status_message.connect(messages.append)
-        tab._load_video("/tmp/nonexistent_video.mp4")
+        w.status_message.connect(messages.append)
+        w._load_video("/tmp/nonexistent_video.mp4")
 
-        assert not tab._run_btn.isEnabled()
+        assert not w._run_btn.isEnabled()
         assert any("not found" in m.lower() or "cannot open" in m.lower() for m in messages)
 
     def test_load_invalid_file(self, qapp, tmp_path):
@@ -211,13 +204,13 @@ class TestVideoLoading:
         bad_file.write_text("not a video")
 
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
 
         messages = []
-        tab.status_message.connect(messages.append)
-        tab._load_video(str(bad_file))
+        w.status_message.connect(messages.append)
+        w._load_video(str(bad_file))
 
-        assert not tab._run_btn.isEnabled()
+        assert not w._run_btn.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -226,42 +219,37 @@ class TestVideoLoading:
 
 
 class TestRunningState:
-    """Verify UI state transitions when running/idle.
-
-    Note: We use ``not widget.isHidden()`` instead of ``widget.isVisible()``
-    because Qt's isVisible() requires the entire widget hierarchy to be shown.
-    isHidden() correctly reflects the widget's own visibility flag.
-    """
+    """Verify UI state transitions when running/idle."""
 
     def test_set_running_true(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")  # simulate loaded
-        tab._set_running(True)
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
 
-        assert not tab._run_btn.isEnabled()
-        assert not tab._cancel_btn.isHidden()
-        assert not tab._progress_bar.isHidden()
-        assert not tab._browse_btn.isEnabled()
-        assert not tab._static_cam.isEnabled()
-        assert not tab._use_dpvo.isEnabled()
-        assert not tab._focal_mm.isEnabled()
+        assert not w._run_btn.isEnabled()
+        assert not w._cancel_btn.isHidden()
+        assert not w._progress_bar.isHidden()
+        assert not w._browse_btn.isEnabled()
+        assert not w._static_cam.isEnabled()
+        assert not w._use_dpvo.isEnabled()
+        assert not w._focal_mm.isEnabled()
 
     def test_set_running_false(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")
-        tab._set_running(True)
-        tab._set_running(False)
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
+        w._set_running(False)
 
-        assert tab._run_btn.isEnabled()
-        assert tab._cancel_btn.isHidden()
-        assert tab._progress_bar.isHidden()
-        assert tab._browse_btn.isEnabled()
-        assert tab._static_cam.isEnabled()
+        assert w._run_btn.isEnabled()
+        assert w._cancel_btn.isHidden()
+        assert w._progress_bar.isHidden()
+        assert w._browse_btn.isEnabled()
+        assert w._static_cam.isEnabled()
         # DPVO stays disabled when static_cam is checked (default True)
-        assert not tab._use_dpvo.isEnabled()
-        assert tab._focal_mm.isEnabled()
+        assert not w._use_dpvo.isEnabled()
+        assert w._focal_mm.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -272,46 +260,17 @@ class TestRunningState:
 class TestProgressUpdates:
     def test_on_progress(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._progress_bar.show()
-        tab._on_progress(0.5, "ViTPose")
-        assert tab._progress_bar.value() == 500
-        assert tab._progress_label.text() == "ViTPose"
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._progress_bar.show()
+        w._on_progress(0.5, "ViTPose")
+        assert w._progress_bar.value() == 500
+        assert w._progress_label.text() == "ViTPose"
 
     def test_on_progress_full(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._on_progress(1.0, "Done")
-        assert tab._progress_bar.value() == 1000
-
-
-# ---------------------------------------------------------------------------
-# Output files
-# ---------------------------------------------------------------------------
-
-
-class TestOutputFiles:
-    def test_populate_output_files(self, qapp, tmp_path):
-        # Create some fake output files
-        (tmp_path / "incam.mp4").touch()
-        (tmp_path / "global.mp4").touch()
-        (tmp_path / "hmr4d_results.pt").touch()
-        sub = tmp_path / "sub"
-        sub.mkdir()
-        (sub / "extra.bvh").touch()
-
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._populate_output_files(tmp_path)
-
-        assert tab._file_list.count() == 4
-        assert tab._open_folder_btn.isEnabled()
-
-    def test_populate_empty_dir(self, qapp, tmp_path):
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._populate_output_files(tmp_path)
-        assert tab._file_list.count() == 0
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._on_progress(1.0, "Done")
+        assert w._progress_bar.value() == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -321,33 +280,34 @@ class TestOutputFiles:
 
 class TestWorkerLifecycle:
     def test_on_finished(self, qapp, tmp_path):
-        (tmp_path / "side_by_side.mp4").touch()
-
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")
-        tab._set_running(True)
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
 
-        tab._on_finished({
+        received = []
+        w.pipeline_finished.connect(received.append)
+
+        w._on_finished({
             "output_dir": str(tmp_path),
             "video_path": "/tmp/test.mp4",
         })
 
-        assert not tab._running
-        assert session.output_dir == tmp_path
-        assert tab._file_list.count() > 0
+        assert not w._running
+        assert len(received) == 1
+        assert received[0]["output_dir"] == str(tmp_path)
 
     def test_on_error(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")
-        tab._set_running(True)
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
 
         messages = []
-        tab.status_message.connect(messages.append)
-        tab._on_error("Something broke")
+        w.status_message.connect(messages.append)
+        w._on_error("Something broke")
 
-        assert not tab._running
+        assert not w._running
         assert any("error" in m.lower() for m in messages)
 
 
@@ -361,14 +321,14 @@ class TestSolveConfigSaveRestore:
 
     Why: Gradio saves UI settings to solve_config.json in the output directory
     when a pipeline runs. When the same video is re-entered, settings are
-    restored. This provides session continuity — users don't need to
+    restored. This provides session continuity -- users don't need to
     reconfigure settings for previously-processed videos.
     """
 
     def test_output_dir_for_video(self, qapp):
         session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        result = tab._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        result = w._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
         assert result == Path("/tmp/GVHMR/outputs/demo/dance")
 
     def test_on_run_saves_config(self, qapp, tmp_path):
@@ -376,17 +336,16 @@ class TestSolveConfigSaveRestore:
         gvhmr_root = tmp_path / "GVHMR"
         gvhmr_root.mkdir()
         session = Session()
-        tab = SinglePersonTab(session, gvhmr_root)
-        tab._video_path = Path("/tmp/test_video.mp4")
-        tab._static_cam.setChecked(False)
-        tab._use_dpvo.setChecked(True)
-        tab._focal_mm.setValue(50.0)
+        w = SinglePipelineSettings(session, gvhmr_root)
+        w._video_path = Path("/tmp/test_video.mp4")
+        w._static_cam.setChecked(False)
+        w._use_dpvo.setChecked(True)
+        w._focal_mm.setValue(50.0)
 
-        # Mock the worker to prevent actual execution
         with patch("views.pipeline_settings.GVHMRWorker") as MockWorker:
             mock_instance = MagicMock()
             MockWorker.return_value = mock_instance
-            tab._on_run()
+            w._on_run()
 
         config_path = gvhmr_root / "outputs" / "demo" / "test_video" / "solve_config.json"
         assert config_path.is_file()
@@ -399,23 +358,21 @@ class TestSolveConfigSaveRestore:
     def test_load_video_restores_config(self, qapp, tmp_path):
         """Loading a video should restore settings from solve_config.json."""
         gvhmr_root = tmp_path / "GVHMR"
-        # Pre-create solve_config.json in expected output dir
         output_dir = gvhmr_root / "outputs" / "demo" / "test"
         output_dir.mkdir(parents=True)
         PipelineConfig(
             static_cam=False, use_dpvo=True, focal_mm=50.0,
         ).save(output_dir / "solve_config.json")
 
-        # Create test video
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = SinglePersonTab(session, gvhmr_root)
-        tab._load_video(str(video_path))
+        w = SinglePipelineSettings(session, gvhmr_root)
+        w._load_video(str(video_path))
 
-        assert tab._static_cam.isChecked() is False
-        assert tab._use_dpvo.isChecked() is True
-        assert tab._focal_mm.value() == 50.0
+        assert w._static_cam.isChecked() is False
+        assert w._use_dpvo.isChecked() is True
+        assert w._focal_mm.value() == 50.0
 
     def test_load_video_no_config_keeps_defaults(self, qapp, tmp_path):
         """Loading a video without solve_config.json keeps default settings."""
@@ -425,13 +382,12 @@ class TestSolveConfigSaveRestore:
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = SinglePersonTab(session, gvhmr_root)
-        tab._load_video(str(video_path))
+        w = SinglePipelineSettings(session, gvhmr_root)
+        w._load_video(str(video_path))
 
-        # Defaults preserved
-        assert tab._static_cam.isChecked() is True
-        assert tab._use_dpvo.isChecked() is False
-        assert tab._focal_mm.value() == 24.0
+        assert w._static_cam.isChecked() is True
+        assert w._use_dpvo.isChecked() is False
+        assert w._focal_mm.value() == 24.0
 
     def test_load_video_corrupt_config_ignored(self, qapp, tmp_path):
         """Corrupt solve_config.json should be silently ignored."""
@@ -443,11 +399,11 @@ class TestSolveConfigSaveRestore:
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = SinglePersonTab(session, gvhmr_root)
+        w = SinglePipelineSettings(session, gvhmr_root)
         # Should not raise
-        tab._load_video(str(video_path))
+        w._load_video(str(video_path))
         # Defaults preserved
-        assert tab._static_cam.isChecked() is True
+        assert w._static_cam.isChecked() is True
 
     def test_restore_emits_log_message(self, qapp, tmp_path):
         """Restoring config should emit a log message."""
@@ -459,10 +415,10 @@ class TestSolveConfigSaveRestore:
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = SinglePersonTab(session, gvhmr_root)
+        w = SinglePipelineSettings(session, gvhmr_root)
         logs = []
-        tab.log_message.connect(lambda text, level: logs.append((text, level)))
-        tab._load_video(str(video_path))
+        w.log_message.connect(lambda text, level: logs.append((text, level)))
+        w._load_video(str(video_path))
 
         assert any("restored" in text.lower() for text, _ in logs)
 
@@ -485,18 +441,16 @@ class TestDropArea:
 
 
 class TestAppWindowIntegration:
-    """Verify AppWindow uses SinglePipelineSettings via _tab_single property."""
+    """Verify AppWindow creates SinglePipelineSettings and wires signals."""
 
-    def test_tab_single_is_settings_widget(self, qapp):
+    def test_single_settings_is_settings_widget(self, qapp):
         from app_window import AppWindow
-        from views.pipeline_settings import SinglePipelineSettings
         window = AppWindow()
-        assert isinstance(window._tab_single, SinglePipelineSettings)
+        assert isinstance(window._single_settings, SinglePipelineSettings)
 
     def test_status_signal_connected(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
-        # Emit a status message from the settings widget and check it lands in the status bar
         window._single_settings.status_message.emit("test status")
         assert window._status_label.text() == "test status"
 

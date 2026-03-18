@@ -922,34 +922,34 @@ class TestMeshViewportPoseOverride:
 
 
 # ======================================================================
-# MultiPersonTab integration
+# AppWindow dock integration (migrated from deleted MultiPersonTab)
 # ======================================================================
 
 
-class TestMultiPersonTabIntegration:
-    """PoseCorrectorPanel should be wired into MultiPersonTab."""
+class TestAppWindowPoseCorrectorIntegration:
+    """PoseCorrectorPanel should be wired into AppWindow dock layout."""
 
-    def test_multi_person_tab_has_pose_corrector(self, qapp, session):
-        """MultiPersonTab should use PoseCorrectorPanel, not bare MeshViewport."""
-        from views.multi_person_tab import MultiPersonTab
-        tab = MultiPersonTab(session=session, gvhmr_root=Path("/tmp/gvhmr"))
-        assert hasattr(tab, "_pose_corrector")
-        assert isinstance(tab._pose_corrector, PoseCorrectorPanel)
+    def test_app_window_has_pose_corrector(self, qapp):
+        """AppWindow should have PoseCorrectorPanel in a dock."""
+        from app_window import AppWindow
+        window = AppWindow()
+        assert hasattr(window, "_pose_corrector")
+        assert isinstance(window._pose_corrector, PoseCorrectorPanel)
 
-    def test_mesh_viewport_accessible(self, qapp, session):
-        """The mesh viewport should still be accessible via _mesh_viewport."""
-        from views.multi_person_tab import MultiPersonTab
-        tab = MultiPersonTab(session=session, gvhmr_root=Path("/tmp/gvhmr"))
-        assert tab._mesh_viewport is tab._pose_corrector.mesh_viewport
+    def test_pose_corrector_has_mesh_viewport(self, qapp):
+        """PoseCorrectorPanel should have its own MeshViewport."""
+        from app_window import AppWindow
+        window = AppWindow()
+        assert window._pose_corrector.mesh_viewport is not None
 
-    def test_frame_requested_wired(self, qapp, session):
+    def test_frame_requested_wired(self, qapp):
         """Pose corrector frame_requested should be connected to video player."""
-        from views.multi_person_tab import MultiPersonTab
-        tab = MultiPersonTab(session=session, gvhmr_root=Path("/tmp/gvhmr"))
+        from app_window import AppWindow
+        window = AppWindow()
         # Verify signal exists and is connected
-        assert hasattr(tab._pose_corrector, "frame_requested")
+        assert hasattr(window._pose_corrector, "frame_requested")
         # Emit should not raise (connected to video_player.seek)
-        tab._pose_corrector.frame_requested.emit(0)
+        window._pose_corrector.frame_requested.emit(0)
 
 
 # ======================================================================

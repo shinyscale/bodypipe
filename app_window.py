@@ -35,7 +35,7 @@ from views.video_player import VideoPlayer
 from views.mesh_viewport import MeshViewport
 from views.identity_inspector import IdentityInspector
 from views.pose_corrector_panel import PoseCorrectorPanel
-from views.multi_person_tab import _TrackOverview
+from views.track_overview import TrackOverview
 from views.pipeline_settings import (
     SinglePipelineSettings,
     PerfPipelineSettings,
@@ -368,7 +368,7 @@ class AppWindow(QMainWindow):
         self._pose_corrector = PoseCorrectorPanel(
             session=self._session, gvhmr_root=self._gvhmr_root,
         )
-        self._track_overview = _TrackOverview()
+        self._track_overview = TrackOverview()
 
         # ---- Create settings widgets ----
         self._single_settings = SinglePipelineSettings(self._session, self._gvhmr_root)
@@ -647,9 +647,9 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     _TAB_CONFIG_MAP = {
-        "single": "_tab_single",
-        "perf": "_tab_perf",
-        "multi": "_tab_multi",
+        "single": "_single_settings",
+        "perf": "_perf_settings",
+        "multi": "_multi_settings",
     }
 
     def _save_pipeline_configs(self):

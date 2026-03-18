@@ -1,14 +1,17 @@
-"""Tests for performance capture tab.
+"""Tests for PerfPipelineSettings — performance capture settings widget.
 
-Why: The PerfCaptureTab extends SinglePersonTab with hand/face options
+Why: PerfPipelineSettings extends SinglePipelineSettings with hand/face options
 and pipeline output settings (FPS, FBX naming, pitch adjust, hand source,
 body smoothing, ViTPose face crops). These tests verify the additional UI
 controls, correct PipelineConfig generation, settings round-trip, and that
 the FullPipelineWorker is used instead of GVHMRWorker.
 
 Multi-stage progress display tests verify the spec requirement that
-progress shows "Stage X/N: Name" instead of raw internal labels —
+progress shows "Stage X/N: Name" instead of raw internal labels --
 essential for user understanding of long-running pipelines.
+
+History: Originally tested the now-deleted PerfCaptureTab; migrated to test
+PerfPipelineSettings directly as part of the tab-to-dock cleanup (Commit 1E).
 """
 
 import sys
@@ -20,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.pipeline_config import PipelineConfig
 from models.session import Session
-from views.perf_capture_tab import (
-    PerfCaptureTab,
+from views.pipeline_settings import (
+    PerfPipelineSettings,
     compute_visible_stages,
     map_stage_label,
 )
@@ -32,78 +35,78 @@ from views.perf_capture_tab import (
 # ---------------------------------------------------------------------------
 
 
-class TestPerfCaptureTabConstruction:
+class TestPerfPipelineSettingsConstruction:
     def test_creates_without_error(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab is not None
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w is not None
 
     def test_has_hand_controls(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert hasattr(tab, "_use_hands")
-        assert hasattr(tab, "_hand_hybrid")
-        assert hasattr(tab, "_hand_smplestx")
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_hands")
+        assert hasattr(w, "_hand_hybrid")
+        assert hasattr(w, "_hand_smplestx")
 
     def test_has_face_control(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert hasattr(tab, "_use_face")
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_face")
 
     def test_has_pipeline_settings_controls(self, qapp):
-        """New Gradio-parity controls: FPS, FBX naming, pitch, smoothing, hand source, vitpose."""
+        """Gradio-parity controls: FPS, FBX naming, pitch, smoothing, hand source, vitpose."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert hasattr(tab, "_target_fps")
-        assert hasattr(tab, "_fbx_naming")
-        assert hasattr(tab, "_pitch_adjust")
-        assert hasattr(tab, "_body_smooth")
-        assert hasattr(tab, "_hand_src_smplestx")
-        assert hasattr(tab, "_hand_src_hamer")
-        assert hasattr(tab, "_use_vitpose_face")
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_target_fps")
+        assert hasattr(w, "_fbx_naming")
+        assert hasattr(w, "_pitch_adjust")
+        assert hasattr(w, "_body_smooth")
+        assert hasattr(w, "_hand_src_smplestx")
+        assert hasattr(w, "_hand_src_hamer")
+        assert hasattr(w, "_use_vitpose_face")
 
     def test_run_button_says_run_pipeline(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._run_btn.text() == "Run Pipeline"
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._run_btn.text() == "Run Pipeline"
 
-    def test_inherits_body_settings(self, qapp):
-        """PerfCaptureTab inherits static_cam, use_dpvo, focal_mm from SinglePersonTab."""
+    def test_has_body_settings(self, qapp):
+        """PerfPipelineSettings inherits static_cam, use_dpvo, focal_mm."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert hasattr(tab, "_static_cam")
-        assert hasattr(tab, "_use_dpvo")
-        assert hasattr(tab, "_focal_mm")
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_static_cam")
+        assert hasattr(w, "_use_dpvo")
+        assert hasattr(w, "_focal_mm")
 
-    def test_inherits_video_input(self, qapp):
+    def test_has_video_input(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert hasattr(tab, "_drop_area")
-        assert hasattr(tab, "_browse_btn")
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_drop_area")
+        assert hasattr(w, "_browse_btn")
 
 
 # ---------------------------------------------------------------------------
-# Static cam → DPVO auto-disable (inherited from SinglePersonTab)
+# Static cam -> DPVO auto-disable (inherited from SinglePipelineSettings)
 # ---------------------------------------------------------------------------
 
 
 class TestStaticCamDpvoInterlock:
-    """PerfCaptureTab inherits DPVO interlock from SinglePersonTab."""
+    """PerfPipelineSettings inherits DPVO interlock from SinglePipelineSettings."""
 
     def test_dpvo_disabled_when_static_cam_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._static_cam.isChecked() is True
-        assert not tab._use_dpvo.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._static_cam.isChecked() is True
+        assert not w._use_dpvo.isEnabled()
 
     def test_toggle_static_cam_toggles_dpvo(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._static_cam.setChecked(False)
-        assert tab._use_dpvo.isEnabled()
-        tab._static_cam.setChecked(True)
-        assert not tab._use_dpvo.isEnabled()
-        assert tab._use_dpvo.isChecked() is False
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._static_cam.setChecked(False)
+        assert w._use_dpvo.isEnabled()
+        w._static_cam.setChecked(True)
+        assert not w._use_dpvo.isEnabled()
+        assert w._use_dpvo.isChecked() is False
 
 
 # ---------------------------------------------------------------------------
@@ -114,50 +117,50 @@ class TestStaticCamDpvoInterlock:
 class TestPerfCaptureDefaults:
     def test_hands_enabled_by_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._use_hands.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._use_hands.isChecked()
 
     def test_hybrid_selected_by_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._hand_hybrid.isChecked()
-        assert not tab._hand_smplestx.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._hand_hybrid.isChecked()
+        assert not w._hand_smplestx.isChecked()
 
     def test_face_disabled_by_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert not tab._use_face.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert not w._use_face.isChecked()
 
     def test_target_fps_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._target_fps.value() == 30.0
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._target_fps.value() == 30.0
 
     def test_fbx_naming_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._fbx_naming.currentText() == "Mixamo (Cascadeur)"
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._fbx_naming.currentText() == "Mixamo (Cascadeur)"
 
     def test_pitch_adjust_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._pitch_adjust.value() == 0.0
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._pitch_adjust.value() == 0.0
 
     def test_body_smooth_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert "Moderate" in tab._body_smooth.currentText()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert "Moderate" in w._body_smooth.currentText()
 
     def test_hand_source_smplestx_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._hand_src_smplestx.isChecked()
-        assert not tab._hand_src_hamer.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._hand_src_smplestx.isChecked()
+        assert not w._hand_src_hamer.isChecked()
 
     def test_vitpose_face_crops_enabled_by_default(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert tab._use_vitpose_face.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert w._use_vitpose_face.isChecked()
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +171,8 @@ class TestPerfCaptureDefaults:
 class TestPerfCaptureConfig:
     def test_default_config(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        config = tab.get_config()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        config = w.get_config()
         assert config.mode == "perf"
         assert config.use_hands is True
         assert config.use_face is False
@@ -184,36 +187,36 @@ class TestPerfCaptureConfig:
 
     def test_smplestx_only_mode(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._hand_smplestx.setChecked(True)
-        config = tab.get_config()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._hand_smplestx.setChecked(True)
+        config = w.get_config()
         assert config.hand_mode == "smplestx_only"
 
     def test_face_enabled(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._use_face.setChecked(True)
-        config = tab.get_config()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_face.setChecked(True)
+        config = w.get_config()
         assert config.use_face is True
 
     def test_hands_disabled(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._use_hands.setChecked(False)
-        config = tab.get_config()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_hands.setChecked(False)
+        config = w.get_config()
         assert config.use_hands is False
 
     def test_pipeline_settings_from_ui(self, qapp):
         """Changing UI controls should be reflected in get_config()."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._target_fps.setValue(24.0)
-        tab._fbx_naming.setCurrentIndex(1)  # UE5 Mannequin
-        tab._pitch_adjust.setValue(15.5)
-        tab._body_smooth.setCurrentIndex(2)  # Heavy
-        tab._hand_src_hamer.setChecked(True)
-        tab._use_vitpose_face.setChecked(False)
-        config = tab.get_config()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._target_fps.setValue(24.0)
+        w._fbx_naming.setCurrentIndex(1)  # UE5 Mannequin
+        w._pitch_adjust.setValue(15.5)
+        w._body_smooth.setCurrentIndex(2)  # Heavy
+        w._hand_src_hamer.setChecked(True)
+        w._use_vitpose_face.setChecked(False)
+        config = w.get_config()
         assert config.target_fps == 24.0
         assert config.fbx_naming == "UE5 Mannequin"
         assert config.pitch_adjust == 15.5
@@ -223,8 +226,8 @@ class TestPerfCaptureConfig:
 
     def test_set_config(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab.set_config(PipelineConfig(
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(
             static_cam=False,
             use_dpvo=True,
             focal_mm=85.0,
@@ -232,18 +235,18 @@ class TestPerfCaptureConfig:
             use_face=True,
             hand_mode="smplestx_only",
         ))
-        assert tab._static_cam.isChecked() is False
-        assert tab._use_dpvo.isChecked() is True
-        assert tab._focal_mm.value() == 85.0
-        assert tab._use_hands.isChecked() is False
-        assert tab._use_face.isChecked() is True
-        assert tab._hand_smplestx.isChecked() is True
+        assert w._static_cam.isChecked() is False
+        assert w._use_dpvo.isChecked() is True
+        assert w._focal_mm.value() == 85.0
+        assert w._use_hands.isChecked() is False
+        assert w._use_face.isChecked() is True
+        assert w._hand_smplestx.isChecked() is True
 
     def test_set_config_pipeline_settings(self, qapp):
         """set_config should restore all pipeline output settings."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab.set_config(PipelineConfig(
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(
             target_fps=60.0,
             fbx_naming="UE5 Mannequin",
             pitch_adjust=-10.0,
@@ -251,16 +254,16 @@ class TestPerfCaptureConfig:
             body_smooth_preset="light",
             use_vitpose_face_crops=False,
         ))
-        assert tab._target_fps.value() == 60.0
-        assert tab._fbx_naming.currentText() == "UE5 Mannequin"
-        assert tab._pitch_adjust.value() == -10.0
-        assert tab._hand_src_hamer.isChecked()
-        assert tab._body_smooth.currentIndex() == 0  # Light
-        assert not tab._use_vitpose_face.isChecked()
+        assert w._target_fps.value() == 60.0
+        assert w._fbx_naming.currentText() == "UE5 Mannequin"
+        assert w._pitch_adjust.value() == -10.0
+        assert w._hand_src_hamer.isChecked()
+        assert w._body_smooth.currentIndex() == 0  # Light
+        assert not w._use_vitpose_face.isChecked()
 
     def test_config_round_trip(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
         original = PipelineConfig(
             mode="perf",
             static_cam=False,
@@ -276,8 +279,8 @@ class TestPerfCaptureConfig:
             body_smooth_preset="heavy",
             use_vitpose_face_crops=False,
         )
-        tab.set_config(original)
-        recovered = tab.get_config()
+        w.set_config(original)
+        recovered = w.get_config()
         assert recovered.use_hands == original.use_hands
         assert recovered.use_face == original.use_face
         assert recovered.hand_mode == original.hand_mode
@@ -297,7 +300,7 @@ class TestPerfCaptureConfig:
 
 
 class TestSolveConfigSaveRestore:
-    """Verify perfcap tab uses correct output dir and restores config on load.
+    """Verify perfcap settings uses correct output dir and restores config on load.
 
     Why: Gradio saves per-video settings to outputs/perfcap/<stem>/solve_config.json.
     When a video is re-entered, settings (hand mode, face, FPS, etc.) are restored
@@ -305,10 +308,10 @@ class TestSolveConfigSaveRestore:
     """
 
     def test_output_dir_for_video_is_perfcap(self, qapp):
-        """PerfCaptureTab must use perfcap subdirectory, not demo."""
+        """PerfPipelineSettings must use perfcap subdirectory, not demo."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        result = tab._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        result = w._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
         assert result == Path("/tmp/GVHMR/outputs/perfcap/dance")
 
     def test_load_video_restores_perf_config(self, qapp, tmp_path):
@@ -335,21 +338,21 @@ class TestSolveConfigSaveRestore:
         video_path = _create_test_video(tmp_path / "test.mp4")
 
         session = Session()
-        tab = PerfCaptureTab(session, gvhmr_root)
-        tab._load_video(str(video_path))
+        w = PerfPipelineSettings(session, gvhmr_root)
+        w._load_video(str(video_path))
 
-        assert tab._static_cam.isChecked() is False
-        assert tab._use_dpvo.isChecked() is True
-        assert tab._focal_mm.value() == 50.0
-        assert tab._use_hands.isChecked() is False
-        assert tab._use_face.isChecked() is True
-        assert tab._hand_smplestx.isChecked() is True
-        assert tab._target_fps.value() == 24.0
-        assert tab._fbx_naming.currentText() == "UE5 Mannequin"
-        assert tab._pitch_adjust.value() == 5.5
-        assert tab._hand_src_hamer.isChecked() is True
-        assert tab._body_smooth.currentIndex() == 2  # Heavy
-        assert not tab._use_vitpose_face.isChecked()
+        assert w._static_cam.isChecked() is False
+        assert w._use_dpvo.isChecked() is True
+        assert w._focal_mm.value() == 50.0
+        assert w._use_hands.isChecked() is False
+        assert w._use_face.isChecked() is True
+        assert w._hand_smplestx.isChecked() is True
+        assert w._target_fps.value() == 24.0
+        assert w._fbx_naming.currentText() == "UE5 Mannequin"
+        assert w._pitch_adjust.value() == 5.5
+        assert w._hand_src_hamer.isChecked() is True
+        assert w._body_smooth.currentIndex() == 2  # Heavy
+        assert not w._use_vitpose_face.isChecked()
 
 
 # ---------------------------------------------------------------------------
@@ -360,41 +363,41 @@ class TestSolveConfigSaveRestore:
 class TestHandModeInteraction:
     def test_radio_buttons_exclusive(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._hand_smplestx.setChecked(True)
-        assert not tab._hand_hybrid.isChecked()
-        tab._hand_hybrid.setChecked(True)
-        assert not tab._hand_smplestx.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._hand_smplestx.setChecked(True)
+        assert not w._hand_hybrid.isChecked()
+        w._hand_hybrid.setChecked(True)
+        assert not w._hand_smplestx.isChecked()
 
     def test_disable_hands_disables_radios(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._use_hands.setChecked(False)
-        assert not tab._hand_hybrid.isEnabled()
-        assert not tab._hand_smplestx.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_hands.setChecked(False)
+        assert not w._hand_hybrid.isEnabled()
+        assert not w._hand_smplestx.isEnabled()
 
     def test_enable_hands_enables_radios(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._use_hands.setChecked(False)
-        tab._use_hands.setChecked(True)
-        assert tab._hand_hybrid.isEnabled()
-        assert tab._hand_smplestx.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_hands.setChecked(False)
+        w._use_hands.setChecked(True)
+        assert w._hand_hybrid.isEnabled()
+        assert w._hand_smplestx.isEnabled()
 
     def test_hand_source_radios_exclusive(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._hand_src_hamer.setChecked(True)
-        assert not tab._hand_src_smplestx.isChecked()
-        tab._hand_src_smplestx.setChecked(True)
-        assert not tab._hand_src_hamer.isChecked()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._hand_src_hamer.setChecked(True)
+        assert not w._hand_src_smplestx.isChecked()
+        w._hand_src_smplestx.setChecked(True)
+        assert not w._hand_src_hamer.isChecked()
 
     def test_disable_hands_disables_source_radios(self, qapp):
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._use_hands.setChecked(False)
-        assert not tab._hand_src_smplestx.isEnabled()
-        assert not tab._hand_src_hamer.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_hands.setChecked(False)
+        assert not w._hand_src_smplestx.isEnabled()
+        assert not w._hand_src_hamer.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -404,30 +407,30 @@ class TestHandModeInteraction:
 
 class TestPerfCaptureRunningState:
     def test_set_running_disables_new_controls(self, qapp):
-        """_set_running(True) should disable all new pipeline settings."""
+        """_set_running(True) should disable all pipeline settings."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._set_running(True)
-        assert not tab._target_fps.isEnabled()
-        assert not tab._fbx_naming.isEnabled()
-        assert not tab._pitch_adjust.isEnabled()
-        assert not tab._body_smooth.isEnabled()
-        assert not tab._use_hands.isEnabled()
-        assert not tab._use_face.isEnabled()
-        assert not tab._use_vitpose_face.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._set_running(True)
+        assert not w._target_fps.isEnabled()
+        assert not w._fbx_naming.isEnabled()
+        assert not w._pitch_adjust.isEnabled()
+        assert not w._body_smooth.isEnabled()
+        assert not w._use_hands.isEnabled()
+        assert not w._use_face.isEnabled()
+        assert not w._use_vitpose_face.isEnabled()
 
     def test_set_running_false_enables_new_controls(self, qapp):
         """_set_running(False) should re-enable pipeline settings."""
         session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        tab._set_running(True)
-        tab._set_running(False)
-        assert tab._target_fps.isEnabled()
-        assert tab._fbx_naming.isEnabled()
-        assert tab._pitch_adjust.isEnabled()
-        assert tab._body_smooth.isEnabled()
-        assert tab._use_face.isEnabled()
-        assert tab._use_vitpose_face.isEnabled()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._set_running(True)
+        w._set_running(False)
+        assert w._target_fps.isEnabled()
+        assert w._fbx_naming.isEnabled()
+        assert w._pitch_adjust.isEnabled()
+        assert w._body_smooth.isEnabled()
+        assert w._use_face.isEnabled()
+        assert w._use_vitpose_face.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -435,14 +438,13 @@ class TestPerfCaptureRunningState:
 # ---------------------------------------------------------------------------
 
 
-class TestAppWindowPerfTab:
-    def test_tab_perf_is_settings_widget(self, qapp):
+class TestAppWindowPerfSettings:
+    def test_perf_settings_is_settings_widget(self, qapp):
         from app_window import AppWindow
-        from views.pipeline_settings import PerfPipelineSettings
         window = AppWindow()
-        assert isinstance(window._tab_perf, PerfPipelineSettings)
+        assert isinstance(window._perf_settings, PerfPipelineSettings)
 
-    def test_perf_tab_status_connected(self, qapp):
+    def test_perf_settings_status_connected(self, qapp):
         from app_window import AppWindow
         window = AppWindow()
         window._perf_settings.status_message.emit("perf test status")
@@ -450,7 +452,7 @@ class TestAppWindowPerfTab:
 
 
 # ---------------------------------------------------------------------------
-# Multi-stage progress display — pure functions
+# Multi-stage progress display -- pure functions
 # ---------------------------------------------------------------------------
 
 
@@ -513,132 +515,131 @@ class TestMapStageLabel:
 
 
 # ---------------------------------------------------------------------------
-# Multi-stage progress display — widget behavior
+# Multi-stage progress display -- widget behavior
 # ---------------------------------------------------------------------------
 
 
 class TestMultiStageProgress:
-    """PerfCaptureTab._on_progress shows stage number/name per spec."""
+    """PerfPipelineSettings._on_progress shows stage number/name per spec."""
 
-    def _make_tab(self, qapp):
+    def _make_widget(self, qapp):
         session = Session()
-        return PerfCaptureTab(session, Path("/tmp/GVHMR"))
+        return PerfPipelineSettings(session, Path("/tmp/GVHMR"))
 
     def test_set_running_shows_initial_stage_label(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        assert tab._progress_label.text() == "Stage 1/3: Body"
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        assert w._progress_label.text() == "Stage 1/3: Body"
 
     def test_set_running_initial_all_enabled(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._use_face.setChecked(True)
-        tab._set_running(True)
-        assert tab._progress_label.text() == "Stage 1/4: Body"
+        w = self._make_widget(qapp)
+        w._use_face.setChecked(True)
+        w._set_running(True)
+        assert w._progress_label.text() == "Stage 1/4: Body"
 
     def test_set_running_initial_none_enabled(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._use_hands.setChecked(False)
-        tab._set_running(True)
-        assert tab._progress_label.text() == "Stage 1/2: Body"
+        w = self._make_widget(qapp)
+        w._use_hands.setChecked(False)
+        w._set_running(True)
+        assert w._progress_label.text() == "Stage 1/2: Body"
 
     def test_on_progress_body_stage(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.02, "GVHMR body solve")
-        assert tab._progress_label.text() == "Stage 1/3: Body"
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.02, "GVHMR body solve")
+        assert w._progress_label.text() == "Stage 1/3: Body"
 
     def test_on_progress_hands_stage(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.35, "SMPLest-X hand solve")
-        assert tab._progress_label.text() == "Stage 2/3: Hands"
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.35, "SMPLest-X hand solve")
+        assert w._progress_label.text() == "Stage 2/3: Hands"
 
     def test_on_progress_export_stage(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.72, "BVH/FBX conversion")
-        assert tab._progress_label.text() == "Stage 3/3: Export"
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.72, "BVH/FBX conversion")
+        assert w._progress_label.text() == "Stage 3/3: Export"
 
     def test_on_progress_face_when_enabled(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._use_face.setChecked(True)
-        tab._set_running(True)
-        tab._on_progress(0.52, "Face pipeline")
-        assert tab._progress_label.text() == "Stage 3/4: Face"
+        w = self._make_widget(qapp)
+        w._use_face.setChecked(True)
+        w._set_running(True)
+        w._on_progress(0.52, "Face pipeline")
+        assert w._progress_label.text() == "Stage 3/4: Face"
 
     def test_on_progress_face_disabled_stays_on_body(self, qapp):
         """When face disabled, 'Face pipeline' emission is swallowed."""
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.02, "GVHMR body solve")
-        tab._on_progress(0.52, "Face pipeline")
-        # Should still show Body since face was swallowed and no other stage matched
-        assert "Body" in tab._progress_label.text()
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.02, "GVHMR body solve")
+        w._on_progress(0.52, "Face pipeline")
+        assert "Body" in w._progress_label.text()
 
     def test_on_progress_sub_message_keeps_current_stage(self, qapp):
         """Sub-progress messages (custom text) don't change the stage label."""
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.35, "SMPLest-X hand solve")
-        tab._on_progress(0.40, "Processing frame 50/200")
-        assert tab._progress_label.text() == "Stage 2/3: Hands"
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.35, "SMPLest-X hand solve")
+        w._on_progress(0.40, "Processing frame 50/200")
+        assert w._progress_label.text() == "Stage 2/3: Hands"
 
     def test_on_progress_updates_bar_value(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.50, "Merging body + hands")
-        assert tab._progress_bar.value() == 500
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.50, "Merging body + hands")
+        assert w._progress_bar.value() == 500
 
     def test_on_progress_emits_status_message(self, qapp):
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
+        w = self._make_widget(qapp)
+        w._set_running(True)
         received = []
-        tab.status_message.connect(received.append)
-        tab._on_progress(0.72, "BVH/FBX conversion")
+        w.status_message.connect(received.append)
+        w._on_progress(0.72, "BVH/FBX conversion")
         assert any("Stage 3/3: Export" in msg for msg in received)
 
     def test_hands_disabled_merge_maps_to_export(self, qapp):
         """With hands off, 'Merging body + hands' jumps to Export stage."""
-        tab = self._make_tab(qapp)
-        tab._use_hands.setChecked(False)
-        tab._set_running(True)
-        tab._on_progress(0.50, "Merging body + hands")
-        assert tab._progress_label.text() == "Stage 2/2: Export"
+        w = self._make_widget(qapp)
+        w._use_hands.setChecked(False)
+        w._set_running(True)
+        w._on_progress(0.50, "Merging body + hands")
+        assert w._progress_label.text() == "Stage 2/2: Export"
 
     def test_full_sequence_all_enabled(self, qapp):
         """Walk through complete pipeline with both hands + face enabled."""
-        tab = self._make_tab(qapp)
-        tab._use_face.setChecked(True)
-        tab._set_running(True)
+        w = self._make_widget(qapp)
+        w._use_face.setChecked(True)
+        w._set_running(True)
 
-        tab._on_progress(0.00, "Preprocessing")
-        assert "1/4: Body" in tab._progress_label.text()
+        w._on_progress(0.00, "Preprocessing")
+        assert "1/4: Body" in w._progress_label.text()
 
-        tab._on_progress(0.02, "GVHMR body solve")
-        assert "1/4: Body" in tab._progress_label.text()
+        w._on_progress(0.02, "GVHMR body solve")
+        assert "1/4: Body" in w._progress_label.text()
 
-        tab._on_progress(0.35, "SMPLest-X hand solve")
-        assert "2/4: Hands" in tab._progress_label.text()
+        w._on_progress(0.35, "SMPLest-X hand solve")
+        assert "2/4: Hands" in w._progress_label.text()
 
-        tab._on_progress(0.50, "Merging body + hands")
-        assert "2/4: Hands" in tab._progress_label.text()
+        w._on_progress(0.50, "Merging body + hands")
+        assert "2/4: Hands" in w._progress_label.text()
 
-        tab._on_progress(0.52, "Face pipeline")
-        assert "3/4: Face" in tab._progress_label.text()
+        w._on_progress(0.52, "Face pipeline")
+        assert "3/4: Face" in w._progress_label.text()
 
-        tab._on_progress(0.72, "BVH/FBX conversion")
-        assert "4/4: Export" in tab._progress_label.text()
+        w._on_progress(0.72, "BVH/FBX conversion")
+        assert "4/4: Export" in w._progress_label.text()
 
-        tab._on_progress(0.85, "Rendering")
-        assert "4/4: Export" in tab._progress_label.text()
+        w._on_progress(0.85, "Rendering")
+        assert "4/4: Export" in w._progress_label.text()
 
     def test_set_running_false_clears_label(self, qapp):
         """Stopping the pipeline clears the progress label (parent behavior)."""
-        tab = self._make_tab(qapp)
-        tab._set_running(True)
-        tab._on_progress(0.35, "SMPLest-X hand solve")
-        tab._set_running(False)
-        assert tab._progress_label.text() == ""
+        w = self._make_widget(qapp)
+        w._set_running(True)
+        w._on_progress(0.35, "SMPLest-X hand solve")
+        w._set_running(False)
+        assert w._progress_label.text() == ""
 
 
 # ---------------------------------------------------------------------------

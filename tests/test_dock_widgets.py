@@ -140,29 +140,29 @@ class TestPoseCorrectorDock:
 
 class TestTrackOverviewDock:
     def test_creates_with_correct_title(self, qapp):
-        from views.multi_person_tab import _TrackOverview
+        from views.track_overview import TrackOverview
 
-        dock = TrackOverviewDock(_TrackOverview())
+        dock = TrackOverviewDock(TrackOverview())
         assert dock.windowTitle() == "Track Overview"
 
     def test_object_name(self, qapp):
-        from views.multi_person_tab import _TrackOverview
+        from views.track_overview import TrackOverview
 
-        dock = TrackOverviewDock(_TrackOverview())
+        dock = TrackOverviewDock(TrackOverview())
         assert dock.objectName() == "TrackOverviewDock"
 
     def test_property_returns_inner_widget(self, qapp):
-        from views.multi_person_tab import _TrackOverview
+        from views.track_overview import TrackOverview
 
-        to = _TrackOverview()
+        to = TrackOverview()
         dock = TrackOverviewDock(to)
         assert dock.track_overview is to
 
     def test_has_scroll_area(self, qapp):
         from PySide6.QtWidgets import QScrollArea
-        from views.multi_person_tab import _TrackOverview
+        from views.track_overview import TrackOverview
 
-        dock = TrackOverviewDock(_TrackOverview())
+        dock = TrackOverviewDock(TrackOverview())
         assert isinstance(dock.widget(), QScrollArea)
 
 

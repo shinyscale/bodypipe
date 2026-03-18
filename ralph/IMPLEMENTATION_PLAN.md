@@ -114,15 +114,21 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** `app_window.py` (~85 LOC addition), `tests/test_app_window.py`
 
-### Commit 1E: Remove Old Tab Classes *(cleanup)*
+### Commit 1E: Remove Old Tab Classes *(DONE)*
 
-- [ ] Move video loading logic (drag-drop, browse, path handling) to AppWindow or shared mixin
-- [ ] Move worker lifecycle management fully into AppWindow
-- [ ] Delete or gut `single_person_tab.py`, `perf_capture_tab.py`, `multi_person_tab.py`
-- [ ] Relocate ~100 tests to `test_pipeline_settings.py` and `test_app_window.py`
-- [ ] Net test count increases
+- [x] Extracted `TrackOverview` + `PERSON_COLORS` from `multi_person_tab.py` → new `views/track_overview.py`
+- [x] Updated imports in `app_window.py` and `views/dock_widgets.py` (`_TrackOverview` → `TrackOverview`)
+- [x] Updated `_TAB_CONFIG_MAP` to reference `_single_settings`/`_perf_settings`/`_multi_settings` directly
+- [x] Deleted `single_person_tab.py`, `perf_capture_tab.py`, `multi_person_tab.py`
+- [x] Rewrote `test_single_person_tab.py` → tests `SinglePipelineSettings` directly
+- [x] Rewrote `test_perf_capture_tab.py` → tests `PerfPipelineSettings` directly
+- [x] Rewrote `test_multi_person_tab.py` → tests `MultiPipelineSettings` + `TrackOverview` + `AppWindow`
+- [x] Removed tab composition tests from `test_pipeline_settings.py`
+- [x] Migrated 7 integration test files from `MultiPersonTab` → `AppWindow` (bbox_editing, bbox_overlay, mesh_viewport, pose_corrector, review_scanner, track_operations, dock_widgets)
+- [x] Updated `test_app_window.py` — `_tab_single`/`_tab_perf`/`_tab_multi` → `_single_settings`/`_perf_settings`/`_multi_settings`
+- [x] All 1227 tests pass (removed ~73 duplicate/tab-specific tests, all unique behavior preserved)
 
-**Files:** delete/gut 3 tab files, update 4 test files
+**Files:** deleted 3 tab files, new `views/track_overview.py`, updated `app_window.py`, `views/dock_widgets.py`, 12 test files
 
 ### Commit 1F: Remove backward-compat shims *(cleanup)*
 

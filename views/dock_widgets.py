@@ -25,7 +25,7 @@ from PySide6.QtCore import Signal
 if TYPE_CHECKING:
     from views.identity_inspector import IdentityInspector
     from views.mesh_viewport import MeshViewport
-    from views.multi_person_tab import _TrackOverview
+    from views.track_overview import TrackOverview
     from views.pipeline_settings import (
         MultiPipelineSettings,
         PerfPipelineSettings,
@@ -92,9 +92,9 @@ class PoseCorrectorDock(QDockWidget):
 
 
 class TrackOverviewDock(QDockWidget):
-    """Dock wrapping a _TrackOverview widget inside a scroll area."""
+    """Dock wrapping a TrackOverview widget inside a scroll area."""
 
-    def __init__(self, track_overview: _TrackOverview, parent: QWidget | None = None):
+    def __init__(self, track_overview: TrackOverview, parent: QWidget | None = None):
         super().__init__("Track Overview", parent)
         self.setObjectName("TrackOverviewDock")
         self._track_overview = track_overview
@@ -104,7 +104,7 @@ class TrackOverviewDock(QDockWidget):
         self.setWidget(scroll)
 
     @property
-    def track_overview(self) -> _TrackOverview:
+    def track_overview(self) -> TrackOverview:
         return self._track_overview
 
 

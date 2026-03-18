@@ -464,76 +464,7 @@ class TestMultiPipelineSettingsVideoLoading:
 
 
 # ===========================================================================
-# Tab composition tests — verify tabs compose settings correctly
-# ===========================================================================
-
-
-class TestTabComposition:
-    """Verify that tab classes correctly compose their settings widgets."""
-
-    def test_single_tab_composes_single_settings(self, qapp):
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        assert isinstance(tab._settings, SinglePipelineSettings)
-
-    def test_perf_tab_composes_perf_settings(self, qapp):
-        from views.perf_capture_tab import PerfCaptureTab
-        session = Session()
-        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
-        assert isinstance(tab._settings, PerfPipelineSettings)
-
-    def test_multi_tab_composes_multi_settings(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
-        session = Session()
-        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
-        assert isinstance(tab._settings, MultiPipelineSettings)
-
-    def test_proxy_reads_settings_attrs(self, qapp):
-        """Tab.__getattr__ should proxy attribute reads to settings."""
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        # These attributes live on the settings widget
-        assert tab._static_cam is tab._settings._static_cam
-        assert tab._run_btn is tab._settings._run_btn
-
-    def test_proxy_writes_video_path(self, qapp):
-        """Tab.__setattr__ should forward _video_path to settings."""
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._video_path = Path("/tmp/test.mp4")
-        assert tab._settings._video_path == Path("/tmp/test.mp4")
-
-    def test_tab_get_config_delegates(self, qapp):
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab._settings._static_cam.setChecked(False)
-        config = tab.get_config()
-        assert config.static_cam is False
-
-    def test_tab_set_config_delegates(self, qapp):
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        tab.set_config(PipelineConfig(focal_mm=85.0))
-        assert tab._settings._focal_mm.value() == 85.0
-
-    def test_signal_forwarding(self, qapp):
-        """Tab status_message should forward from settings widget."""
-        from views.single_person_tab import SinglePersonTab
-        session = Session()
-        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
-        received = []
-        tab.status_message.connect(received.append)
-        tab._settings.status_message.emit("hello")
-        assert "hello" in received
-
-
-# ===========================================================================
-# DropArea + re-export tests
+# DropArea + extension tests
 # ===========================================================================
 
 
@@ -546,18 +477,6 @@ class TestDropArea:
     def test_video_extensions_set(self):
         assert ".mp4" in VIDEO_EXTENSIONS
         assert ".avi" in VIDEO_EXTENSIONS
-
-    def test_importable_from_single_person_tab(self):
-        """_DropArea must remain importable from single_person_tab."""
-        from views.single_person_tab import _DropArea as DA
-        assert DA is _DropArea
-
-    def test_stage_helpers_importable_from_perf_capture_tab(self):
-        """compute_visible_stages/map_stage_label must remain importable."""
-        from views.perf_capture_tab import compute_visible_stages as cvs
-        from views.perf_capture_tab import map_stage_label as msl
-        assert cvs is compute_visible_stages
-        assert msl is map_stage_label
 
 
 # ===========================================================================

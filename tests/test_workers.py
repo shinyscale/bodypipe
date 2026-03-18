@@ -1011,7 +1011,7 @@ class TestFullPipelineWorkerConfigPassthrough:
         assert w._config.fbx_naming == "UE5 Mannequin"
 
     def test_fps_from_config(self, qapp, tmp_path):
-        """Worker uses fps param (which PerfCaptureTab sets from config.target_fps)."""
+        """Worker uses fps param (which PerfPipelineSettings sets from config.target_fps)."""
         config = PipelineConfig(target_fps=60.0)
         w = FullPipelineWorker(
             tmp_path / "video.mp4", config, tmp_path / "GVHMR", tmp_path / "out",

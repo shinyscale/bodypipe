@@ -536,83 +536,68 @@ class TestMeshViewportVertexComputation:
 
 
 # ======================================================================
-# Integration: MeshViewport inside MultiPersonTab
+# Integration: MeshViewport inside AppWindow dock layout
+# (migrated from deleted MultiPersonTab)
 # ======================================================================
 
 
-class TestMultiPersonTabMeshIntegration:
-    """MeshViewport should replace the old placeholder in MultiPersonTab."""
+class TestAppWindowMeshIntegration:
+    """MeshViewport should be wired in the AppWindow dock layout."""
 
     def test_mesh_viewport_exists(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        assert hasattr(tab, "_mesh_viewport")
-        assert isinstance(tab._mesh_viewport, MeshViewport)
+        window = AppWindow()
+        assert hasattr(window, "_mesh_viewport")
+        assert isinstance(window._mesh_viewport, MeshViewport)
 
     def test_mesh_viewport_has_session(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        assert tab._mesh_viewport._session is s
+        window = AppWindow()
+        assert window._mesh_viewport._session is window._session
 
-    def test_mesh_viewport_in_splitter(self, qapp):
-        """MeshViewport should be in the bottom splitter (wrapped by PoseCorrectorPanel)."""
-        from views.multi_person_tab import MultiPersonTab
+    def test_mesh_viewport_in_dock(self, qapp):
+        """MeshViewport should be wrapped in a MeshViewportDock."""
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        splitter = tab._bottom_splitter
-        # PoseCorrectorPanel wraps MeshViewport; the panel is in the splitter
-        found = False
-        for i in range(splitter.count()):
-            if splitter.widget(i) is tab._pose_corrector:
-                found = True
-                break
-        assert found, "PoseCorrectorPanel not found in bottom splitter"
-        # MeshViewport is accessible through the pose corrector
-        assert tab._mesh_viewport is tab._pose_corrector.mesh_viewport
+        window = AppWindow()
+        assert window._mesh_dock.mesh_viewport is window._mesh_viewport
 
-    def test_frame_change_updates_viewport(self, qapp):
-        """Frame change handler should call mesh viewport."""
-        from views.multi_person_tab import MultiPersonTab
+    def test_frame_change_updates_viewport_in_multi_mode(self, qapp):
+        """Frame change handler should call mesh viewport in multi mode."""
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        tab._mesh_viewport.on_frame_changed = MagicMock()
-        tab._on_frame_changed(5)
-        tab._mesh_viewport.on_frame_changed.assert_called_once_with(5)
+        window = AppWindow()
+        window._pipeline_dock.set_mode("multi")
+        window._mesh_viewport.on_frame_changed = MagicMock()
+        window._on_video_frame_changed(5)
+        window._mesh_viewport.on_frame_changed.assert_called_once_with(5)
 
     def test_person_change_updates_viewport(self, qapp):
-        """Person change from identity panel should update mesh viewport."""
-        from views.multi_person_tab import MultiPersonTab
+        """Person change from identity inspector should update mesh viewport."""
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        tab._mesh_viewport.set_person = MagicMock()
-        tab._on_identity_person_changed(2)
-        tab._mesh_viewport.set_person.assert_called_once_with(2)
+        window = AppWindow()
+        window._mesh_viewport.set_person = MagicMock()
+        window._on_identity_person_changed(2)
+        window._mesh_viewport.set_person.assert_called_once_with(2)
 
     def test_track_click_updates_viewport(self, qapp):
         """Clicking a track should update mesh viewport person."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        tab._mesh_viewport.set_person = MagicMock()
-        tab._on_track_clicked(3, 10)
-        tab._mesh_viewport.set_person.assert_called_once_with(3)
+        window = AppWindow()
+        window._mesh_viewport.set_person = MagicMock()
+        window._on_track_clicked(3, 10)
+        window._mesh_viewport.set_person.assert_called_once_with(3)
 
-    def test_no_pose_placeholder_label(self, qapp):
-        """The old 'Phase 3' placeholder text should be gone."""
-        from views.multi_person_tab import MultiPersonTab
+    def test_pose_corrector_has_viewport(self, qapp):
+        """PoseCorrectorPanel should have its own MeshViewport."""
+        from app_window import AppWindow
 
-        s = Session()
-        tab = MultiPersonTab(s, Path("."))
-        # Should NOT have the old _pose_panel QWidget with placeholder labels
-        assert not hasattr(tab, "_pose_panel")
+        window = AppWindow()
+        assert hasattr(window._pose_corrector, "mesh_viewport")
 
 
 class TestShaderFiles:

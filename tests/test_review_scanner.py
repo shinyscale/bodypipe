@@ -574,57 +574,49 @@ class TestReprocessButton:
 
 
 # ===========================================================================
-# Tests: MultiPersonTab — Reprocess Wiring
+# Tests: AppWindow — Reprocess Wiring (migrated from deleted MultiPersonTab)
 # ===========================================================================
 
 
-class TestMultiPersonTabReprocessWiring:
-    """Test that MultiPersonTab correctly wires the reprocess signal."""
+class TestAppWindowReprocessWiring:
+    """Test that AppWindow correctly wires the reprocess signal."""
 
     def test_reprocess_signal_connected(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
-        from pathlib import Path
+        from app_window import AppWindow
 
-        session = _session_with_tracks()
-        tab = MultiPersonTab(session, gvhmr_root=Path("/tmp/gvhmr"))
-        assert tab._reprocess_worker is None
+        window = AppWindow()
+        assert window._reprocess_worker is None
 
         # The signal should be connected — we verify by checking
         # the method exists and is wired
-        assert hasattr(tab, "_on_reprocess_requested")
+        assert hasattr(window, "_on_reprocess_requested")
 
     def test_reprocess_finished_clears_dirty(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
-        from pathlib import Path
+        from app_window import AppWindow
 
-        session = _session_with_tracks()
-        session.dirty_persons = {0, 1}
-        tab = MultiPersonTab(session, gvhmr_root=Path("/tmp/gvhmr"))
+        window = AppWindow()
+        window._session.dirty_persons = {0, 1}
 
         # Simulate worker completion
-        tab._on_reprocess_finished({"reprocessed": [0, 1]})
-        assert len(session.dirty_persons) == 0
+        window._on_reprocess_finished({"reprocessed": [0, 1]})
+        assert len(window._session.dirty_persons) == 0
 
     def test_reprocess_person_done_updates_dirty(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
-        from pathlib import Path
+        from app_window import AppWindow
 
-        session = _session_with_tracks()
-        session.dirty_persons = {0, 1}
-        tab = MultiPersonTab(session, gvhmr_root=Path("/tmp/gvhmr"))
+        window = AppWindow()
+        window._session.dirty_persons = {0, 1}
 
-        tab._on_reprocess_person_done(0)
-        assert 0 not in session.dirty_persons
-        assert 1 in session.dirty_persons
+        window._on_reprocess_person_done(0)
+        assert 0 not in window._session.dirty_persons
+        assert 1 in window._session.dirty_persons
 
     def test_reprocess_error_clears_worker(self, qapp):
-        from views.multi_person_tab import MultiPersonTab
-        from pathlib import Path
-
-        session = _session_with_tracks()
-        tab = MultiPersonTab(session, gvhmr_root=Path("/tmp/gvhmr"))
+        from app_window import AppWindow
         from unittest.mock import MagicMock
-        tab._reprocess_worker = MagicMock()
 
-        tab._on_reprocess_error("test error")
-        assert tab._reprocess_worker is None
+        window = AppWindow()
+        window._reprocess_worker = MagicMock()
+
+        window._on_reprocess_error("test error")
+        assert window._reprocess_worker is None

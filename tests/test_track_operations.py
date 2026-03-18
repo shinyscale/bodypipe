@@ -920,26 +920,24 @@ class TestCrossingSpansSerialization:
 
 
 # ---------------------------------------------------------------------------
-# MultiPersonTab track_modified wiring
+# AppWindow track_modified wiring (migrated from deleted MultiPersonTab)
 # ---------------------------------------------------------------------------
 
 
-class TestMultiPersonTabTrackWiring:
-    """Verify MultiPersonTab connects to track_modified signal."""
+class TestAppWindowTrackWiring:
+    """Verify AppWindow connects to track_modified signal."""
 
-    def test_track_modified_does_not_crash(self, qapp, session):
-        from views.multi_person_tab import MultiPersonTab
+    def test_track_modified_does_not_crash(self, qapp):
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
         # Emit track_modified — should call _on_tracks_modified without crash
-        tab._identity_panel.track_modified.emit()
+        window._identity_inspector.track_modified.emit()
 
-    def test_has_on_tracks_modified_handler(self, qapp, session):
-        from views.multi_person_tab import MultiPersonTab
+    def test_has_on_tracks_modified_handler(self, qapp):
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        assert hasattr(tab, "_on_tracks_modified")
+        assert hasattr(window, "_on_tracks_modified")

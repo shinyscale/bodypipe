@@ -363,54 +363,50 @@ class TestRenderBboxOverlay:
 
 
 # ---------------------------------------------------------------------------
-# Integration with MultiPersonTab signal wiring
+# Integration with AppWindow signal wiring (migrated from deleted MultiPersonTab)
 # ---------------------------------------------------------------------------
 
 
-class TestMultiPersonTabOverlayWiring:
-    """Test that MultiPersonTab correctly wires bbox overlay signals."""
+class TestAppWindowOverlayWiring:
+    """Test that AppWindow correctly wires bbox overlay signals."""
 
-    def test_show_frame_calls_overlay(self, qapp, session):
+    def test_show_frame_calls_overlay(self, qapp):
         """_show_frame should composite bbox overlay onto raw frame."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
         # Without a loaded video, _show_frame should not crash
-        tab._show_frame(0)
+        window._show_frame(0)
 
-    def test_show_all_tracks_toggle(self, qapp, session):
+    def test_show_all_tracks_toggle(self, qapp):
         """_on_bbox_overlay_changed should update _show_all_tracks flag."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        assert tab._show_all_tracks is False
-        tab._on_bbox_overlay_changed({"show_all": True})
-        assert tab._show_all_tracks is True
-        tab._on_bbox_overlay_changed({"show_all": False})
-        assert tab._show_all_tracks is False
+        assert window._show_all_tracks is False
+        window._on_bbox_overlay_changed({"show_all": True})
+        assert window._show_all_tracks is True
+        window._on_bbox_overlay_changed({"show_all": False})
+        assert window._show_all_tracks is False
 
     def test_identity_person_changed_redraws(self, qapp, session):
         """Person change should update selected_person and redraw."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
-        tab._on_identity_person_changed(2)
-        assert session.selected_person == 2
+        window._on_identity_person_changed(2)
+        assert window._session.selected_person == 2
 
-    def test_on_bbox_overlay_changed_handles_non_dict(self, qapp, session):
+    def test_on_bbox_overlay_changed_handles_non_dict(self, qapp):
         """Should handle non-dict data gracefully."""
-        from views.multi_person_tab import MultiPersonTab
+        from app_window import AppWindow
 
-        gvhmr_root = Path(__file__).resolve().parent.parent.parent / "GVHMR"
-        tab = MultiPersonTab(session, gvhmr_root)
+        window = AppWindow()
 
         # Should not crash
-        tab._on_bbox_overlay_changed("invalid")
-        tab._on_bbox_overlay_changed(None)
-        tab._on_bbox_overlay_changed(42)
+        window._on_bbox_overlay_changed("invalid")
+        window._on_bbox_overlay_changed(None)
+        window._on_bbox_overlay_changed(42)
