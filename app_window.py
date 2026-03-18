@@ -203,6 +203,7 @@ class AppWindow(QMainWindow):
         self._setup_status_bar()
         self._setup_status_bar_toggle()
         self._setup_log_panel()
+        self._setup_undo_redo()
         self._restore_geometry()
         self._connect_tab_signals()
 
@@ -264,13 +265,17 @@ class AppWindow(QMainWindow):
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
 
-        undo_action = QAction("&Undo", self)
-        undo_action.setShortcut("Ctrl+Z")
-        edit_menu.addAction(undo_action)
+        self._undo_action = QAction("&Undo", self)
+        self._undo_action.setShortcut("Ctrl+Z")
+        self._undo_action.setEnabled(False)
+        self._undo_action.triggered.connect(self._on_undo)
+        edit_menu.addAction(self._undo_action)
 
-        redo_action = QAction("&Redo", self)
-        redo_action.setShortcut("Ctrl+Shift+Z")
-        edit_menu.addAction(redo_action)
+        self._redo_action = QAction("&Redo", self)
+        self._redo_action.setShortcut("Ctrl+Shift+Z")
+        self._redo_action.setEnabled(False)
+        self._redo_action.triggered.connect(self._on_redo)
+        edit_menu.addAction(self._redo_action)
 
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -378,6 +383,37 @@ class AppWindow(QMainWindow):
     def set_fps_info(self, fps: float):
         self._fps_label.setText(f"{fps:.1f} FPS")
 
+    # --- Undo / Redo ---
+
+    def _setup_undo_redo(self):
+        """Wire undo stack on_changed callback to keep Edit menu in sync."""
+        self._session.undo_stack.on_changed = self._update_undo_redo_state
+
+    def _update_undo_redo_state(self):
+        """Enable/disable and label the Edit > Undo/Redo actions."""
+        stack = self._session.undo_stack
+        self._undo_action.setEnabled(stack.can_undo())
+        self._redo_action.setEnabled(stack.can_redo())
+
+        undo_desc = stack.peek_undo()
+        self._undo_action.setText(
+            f"&Undo {undo_desc}" if undo_desc else "&Undo"
+        )
+        redo_desc = stack.peek_redo()
+        self._redo_action.setText(
+            f"&Redo {redo_desc}" if redo_desc else "&Redo"
+        )
+
+    def _on_undo(self):
+        desc = self._session.undo_stack.undo()
+        if desc:
+            self.set_status(f"Undo: {desc}")
+
+    def _on_redo(self):
+        desc = self._session.undo_stack.redo()
+        if desc:
+            self.set_status(f"Redo: {desc}")
+
     # --- Session I/O ---
 
     def _on_save_session(self):
@@ -423,8 +459,12 @@ class AppWindow(QMainWindow):
             return
 
         # Copy all fields to shared session object (tabs hold a reference)
+        # Preserve the existing undo stack (with its on_changed callback)
+        saved_undo_stack = self._session.undo_stack
         for attr in vars(loaded):
             setattr(self._session, attr, getattr(loaded, attr))
+        self._session.undo_stack = saved_undo_stack
+        self._session.undo_stack.clear()
 
         self._session_path = session_path
         self._add_recent(session_path)

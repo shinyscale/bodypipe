@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
 
-from models.session import Session, PersonTrack
+from models.session import Session, PersonTrack, UndoEntry
 from views.confidence_timeline import ConfidenceTimeline
 
 log = logging.getLogger(__name__)
@@ -634,15 +634,57 @@ class IdentityInspector(QWidget):
             bbox[2] = min(self._session.img_width - 1, bbox[2])
             bbox[3] = min(self._session.img_height - 1, bbox[3])
 
+            # Snapshot for undo
+            pid = self._current_person_id
+            frame = self._current_frame
+            old_corr = (
+                track.bbox_corrections[frame].copy()
+                if track.bbox_corrections is not None and frame < len(track.bbox_corrections)
+                else None
+            )
+            had_keyframe = any(kf["frame"] == frame for kf in track.keyframes)
+
             # Store correction
             self._store_bbox_correction(track, self._current_frame, bbox)
 
             # Add keyframe at this frame if not present
+            added_kf = False
             if not any(kf["frame"] == self._current_frame for kf in track.keyframes):
                 track.keyframes.append({
                     "frame": self._current_frame,
                     "verified": False,
                 })
+                added_kf = True
+
+            # Undo/redo entry
+            new_bbox = list(bbox)
+
+            def undo(p=pid, f=frame, old_c=old_corr, added=added_kf):
+                t = self._session.person_tracks.get(p)
+                if t and t.bbox_corrections is not None and f < len(t.bbox_corrections):
+                    if old_c is not None:
+                        t.bbox_corrections[f] = old_c
+                    else:
+                        t.bbox_corrections[f] = 0
+                if added and t:
+                    t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+                self._session.dirty_persons.discard(p)
+                self._refresh_for_person()
+                self.keyframe_changed.emit(p, f)
+                self.bbox_overlay_changed.emit({"edit_preview": None})
+
+            def redo(p=pid, f=frame, new_b=new_bbox, was_kf=had_keyframe):
+                t = self._session.person_tracks.get(p)
+                if t:
+                    self._store_bbox_correction(t, f, new_b)
+                    if not was_kf and not any(kf["frame"] == f for kf in t.keyframes):
+                        t.keyframes.append({"frame": f, "verified": False})
+                    self._session.dirty_persons.add(p)
+                self._refresh_for_person()
+                self.keyframe_changed.emit(p, f)
+                self.bbox_overlay_changed.emit({"edit_preview": None})
+
+            self._session.undo_stack.push(UndoEntry("BBox correction", undo, redo))
 
             # Mark person dirty
             self._session.dirty_persons.add(self._current_person_id)
@@ -879,6 +921,26 @@ class IdentityInspector(QWidget):
         self._refresh_for_person()
         self.person_changed.emit(person_id)
 
+    @staticmethod
+    def _snapshot_track(track: PersonTrack) -> dict:
+        """Capture mutable track data for undo/redo snapshots."""
+        return {
+            "bboxes": track.bboxes.copy() if track.bboxes is not None else None,
+            "confidences": list(track.confidences) if track.confidences is not None else None,
+            "bbox_corrections": track.bbox_corrections.copy() if track.bbox_corrections is not None else None,
+            "original_bboxes": track.original_bboxes.copy() if track.original_bboxes is not None else None,
+            "keyframes": [dict(kf) for kf in track.keyframes],
+        }
+
+    @staticmethod
+    def _restore_track(track: PersonTrack, snap: dict) -> None:
+        """Restore mutable track data from a snapshot."""
+        track.bboxes = snap["bboxes"].copy() if snap["bboxes"] is not None else None
+        track.confidences = list(snap["confidences"]) if snap["confidences"] is not None else None
+        track.bbox_corrections = snap["bbox_corrections"].copy() if snap["bbox_corrections"] is not None else None
+        track.original_bboxes = snap["original_bboxes"].copy() if snap["original_bboxes"] is not None else None
+        track.keyframes = [dict(kf) for kf in snap["keyframes"]]
+
     def _on_timeline_clicked(self, frame_idx: int):
         """Handle click on confidence timeline — seek to frame."""
         self._current_frame = frame_idx
@@ -890,6 +952,10 @@ class IdentityInspector(QWidget):
         track = self._get_current_track()
         if track is None:
             return
+
+        pid = self._current_person_id
+        frame = self._current_frame
+        old_keyframes = [dict(kf) for kf in track.keyframes]
 
         # Find existing keyframe at current frame
         existing = None
@@ -908,6 +974,24 @@ class IdentityInspector(QWidget):
                 "verified": True,
             })
 
+        new_keyframes = [dict(kf) for kf in track.keyframes]
+
+        def undo(old_kf=old_keyframes, p=pid, f=frame):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.keyframes = [dict(kf) for kf in old_kf]
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        def redo(new_kf=new_keyframes, p=pid, f=frame):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.keyframes = [dict(kf) for kf in new_kf]
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        self._session.undo_stack.push(UndoEntry("Verify keyframe", undo, redo))
+
         self._update_timeline()
         self._update_keyframe_table()
         self.keyframe_changed.emit(self._current_person_id, self._current_frame)
@@ -923,10 +1007,26 @@ class IdentityInspector(QWidget):
             if kf["frame"] == self._current_frame:
                 return
 
-        track.keyframes.append({
-            "frame": self._current_frame,
-            "verified": False,
-        })
+        pid = self._current_person_id
+        frame = self._current_frame
+        kf_entry = {"frame": frame, "verified": False}
+        track.keyframes.append(kf_entry)
+
+        def undo(p=pid, f=frame):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        def redo(p=pid, entry=dict(kf_entry)):
+            t = self._session.person_tracks.get(p)
+            if t and not any(kf["frame"] == entry["frame"] for kf in t.keyframes):
+                t.keyframes.append(dict(entry))
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, entry["frame"])
+
+        self._session.undo_stack.push(UndoEntry("Add keyframe", undo, redo))
 
         self._update_timeline()
         self._update_keyframe_table()
@@ -938,9 +1038,31 @@ class IdentityInspector(QWidget):
         if track is None:
             return
 
+        pid = self._current_person_id
+        frame = self._current_frame
+        removed = [dict(kf) for kf in track.keyframes if kf["frame"] == frame]
+        if not removed:
+            return
+
         track.keyframes = [
             kf for kf in track.keyframes if kf["frame"] != self._current_frame
         ]
+
+        def undo(p=pid, f=frame, entries=removed):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.keyframes.extend(dict(e) for e in entries)
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        def redo(p=pid, f=frame):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        self._session.undo_stack.push(UndoEntry("Remove keyframe", undo, redo))
 
         self._update_timeline()
         self._update_keyframe_table()
@@ -978,7 +1100,27 @@ class IdentityInspector(QWidget):
         if track is None:
             return
 
+        pid = self._current_person_id
+        removed = [dict(kf) for kf in track.keyframes if kf["frame"] == frame]
+
         track.keyframes = [kf for kf in track.keyframes if kf["frame"] != frame]
+
+        if removed:
+            def undo(p=pid, f=frame, entries=removed):
+                t = self._session.person_tracks.get(p)
+                if t:
+                    t.keyframes.extend(dict(e) for e in entries)
+                self._refresh_for_person()
+                self.keyframe_changed.emit(p, f)
+
+            def redo(p=pid, f=frame):
+                t = self._session.person_tracks.get(p)
+                if t:
+                    t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+                self._refresh_for_person()
+                self.keyframe_changed.emit(p, f)
+
+            self._session.undo_stack.push(UndoEntry("Delete keyframe", undo, redo))
 
         self._update_timeline()
         self._update_keyframe_table()
@@ -1072,8 +1214,31 @@ class IdentityInspector(QWidget):
         if original is None:
             return
 
+        pid = self._current_person_id
+        frame = self._current_frame
+        old_corrections = track.bbox_corrections.copy()
+
         result = interpolate_bbox_corrections(original, track.bbox_corrections)
         track.bbox_corrections = result
+
+        new_corrections = result.copy()
+
+        def undo(p=pid, f=frame, old_c=old_corrections):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.bbox_corrections = old_c.copy()
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        def redo(p=pid, f=frame, new_c=new_corrections):
+            t = self._session.person_tracks.get(p)
+            if t:
+                t.bbox_corrections = new_c.copy()
+                self._session.dirty_persons.add(p)
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+
+        self._session.undo_stack.push(UndoEntry("Interpolate bboxes", undo, redo))
 
         self._session.dirty_persons.add(self._current_person_id)
         self.person_dirty.emit(self._current_person_id)
@@ -1136,7 +1301,13 @@ class IdentityInspector(QWidget):
         if track_a is None or track_b is None:
             return
 
+        pid_a = self._current_person_id
+        pid_b = target_id
         frame_idx = self._current_frame
+
+        # Snapshot for undo
+        snap_a = self._snapshot_track(track_a)
+        snap_b = self._snapshot_track(track_b)
 
         # Swap numpy arrays from frame_idx onward
         for attr in ("bboxes", "original_bboxes", "bbox_corrections"):
@@ -1162,6 +1333,34 @@ class IdentityInspector(QWidget):
                 existing[0]["verified"] = True
             else:
                 track.keyframes.append({"frame": frame_idx, "verified": True})
+
+        # Snapshot post-state for redo
+        snap_a_new = self._snapshot_track(track_a)
+        snap_b_new = self._snapshot_track(track_b)
+
+        def undo(pa=pid_a, pb=pid_b, sa=snap_a, sb=snap_b):
+            ta = self._session.person_tracks.get(pa)
+            tb = self._session.person_tracks.get(pb)
+            if ta:
+                self._restore_track(ta, sa)
+            if tb:
+                self._restore_track(tb, sb)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        def redo(pa=pid_a, pb=pid_b, sa=snap_a_new, sb=snap_b_new):
+            ta = self._session.person_tracks.get(pa)
+            tb = self._session.person_tracks.get(pb)
+            if ta:
+                self._restore_track(ta, sa)
+                self._session.dirty_persons.add(pa)
+            if tb:
+                self._restore_track(tb, sb)
+                self._session.dirty_persons.add(pb)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        self._session.undo_stack.push(UndoEntry("Swap IDs", undo, redo))
 
         # Mark dirty
         self._session.dirty_persons.add(self._current_person_id)
@@ -1195,6 +1394,9 @@ class IdentityInspector(QWidget):
                 "Cannot split at frame %d (must be 1..%d)", frame_idx, num_frames - 2
             )
             return
+
+        pid = self._current_person_id
+        snap_before = self._snapshot_track(track)
 
         # Generate new person ID
         all_ids = set(self._session.person_tracks.keys())
@@ -1233,6 +1435,33 @@ class IdentityInspector(QWidget):
         self._session.person_tracks[new_id] = new_track
         self._session.inactive_tracks.add(new_id)
 
+        def undo(p=pid, nid=new_id, snap=snap_before):
+            # Remove the split-off track
+            self._session.person_tracks.pop(nid, None)
+            self._session.inactive_tracks.discard(nid)
+            t = self._session.person_tracks.get(p)
+            if t:
+                self._restore_track(t, snap)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        snap_after = self._snapshot_track(track)
+        snap_new = self._snapshot_track(new_track)
+
+        def redo(p=pid, nid=new_id, sa=snap_after, sn=snap_new):
+            t = self._session.person_tracks.get(p)
+            if t:
+                self._restore_track(t, sa)
+                self._session.dirty_persons.add(p)
+            nt = PersonTrack(person_id=nid)
+            self._restore_track(nt, sn)
+            self._session.person_tracks[nid] = nt
+            self._session.inactive_tracks.add(nid)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        self._session.undo_stack.push(UndoEntry("Split track", undo, redo))
+
         # Mark dirty
         self._session.dirty_persons.add(self._current_person_id)
         self.person_dirty.emit(self._current_person_id)
@@ -1261,6 +1490,11 @@ class IdentityInspector(QWidget):
         target = self._get_current_track()
         if source is None or target is None:
             return
+
+        pid = self._current_person_id
+        snap_target = self._snapshot_track(target)
+        snap_source = self._snapshot_track(source)
+        src_was_inactive = source_id in self._session.inactive_tracks
 
         # Merge bboxes: non-zero source frames overwrite target
         if source.bboxes is not None:
@@ -1301,6 +1535,33 @@ class IdentityInspector(QWidget):
         # Remove source from session
         del self._session.person_tracks[source_id]
         self._session.inactive_tracks.discard(source_id)
+
+        snap_target_after = self._snapshot_track(target)
+
+        def undo(p=pid, sid=source_id, st=snap_target, ss=snap_source, inactive=src_was_inactive):
+            t = self._session.person_tracks.get(p)
+            if t:
+                self._restore_track(t, st)
+            # Restore the removed source track
+            restored = PersonTrack(person_id=sid)
+            self._restore_track(restored, ss)
+            self._session.person_tracks[sid] = restored
+            if inactive:
+                self._session.inactive_tracks.add(sid)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        def redo(p=pid, sid=source_id, sta=snap_target_after):
+            t = self._session.person_tracks.get(p)
+            if t:
+                self._restore_track(t, sta)
+                self._session.dirty_persons.add(p)
+            self._session.person_tracks.pop(sid, None)
+            self._session.inactive_tracks.discard(sid)
+            self._refresh_for_person()
+            self.track_modified.emit()
+
+        self._session.undo_stack.push(UndoEntry("Merge track", undo, redo))
 
         # Mark dirty
         self._session.dirty_persons.add(self._current_person_id)
@@ -1343,6 +1604,25 @@ class IdentityInspector(QWidget):
         self._session.crossing_spans[pid].append((start, end))
         self._session.crossing_spans[pid].sort()
 
+        def undo(p=pid, s=start, e=end):
+            if p in self._session.crossing_spans:
+                self._session.crossing_spans[p] = [
+                    (a, b) for a, b in self._session.crossing_spans[p]
+                    if not (a == s and b == e)
+                ]
+                if not self._session.crossing_spans[p]:
+                    del self._session.crossing_spans[p]
+            self._update_crossing_table()
+
+        def redo(p=pid, s=start, e=end):
+            if p not in self._session.crossing_spans:
+                self._session.crossing_spans[p] = []
+            self._session.crossing_spans[p].append((s, e))
+            self._session.crossing_spans[p].sort()
+            self._update_crossing_table()
+
+        self._session.undo_stack.push(UndoEntry("Add crossing span", undo, redo))
+
         # Reset state
         self._crossing_start_frame = None
         self._crossing_status.setText(f"Span added: frames {start}\u2013{end}")
@@ -1355,6 +1635,25 @@ class IdentityInspector(QWidget):
 
     def _on_crossing_delete(self, person_id: int, start: int, end: int):
         """Remove a crossing span from session and refresh table."""
+        def undo(p=person_id, s=start, e=end):
+            if p not in self._session.crossing_spans:
+                self._session.crossing_spans[p] = []
+            self._session.crossing_spans[p].append((s, e))
+            self._session.crossing_spans[p].sort()
+            self._update_crossing_table()
+
+        def redo(p=person_id, s=start, e=end):
+            if p in self._session.crossing_spans:
+                self._session.crossing_spans[p] = [
+                    (a, b) for a, b in self._session.crossing_spans[p]
+                    if not (a == s and b == e)
+                ]
+                if not self._session.crossing_spans[p]:
+                    del self._session.crossing_spans[p]
+            self._update_crossing_table()
+
+        self._session.undo_stack.push(UndoEntry("Delete crossing span", undo, redo))
+
         if person_id in self._session.crossing_spans:
             self._session.crossing_spans[person_id] = [
                 (s, e)

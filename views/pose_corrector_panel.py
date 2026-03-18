@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt
 
-from models.session import Session
+from models.session import Session, UndoEntry
 from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
 
 log = logging.getLogger(__name__)
@@ -742,6 +742,62 @@ class PoseCorrectorPanel(QWidget):
 
         self._viewport.set_pose_override(override)
 
+    def _snapshot_raw_param(self, joint_idx: int, frame_idx: int) -> np.ndarray | None:
+        """Capture the raw param axis-angle for a joint at a frame (for undo)."""
+        track = self._session.person_tracks.get(self._current_person)
+        if not track or not track.smplx_params:
+            return None
+        params = track.smplx_params
+        if joint_idx == 0:
+            go = np.array(params.get("global_orient", []), dtype=np.float32)
+            if go.ndim >= 2 and frame_idx < go.shape[0]:
+                return go[frame_idx].copy()
+        elif 1 <= joint_idx <= 21:
+            bp = np.array(params.get("body_pose", []), dtype=np.float32)
+            if bp.ndim == 2 and bp.shape[-1] != 3:
+                bp = bp.reshape(bp.shape[0], -1, 3)
+            bp_idx = joint_idx - 1
+            if bp.ndim >= 3 and frame_idx < bp.shape[0] and bp_idx < bp.shape[1]:
+                return bp[frame_idx, bp_idx].copy()
+        return None
+
+    def _snapshot_correction(self, pid: int, frame_idx: int):
+        """Capture the current PoseCorrection entry for a person/frame (for undo).
+
+        Returns a dict with go, bp, ctype or None if no correction exists.
+        """
+        ct = self._session.correction_tracks.get(pid)
+        if ct is None:
+            return None
+        corr = ct.get_correction(frame_idx)
+        if corr is None:
+            return None
+        return {
+            "global_orient": corr.global_orient.copy() if corr.global_orient is not None else None,
+            "body_pose": {k: v.copy() for k, v in corr.body_pose.items()} if corr.body_pose else None,
+            "correction_type": corr.correction_type,
+        }
+
+    def _restore_correction(self, pid: int, frame_idx: int, snap):
+        """Restore a correction from a snapshot (for undo/redo)."""
+        _, _, CorrectionTrack = _safe_import_pose_correction()
+        if CorrectionTrack is None:
+            return
+        ct = self._session.correction_tracks.get(pid)
+        if snap is None:
+            if ct is not None:
+                ct.remove_correction(frame_idx)
+        else:
+            if ct is None:
+                ct = CorrectionTrack(person_id=pid)
+                self._session.correction_tracks[pid] = ct
+            ct.add_correction(
+                frame_index=frame_idx,
+                correction_type=snap["correction_type"],
+                global_orient=snap["global_orient"],
+                body_pose=snap["body_pose"],
+            )
+
     def _on_apply(self):
         """Commit current correction to CorrectionTrack."""
         if self._current_joint < 0 or self._current_person < 0:
@@ -762,6 +818,11 @@ class PoseCorrectorPanel(QWidget):
 
         pid = self._current_person
         frame = self._current_frame
+        joint = self._current_joint
+
+        # Snapshot for undo
+        old_corr_snap = self._snapshot_correction(pid, frame)
+        old_raw = self._snapshot_raw_param(joint, frame)
 
         # Ensure correction track exists
         if pid not in self._session.correction_tracks:
@@ -807,6 +868,32 @@ class PoseCorrectorPanel(QWidget):
         # without needing the override active
         self._apply_to_raw_params(self._current_joint, aa, frame)
 
+        # Snapshot post-state for redo
+        new_corr_snap = self._snapshot_correction(pid, frame)
+        new_raw = self._snapshot_raw_param(joint, frame)
+
+        def undo(p=pid, f=frame, j=joint, oc=old_corr_snap, oraw=old_raw):
+            self._restore_correction(p, f, oc)
+            if oraw is not None:
+                self._current_person = p
+                self._apply_to_raw_params(j, oraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        def redo(p=pid, f=frame, j=joint, nc=new_corr_snap, nraw=new_raw):
+            self._restore_correction(p, f, nc)
+            if nraw is not None:
+                self._current_person = p
+                self._apply_to_raw_params(j, nraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        self._session.undo_stack.push(UndoEntry("Apply correction", undo, redo))
+
         # Clear preview override (correction is now committed)
         self._viewport.set_pose_override(None)
 
@@ -826,6 +913,11 @@ class PoseCorrectorPanel(QWidget):
 
         pid = self._current_person
         frame = self._current_frame
+        joint = self._current_joint
+
+        # Snapshot for undo
+        old_corr_snap = self._snapshot_correction(pid, frame)
+        old_raw = self._snapshot_raw_param(joint, frame)
 
         ct = self._session.correction_tracks.get(pid)
         if ct is not None:
@@ -847,6 +939,31 @@ class PoseCorrectorPanel(QWidget):
 
                 self._save_correction_track(pid)
 
+        new_corr_snap = self._snapshot_correction(pid, frame)
+        new_raw = self._snapshot_raw_param(joint, frame)
+
+        def undo(p=pid, f=frame, j=joint, oc=old_corr_snap, oraw=old_raw):
+            self._restore_correction(p, f, oc)
+            if oraw is not None:
+                self._current_person = p
+                self._apply_to_raw_params(j, oraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        def redo(p=pid, f=frame, j=joint, nc=new_corr_snap, nraw=new_raw):
+            self._restore_correction(p, f, nc)
+            if nraw is not None:
+                self._current_person = p
+                self._apply_to_raw_params(j, nraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        self._session.undo_stack.push(UndoEntry("Reset joint", undo, redo))
+
         # Clear preview and invalidate cache
         self._viewport.set_pose_override(None)
         self._viewport.invalidate_cache(pid, frame)
@@ -862,10 +979,28 @@ class PoseCorrectorPanel(QWidget):
         pid = self._current_person
         frame = self._current_frame
 
+        old_corr_snap = self._snapshot_correction(pid, frame)
+
         ct = self._session.correction_tracks.get(pid)
         if ct is not None:
             ct.remove_correction(frame)
             self._save_correction_track(pid)
+
+        def undo(p=pid, f=frame, oc=old_corr_snap):
+            self._restore_correction(p, f, oc)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        def redo(p=pid, f=frame):
+            self._restore_correction(p, f, None)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        self._session.undo_stack.push(UndoEntry("Reset all corrections", undo, redo))
 
         # Clear preview and invalidate cache
         self._viewport.set_pose_override(None)
@@ -1004,6 +1139,14 @@ class PoseCorrectorPanel(QWidget):
         pid = self._current_person
         frame = self._current_frame
 
+        # Snapshot for undo: correction entry and all affected raw params
+        old_corr_snap = self._snapshot_correction(pid, frame)
+        old_raw_go = self._snapshot_raw_param(0, frame) if global_orient is not None else None
+        old_raw_bp = {}
+        if body_pose:
+            for bp_idx in body_pose:
+                old_raw_bp[bp_idx] = self._snapshot_raw_param(bp_idx + 1, frame)
+
         if pid not in self._session.correction_tracks:
             self._session.correction_tracks[pid] = CorrectionTrack(person_id=pid)
 
@@ -1035,6 +1178,44 @@ class PoseCorrectorPanel(QWidget):
         if body_pose:
             for bp_idx, aa in body_pose.items():
                 self._apply_to_raw_params(bp_idx + 1, aa, frame)
+
+        # Snapshot post-state for redo
+        new_corr_snap = self._snapshot_correction(pid, frame)
+        new_raw_go = self._snapshot_raw_param(0, frame) if old_raw_go is not None else None
+        new_raw_bp = {}
+        if old_raw_bp:
+            for bp_idx in old_raw_bp:
+                new_raw_bp[bp_idx] = self._snapshot_raw_param(bp_idx + 1, frame)
+
+        def undo(p=pid, f=frame, oc=old_corr_snap, org=old_raw_go, orbp=old_raw_bp):
+            self._restore_correction(p, f, oc)
+            self._current_person = p
+            if org is not None:
+                self._apply_to_raw_params(0, org, f)
+            for bi, oraw in orbp.items():
+                if oraw is not None:
+                    self._apply_to_raw_params(bi + 1, oraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        def redo(p=pid, f=frame, nc=new_corr_snap, nrg=new_raw_go, nrbp=new_raw_bp):
+            self._restore_correction(p, f, nc)
+            self._current_person = p
+            if nrg is not None:
+                self._apply_to_raw_params(0, nrg, f)
+            for bi, nraw in nrbp.items():
+                if nraw is not None:
+                    self._apply_to_raw_params(bi + 1, nraw, f)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        self._session.undo_stack.push(
+            UndoEntry(f"Quick fix ({correction_type})", undo, redo)
+        )
 
         # Refresh viewport and UI
         self._viewport.set_pose_override(None)
@@ -1130,8 +1311,26 @@ class PoseCorrectorPanel(QWidget):
         if ct is None:
             return
 
+        old_corr_snap = self._snapshot_correction(pid, frame_idx)
+
         ct.remove_correction(frame_idx)
         self._save_correction_track(pid)
+
+        def undo(p=pid, f=frame_idx, oc=old_corr_snap):
+            self._restore_correction(p, f, oc)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        def redo(p=pid, f=frame_idx):
+            self._restore_correction(p, f, None)
+            self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+            self._refresh_corrections_table()
+
+        self._session.undo_stack.push(UndoEntry("Delete correction", undo, redo))
 
         self._viewport.invalidate_cache(pid, frame_idx)
         self._viewport._refresh_mesh()
@@ -1201,6 +1400,35 @@ class PoseCorrectorPanel(QWidget):
         ct = self._session.correction_tracks[pid]
         ct.add_space_override(override)
         self._save_correction_track(pid)
+
+        # Capture data for undo (use primitives, not backend objects)
+        ovr_data = {
+            "frame_start": f_start, "frame_end": f_end,
+            "space": space, "reference_person": ref_person, "y_offset": y_offset,
+        }
+
+        def undo(p=pid, d=ovr_data):
+            c = self._session.correction_tracks.get(p)
+            if c is not None:
+                c.remove_space_override(d["frame_start"], d["frame_end"])
+            self._refresh_space_table()
+
+        def redo(p=pid, d=ovr_data):
+            FSO = _safe_import_space_override()
+            _, _, CT = _safe_import_pose_correction()
+            if FSO is None or CT is None:
+                return
+            if p not in self._session.correction_tracks:
+                self._session.correction_tracks[p] = CT(person_id=p)
+            c = self._session.correction_tracks[p]
+            c.add_space_override(FSO(
+                frame_start=d["frame_start"], frame_end=d["frame_end"],
+                space=d["space"], reference_person=d["reference_person"],
+                y_offset=d["y_offset"],
+            ))
+            self._refresh_space_table()
+
+        self._session.undo_stack.push(UndoEntry("Add space override", undo, redo))
         self._refresh_space_table()
 
         log.info("Space override added: person=%d, frames=%d-%d, space=%s",
@@ -1224,8 +1452,39 @@ class PoseCorrectorPanel(QWidget):
             return
 
         ovr = overrides[row]
+        pid = self._current_person
+        ovr_data = {
+            "frame_start": ovr.frame_start, "frame_end": ovr.frame_end,
+            "space": ovr.space,
+            "reference_person": getattr(ovr, "reference_person", None),
+            "y_offset": getattr(ovr, "y_offset", 0.4),
+        }
+
         ct.remove_space_override(ovr.frame_start, ovr.frame_end)
         self._save_correction_track(self._current_person)
+
+        def undo(p=pid, d=ovr_data):
+            FSO = _safe_import_space_override()
+            _, _, CT = _safe_import_pose_correction()
+            if FSO is None or CT is None:
+                return
+            if p not in self._session.correction_tracks:
+                self._session.correction_tracks[p] = CT(person_id=p)
+            c = self._session.correction_tracks[p]
+            c.add_space_override(FSO(
+                frame_start=d["frame_start"], frame_end=d["frame_end"],
+                space=d["space"], reference_person=d["reference_person"],
+                y_offset=d["y_offset"],
+            ))
+            self._refresh_space_table()
+
+        def redo(p=pid, d=ovr_data):
+            c = self._session.correction_tracks.get(p)
+            if c is not None:
+                c.remove_space_override(d["frame_start"], d["frame_end"])
+            self._refresh_space_table()
+
+        self._session.undo_stack.push(UndoEntry("Delete space override", undo, redo))
         self._refresh_space_table()
 
         log.info("Space override deleted: person=%d, frames=%d-%d",

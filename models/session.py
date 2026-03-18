@@ -1,13 +1,109 @@
-"""Session state model — single source of truth for all application state."""
+"""Session state model — single source of truth for all application state.
+
+Why: A single Session dataclass tree eliminates scattered module-level dicts
+and gives all widgets a shared, serializable state object. The UndoStack
+enables non-destructive editing — users can freely experiment with bbox edits,
+track operations, and pose corrections knowing they can revert any mistake.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Undo / Redo
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UndoEntry:
+    """A single undoable operation with forward and reverse callables."""
+
+    description: str
+    undo_fn: Callable[[], None]
+    redo_fn: Callable[[], None]
+
+
+class UndoStack:
+    """Bounded undo/redo stack using the command pattern.
+
+    Why: Interactive editing sessions (bbox corrections, track swaps, pose
+    adjustments) are error-prone. An undo stack lets users experiment freely —
+    max_depth keeps memory bounded, and the on_changed callback lets the UI
+    (Edit menu) stay in sync without polling.
+    """
+
+    def __init__(self, max_depth: int = 50):
+        self._undo: list[UndoEntry] = []
+        self._redo: list[UndoEntry] = []
+        self._max_depth = max_depth
+        self.on_changed: Callable[[], None] | None = None
+
+    def push(self, entry: UndoEntry) -> None:
+        """Record a new undoable operation (clears redo history)."""
+        self._undo.append(entry)
+        if len(self._undo) > self._max_depth:
+            self._undo.pop(0)
+        self._redo.clear()
+        self._notify()
+
+    def undo(self) -> str | None:
+        """Undo the most recent operation. Returns its description, or None."""
+        if not self._undo:
+            return None
+        entry = self._undo.pop()
+        try:
+            entry.undo_fn()
+        except Exception:
+            log.exception("Undo failed for '%s'", entry.description)
+        self._redo.append(entry)
+        self._notify()
+        return entry.description
+
+    def redo(self) -> str | None:
+        """Redo the most recently undone operation. Returns its description, or None."""
+        if not self._redo:
+            return None
+        entry = self._redo.pop()
+        try:
+            entry.redo_fn()
+        except Exception:
+            log.exception("Redo failed for '%s'", entry.description)
+        self._undo.append(entry)
+        self._notify()
+        return entry.description
+
+    def can_undo(self) -> bool:
+        return len(self._undo) > 0
+
+    def can_redo(self) -> bool:
+        return len(self._redo) > 0
+
+    def peek_undo(self) -> str | None:
+        """Description of the next operation that would be undone."""
+        return self._undo[-1].description if self._undo else None
+
+    def peek_redo(self) -> str | None:
+        """Description of the next operation that would be redone."""
+        return self._redo[-1].description if self._redo else None
+
+    def clear(self) -> None:
+        """Discard all undo/redo history."""
+        self._undo.clear()
+        self._redo.clear()
+        self._notify()
+
+    def _notify(self) -> None:
+        if self.on_changed is not None:
+            self.on_changed()
 
 
 @dataclass
@@ -84,6 +180,9 @@ class Session:
     current_frame: int = 0
     selected_person: int = -1
     dirty_persons: set[int] = field(default_factory=set)
+
+    # Undo/redo (transient, not serialized)
+    undo_stack: UndoStack = field(default_factory=UndoStack)
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (skips transient/heavy fields)."""
@@ -168,3 +267,4 @@ class Session:
         self.current_frame = 0
         self.selected_person = -1
         self.dirty_persons.clear()
+        self.undo_stack.clear()
