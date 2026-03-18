@@ -51,8 +51,9 @@ class _DropArea(QLabel):
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(200, 120)
+        from theme import COLORS
         self.setStyleSheet(
-            "border: 2px dashed #555; border-radius: 8px; padding: 16px;"
+            f"border: 2px dashed {COLORS['border']}; border-radius: 8px; padding: 16px;"
         )
         self.setText("Drop video here\nor click Browse")
 

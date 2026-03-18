@@ -35,6 +35,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
 
 from models.session import Session, PersonTrack, UndoEntry
+from theme import COLORS
 from views.confidence_timeline import ConfidenceTimeline
 
 log = logging.getLogger(__name__)
@@ -211,11 +212,11 @@ def compute_review_issues(
 def _confidence_color(value: float) -> str:
     """Return CSS color string based on confidence value."""
     if value > 0.8:
-        return "#4ecca3"  # green
+        return COLORS["success"]
     elif value > 0.5:
-        return "#ffd93d"  # yellow
+        return COLORS["warning"]
     else:
-        return "#ff6b6b"  # red
+        return COLORS["error"]
 
 
 class IdentityInspector(QWidget):
@@ -803,9 +804,9 @@ class IdentityInspector(QWidget):
             verified_item = QTableWidgetItem("\u2713" if verified else "\u2717")
             verified_item.setTextAlignment(Qt.AlignCenter)
             if verified:
-                verified_item.setForeground(QColor("#4ecca3"))
+                verified_item.setForeground(QColor(COLORS["success"]))
             else:
-                verified_item.setForeground(QColor("#ff6b6b"))
+                verified_item.setForeground(QColor(COLORS["error"]))
             self._keyframe_table.setItem(row, 1, verified_item)
 
             # Confidence column
@@ -1169,10 +1170,10 @@ class IdentityInspector(QWidget):
 
         if self._bbox_edit_state == "click1":
             self._bbox_status.setText("Click top-left corner on video frame")
-            self._bbox_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+            self._bbox_status.setStyleSheet(f"font-style: italic; color: {COLORS['warning']};")
         elif self._bbox_edit_state == "click2":
             self._bbox_status.setText("Click bottom-right corner on video frame")
-            self._bbox_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+            self._bbox_status.setStyleSheet(f"font-style: italic; color: {COLORS['warning']};")
         else:
             self._bbox_status.setText("Idle")
             self._bbox_status.setStyleSheet("font-style: italic;")
@@ -1579,7 +1580,7 @@ class IdentityInspector(QWidget):
         self._crossing_status.setText(
             f"Start marked at frame {self._current_frame}. Click 'Mark End'."
         )
-        self._crossing_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+        self._crossing_status.setStyleSheet(f"font-style: italic; color: {COLORS['warning']};")
         self._crossing_start_btn.setEnabled(False)
         self._crossing_end_btn.setEnabled(True)
 
@@ -1595,7 +1596,7 @@ class IdentityInspector(QWidget):
             self._crossing_status.setText(
                 f"End frame ({end}) must be after start ({start})"
             )
-            self._crossing_status.setStyleSheet("font-style: italic; color: #ff6b6b;")
+            self._crossing_status.setStyleSheet(f"font-style: italic; color: {COLORS['error']};")
             return
 
         pid = self._current_person_id
@@ -1626,7 +1627,7 @@ class IdentityInspector(QWidget):
         # Reset state
         self._crossing_start_frame = None
         self._crossing_status.setText(f"Span added: frames {start}\u2013{end}")
-        self._crossing_status.setStyleSheet("font-style: italic; color: #4ecca3;")
+        self._crossing_status.setStyleSheet(f"font-style: italic; color: {COLORS['success']};")
         self._crossing_start_btn.setEnabled(True)
         self._crossing_end_btn.setEnabled(False)
 
@@ -1684,12 +1685,12 @@ class IdentityInspector(QWidget):
 
         if n == 0:
             self._issues_label.setText("No issues found.")
-            self._issues_label.setStyleSheet("font-style: italic; color: #4ecca3;")
+            self._issues_label.setStyleSheet(f"font-style: italic; color: {COLORS['success']};")
         else:
             self._issues_label.setText(
                 f"Found {n} issue{'s' if n != 1 else ''}. Use Next/Prev to navigate."
             )
-            self._issues_label.setStyleSheet("font-style: italic; color: #ffd93d;")
+            self._issues_label.setStyleSheet(f"font-style: italic; color: {COLORS['warning']};")
             # Navigate to first issue
             self._navigate_to_issue(0)
 

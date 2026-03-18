@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from models.session import Session, PersonTrack
+from theme import COLORS
 
 
 # Colors for up to 8 tracked persons — consistent across the app
@@ -265,7 +266,7 @@ def render_edit_preview(
 
     out = frame.copy()
     corner1 = edit_state.get("corner1")
-    accent = _hex_to_rgb("#e94560")
+    accent = _hex_to_rgb(COLORS["accent"])
 
     if corner1:
         x, y = int(corner1[0]), int(corner1[1])

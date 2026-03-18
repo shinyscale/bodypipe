@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt
 
 from models.session import Session, UndoEntry
+from theme import COLORS
 from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
 
 log = logging.getLogger(__name__)
@@ -630,7 +631,7 @@ class PoseCorrectorPanel(QWidget):
         export_row.addWidget(self._reexport_fbx_btn)
         export_layout.addLayout(export_row)
         self._export_status = QLabel("")
-        self._export_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._export_status.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
         self._export_status.setWordWrap(True)
         export_layout.addWidget(self._export_status)
         vp_layout.addWidget(export_group)
@@ -659,7 +660,7 @@ class PoseCorrectorPanel(QWidget):
 
         # Joint info label
         self._joint_info = QLabel("")
-        self._joint_info.setStyleSheet("color: #888; font-size: 11px;")
+        self._joint_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
         self._joint_info.setWordWrap(True)
         ctrl_layout.addWidget(self._joint_info)
 
@@ -2086,13 +2087,13 @@ class PoseCorrectorPanel(QWidget):
 
         if n == 0:
             self._issues_label.setText("No issues found.")
-            self._issues_label.setStyleSheet("font-style: italic; color: #4ecca3;")
+            self._issues_label.setStyleSheet(f"font-style: italic; color: {COLORS['success']};")
         else:
             self._issues_label.setText(
                 f"Found {n} issue{'s' if n != 1 else ''}. "
                 f"Use Next/Prev to navigate."
             )
-            self._issues_label.setStyleSheet("font-style: italic; color: #ffd93d;")
+            self._issues_label.setStyleSheet(f"font-style: italic; color: {COLORS['warning']};")
             self._navigate_to_pose_issue(0)
 
         has_issues = n > 0

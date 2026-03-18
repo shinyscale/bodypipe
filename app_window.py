@@ -25,21 +25,7 @@ from views.single_person_tab import SinglePersonTab
 from views.perf_capture_tab import PerfCaptureTab
 from views.multi_person_tab import MultiPersonTab
 from views.keyboard_shortcuts_dialog import KeyboardShortcutsDialog
-
-# Theme colors matching Gradio dark mode
-COLORS = {
-    "bg_primary": "#1a1a2e",
-    "bg_secondary": "#16213e",
-    "bg_tertiary": "#0f3460",
-    "accent": "#e94560",
-    "accent_hover": "#ff6b6b",
-    "text_primary": "#eaeaea",
-    "text_secondary": "#a0a0a0",
-    "border": "#2a2a4a",
-    "success": "#4ecca3",
-    "warning": "#ffd93d",
-    "error": "#ff6b6b",
-}
+from theme import COLORS
 
 
 def _apply_dark_theme(app):
@@ -51,60 +37,61 @@ def _apply_dark_theme(app):
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(COLORS["bg_primary"]))
     palette.setColor(QPalette.WindowText, QColor(COLORS["text_primary"]))
-    palette.setColor(QPalette.Base, QColor(COLORS["bg_secondary"]))
-    palette.setColor(QPalette.AlternateBase, QColor(COLORS["bg_tertiary"]))
-    palette.setColor(QPalette.ToolTipBase, QColor(COLORS["bg_secondary"]))
+    palette.setColor(QPalette.Base, QColor(COLORS["bg_input"]))
+    palette.setColor(QPalette.AlternateBase, QColor(COLORS["bg_active_tab"]))
+    palette.setColor(QPalette.ToolTipBase, QColor(COLORS["tooltip_bg"]))
     palette.setColor(QPalette.ToolTipText, QColor(COLORS["text_primary"]))
     palette.setColor(QPalette.Text, QColor(COLORS["text_primary"]))
-    palette.setColor(QPalette.Button, QColor(COLORS["bg_secondary"]))
+    palette.setColor(QPalette.Button, QColor(COLORS["bg_input"]))
     palette.setColor(QPalette.ButtonText, QColor(COLORS["text_primary"]))
     palette.setColor(QPalette.BrightText, QColor(COLORS["accent"]))
     palette.setColor(QPalette.Link, QColor(COLORS["accent"]))
     palette.setColor(QPalette.Highlight, QColor(COLORS["accent"]))
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.Disabled, QPalette.Text, QColor(COLORS["text_secondary"]))
-    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(COLORS["text_secondary"]))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor(COLORS["text_disabled"]))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(COLORS["text_disabled"]))
     app.setPalette(palette)
 
     # Fine-grained stylesheet for accent elements
     app.setStyleSheet(f"""
         QTabBar::tab {{
-            background: {COLORS["bg_secondary"]};
+            background: {COLORS["bg_input"]};
             color: {COLORS["text_secondary"]};
             padding: 8px 16px;
             border: 1px solid {COLORS["border"]};
             border-bottom: none;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
+            border-top-left-radius: 2px;
+            border-top-right-radius: 2px;
         }}
         QTabBar::tab:selected {{
-            background: {COLORS["bg_primary"]};
+            background: {COLORS["bg_active_tab"]};
             color: {COLORS["text_primary"]};
             border-bottom: 2px solid {COLORS["accent"]};
         }}
         QTabBar::tab:hover {{
-            background: {COLORS["bg_tertiary"]};
+            background: {COLORS["hover"]};
         }}
         QPushButton {{
-            background: {COLORS["bg_tertiary"]};
+            background: {COLORS["bg_input"]};
             color: {COLORS["text_primary"]};
             border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
+            border-radius: 2px;
             padding: 6px 12px;
         }}
         QPushButton:hover {{
             background: {COLORS["accent"]};
         }}
         QPushButton:pressed {{
-            background: {COLORS["accent_hover"]};
+            background: {COLORS["accent_pressed"]};
         }}
         QPushButton:disabled {{
-            background: {COLORS["bg_secondary"]};
-            color: {COLORS["text_secondary"]};
+            background: {COLORS["bg_primary"]};
+            color: {COLORS["text_disabled"]};
+            border-color: {COLORS["border_disabled"]};
         }}
         QGroupBox {{
             border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
+            border-radius: 2px;
             margin-top: 8px;
             padding-top: 16px;
             font-weight: bold;
@@ -115,7 +102,7 @@ def _apply_dark_theme(app):
             padding: 0 4px;
         }}
         QSlider::groove:horizontal {{
-            background: {COLORS["bg_tertiary"]};
+            background: {COLORS["slider_groove"]};
             height: 6px;
             border-radius: 3px;
         }}
@@ -126,23 +113,74 @@ def _apply_dark_theme(app):
             margin: -4px 0;
             border-radius: 7px;
         }}
+        QSlider::handle:horizontal:hover {{
+            background: {COLORS["accent_active"]};
+        }}
         QProgressBar {{
-            background: {COLORS["bg_secondary"]};
+            background: {COLORS["bg_input"]};
             border: 1px solid {COLORS["border"]};
-            border-radius: 4px;
+            border-radius: 2px;
             text-align: center;
             color: {COLORS["text_primary"]};
         }}
         QProgressBar::chunk {{
             background: {COLORS["accent"]};
-            border-radius: 3px;
+            border-radius: 2px;
+        }}
+        QScrollBar:vertical {{
+            background: {COLORS["bg_scroll"]};
+            width: 12px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {COLORS["slider_grip"]};
+            min-height: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {COLORS["accent"]};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QScrollBar:horizontal {{
+            background: {COLORS["bg_scroll"]};
+            height: 12px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {COLORS["slider_grip"]};
+            min-width: 20px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {COLORS["accent"]};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+        }}
+        QToolTip {{
+            background: {COLORS["tooltip_bg"]};
+            color: {COLORS["text_primary"]};
+            border: 1px solid {COLORS["border"]};
+            border-radius: 2px;
+            padding: 4px;
+        }}
+        QHeaderView::section {{
+            background: {COLORS["bg_input"]};
+            color: {COLORS["text_primary"]};
+            border: 1px solid {COLORS["border"]};
+            padding: 4px;
+        }}
+        QHeaderView::section:checked {{
+            background: {COLORS["header_checked"]};
         }}
         QDockWidget {{
             titlebar-close-icon: none;
             titlebar-normal-icon: none;
         }}
         QDockWidget::title {{
-            background: {COLORS["bg_secondary"]};
+            background: {COLORS["bg_input"]};
             padding: 4px;
             border: 1px solid {COLORS["border"]};
         }}

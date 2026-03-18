@@ -27,6 +27,7 @@ from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from models.session import Session
+from theme import COLORS
 
 logger = logging.getLogger(__name__)
 
@@ -217,8 +218,8 @@ _N_BODY_JOINTS = 22
 # Joint picking threshold in pixels
 _JOINT_PICK_THRESHOLD = 20.0
 
-# Accent color for selected joint highlight (matches app theme)
-_ACCENT_COLOR = np.array([0.914, 0.271, 0.376], dtype=np.float32)  # #e94560
+# Accent color for selected joint highlight (matches app theme — amber)
+_ACCENT_COLOR = np.array([0.792, 0.584, 0.180], dtype=np.float32)  # #ca952e
 
 # Bone color (light gray)
 _BONE_COLOR = np.array([0.7, 0.7, 0.7], dtype=np.float32)
@@ -236,7 +237,7 @@ _BONE_LINE_WIDTH = 2.0
 _LABEL_FONT_SIZE = 9
 _LABEL_BG_COLOR = QColor(0, 0, 0, 180)       # semi-transparent black
 _LABEL_TEXT_COLOR = QColor(220, 220, 220)      # light gray
-_LABEL_SELECTED_BG = QColor(233, 69, 96, 200) # accent with alpha
+_LABEL_SELECTED_BG = QColor(202, 149, 46, 200) # accent with alpha
 _LABEL_SELECTED_TEXT = QColor(255, 255, 255)   # white
 _LABEL_PADDING_X = 3   # horizontal padding inside label bg
 _LABEL_PADDING_Y = 1   # vertical padding inside label bg
@@ -952,7 +953,7 @@ class MeshViewport(_BaseWidget):
         layout.setAlignment(Qt.AlignCenter)
         self._fallback_label = QLabel(self._status_msg or "3D Viewport")
         self._fallback_label.setAlignment(Qt.AlignCenter)
-        self._fallback_label.setStyleSheet("color: #888; font-size: 14px;")
+        self._fallback_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 14px;")
         layout.addWidget(self._fallback_label)
 
     # ------------------------------------------------------------------

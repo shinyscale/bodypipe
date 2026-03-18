@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Signal, Qt, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QMouseEvent
 
+from theme import COLORS
+
 
 class ConfidenceTimeline(QWidget):
     """Interactive confidence timeline with keyframe markers."""
@@ -61,11 +63,11 @@ class ConfidenceTimeline(QWidget):
 
             # Color: green > 0.8, yellow 0.5-0.8, red < 0.5
             if conf > 0.8:
-                color = QColor("#4ecca3")
+                color = QColor(COLORS["success"])
             elif conf > 0.5:
-                color = QColor("#ffd93d")
+                color = QColor(COLORS["warning"])
             else:
-                color = QColor("#ff6b6b")
+                color = QColor(COLORS["error"])
 
             painter.fillRect(QRectF(x, bar_h - bar_height, bin_width + 0.5, bar_height), color)
 
@@ -73,7 +75,7 @@ class ConfidenceTimeline(QWidget):
         for frame in self._keyframe_frames:
             x = frame * w / self._num_frames
             is_verified = frame in self._verified_frames
-            color = QColor("#4ecca3") if is_verified else QColor("#ffd93d")
+            color = QColor(COLORS["success"]) if is_verified else QColor(COLORS["warning"])
             pen = QPen(color, 2)
             painter.setPen(pen)
             # Small triangle at bottom
@@ -86,7 +88,7 @@ class ConfidenceTimeline(QWidget):
         # Draw current frame indicator
         if self._num_frames > 0:
             x = self._current_frame * w / self._num_frames
-            pen = QPen(QColor("#e94560"), 2)
+            pen = QPen(QColor(COLORS["accent"]), 2)
             painter.setPen(pen)
             painter.drawLine(int(x), 0, int(x), h)
 

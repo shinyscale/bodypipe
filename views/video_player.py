@@ -78,7 +78,8 @@ class FrameDisplay(QLabel):
         super().__init__(parent)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(320, 240)
-        self.setStyleSheet("background-color: #0a0a1a;")
+        from theme import COLORS
+        self.setStyleSheet(f"background-color: {COLORS['bg_input']};")
         self._pixmap_size = None
         self._current_frame: np.ndarray | None = None
         self.setContextMenuPolicy(Qt.CustomContextMenu)
