@@ -221,6 +221,13 @@ class PerfCaptureTab(SinglePersonTab):
         self._run_btn.setText("Run Pipeline")
 
     # ------------------------------------------------------------------
+    # Output directory mapping (override for perfcap subdirectory)
+    # ------------------------------------------------------------------
+
+    def _output_dir_for_video(self, video_path: Path) -> Path:
+        return self._gvhmr_root / "outputs" / "perfcap" / video_path.stem
+
+    # ------------------------------------------------------------------
     # Pipeline execution (override to use FullPipelineWorker)
     # ------------------------------------------------------------------
 
@@ -231,6 +238,9 @@ class PerfCaptureTab(SinglePersonTab):
         config = self.get_config()
         output_dir = self._gvhmr_root / "outputs" / "perfcap" / self._video_path.stem
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save config to output directory for session restore
+        config.save(output_dir / "solve_config.json")
 
         self._worker = FullPipelineWorker(
             video_path=self._video_path,

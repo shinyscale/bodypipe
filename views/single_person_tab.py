@@ -238,6 +238,28 @@ class SinglePersonTab(QWidget):
         self._use_dpvo.setEnabled(not checked and not self._running)
 
     # ------------------------------------------------------------------
+    # Output directory mapping
+    # ------------------------------------------------------------------
+
+    def _output_dir_for_video(self, video_path: Path) -> Path:
+        """Return the expected output directory for a given video."""
+        return self._gvhmr_root / "outputs" / "demo" / video_path.stem
+
+    def _try_restore_config(self, video_path: Path):
+        """Restore settings from solve_config.json if a previous run exists."""
+        config_path = self._output_dir_for_video(video_path) / "solve_config.json"
+        if config_path.is_file():
+            try:
+                config = PipelineConfig.load(config_path)
+                self.set_config(config)
+                self.log_message.emit(
+                    f"Restored settings from previous run: {config_path}",
+                    "info",
+                )
+            except Exception:
+                pass  # Ignore corrupt config files
+
+    # ------------------------------------------------------------------
     # Video loading
     # ------------------------------------------------------------------
 
@@ -304,6 +326,9 @@ class SinglePersonTab(QWidget):
             "info",
         )
 
+        # Restore settings from previous run if available
+        self._try_restore_config(video_path)
+
     # ------------------------------------------------------------------
     # Pipeline execution
     # ------------------------------------------------------------------
@@ -318,6 +343,11 @@ class SinglePersonTab(QWidget):
             use_dpvo=self._use_dpvo.isChecked(),
             focal_mm=self._focal_mm.value(),
         )
+
+        # Save config to output directory for session restore
+        output_dir = self._output_dir_for_video(self._video_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config.save(output_dir / "solve_config.json")
 
         self._worker = GVHMRWorker(self._video_path, config, self._gvhmr_root)
         self._worker.progress.connect(self._on_progress)

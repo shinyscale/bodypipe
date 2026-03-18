@@ -269,6 +269,120 @@ class TestMultiPersonSettings:
 
 
 # ---------------------------------------------------------------------------
+# Solve config save/restore (Gradio parity)
+# ---------------------------------------------------------------------------
+
+
+class TestSolveConfigSaveRestore:
+    """Verify solve_config.json is saved on run and restored on video load.
+
+    Why: Gradio saves per-video settings to outputs/multi_person/<stem>/solve_config.json.
+    When a video is re-entered, settings are restored so users don't need
+    to reconfigure for previously-processed videos.
+    """
+
+    def test_output_dir_for_video(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        result = tab._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
+        assert result == Path("/tmp/GVHMR/outputs/multi_person/dance")
+
+    def test_on_run_saves_config(self, qapp, tmp_path):
+        """_on_run should save solve_config.json to the output directory."""
+        gvhmr_root = tmp_path / "GVHMR"
+        gvhmr_root.mkdir()
+        session = Session()
+        tab = MultiPersonTab(session, gvhmr_root)
+        tab._video_path = Path("/tmp/test_video.mp4")
+        tab._static_cam.setChecked(False)
+        tab._use_dpvo.setChecked(True)
+        tab._focal_mm.setValue(50.0)
+        tab._max_persons.setValue(4)
+        tab._use_inpainting.setChecked(False)
+
+        with patch("views.multi_person_tab.MultiPersonWorker") as MockWorker:
+            mock_instance = MagicMock()
+            MockWorker.return_value = mock_instance
+            tab._on_run()
+
+        config_path = gvhmr_root / "outputs" / "multi_person" / "test_video" / "solve_config.json"
+        assert config_path.is_file()
+
+        loaded = PipelineConfig.load(config_path)
+        assert loaded.static_cam is False
+        assert loaded.use_dpvo is True
+        assert loaded.focal_mm == 50.0
+        assert loaded.max_persons == 4
+        assert loaded.use_inpainting is False
+
+    def test_load_video_restores_config(self, qapp, tmp_path):
+        """Loading a video should restore settings from solve_config.json."""
+        gvhmr_root = tmp_path / "GVHMR"
+        output_dir = gvhmr_root / "outputs" / "multi_person" / "test"
+        output_dir.mkdir(parents=True)
+        PipelineConfig(
+            mode="multi",
+            static_cam=False,
+            use_dpvo=True,
+            focal_mm=50.0,
+            max_persons=4,
+            confidence_threshold=0.8,
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+            render_overlays=True,
+            use_inpainting=False,
+        ).save(output_dir / "solve_config.json")
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, gvhmr_root)
+        tab._load_video(str(video_path))
+
+        assert tab._static_cam.isChecked() is False
+        assert tab._use_dpvo.isChecked() is True
+        assert tab._focal_mm.value() == 50.0
+        assert tab._max_persons.value() == 4
+        assert tab._confidence_threshold.value() == 0.8
+        assert tab._target_fps.value() == 24.0
+        assert tab._fbx_naming.currentText() == "UE5 Mannequin"
+        assert tab._render_overlays.isChecked() is True
+        assert tab._use_inpainting.isChecked() is False
+
+    def test_load_video_no_config_keeps_defaults(self, qapp, tmp_path):
+        """Without solve_config.json, default settings are preserved."""
+        gvhmr_root = tmp_path / "GVHMR"
+        gvhmr_root.mkdir()
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, gvhmr_root)
+        tab._load_video(str(video_path))
+
+        assert tab._static_cam.isChecked() is True
+        assert tab._max_persons.value() == 8
+        assert tab._use_inpainting.isChecked() is True
+
+    def test_restore_emits_log(self, qapp, tmp_path):
+        """Restoring config should emit a log message."""
+        gvhmr_root = tmp_path / "GVHMR"
+        output_dir = gvhmr_root / "outputs" / "multi_person" / "test"
+        output_dir.mkdir(parents=True)
+        PipelineConfig(static_cam=False).save(output_dir / "solve_config.json")
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = MultiPersonTab(session, gvhmr_root)
+        logs = []
+        tab.log_message.connect(lambda text, level: logs.append((text, level)))
+        tab._load_video(str(video_path))
+
+        assert any("restored" in text.lower() for text, _ in logs)
+
+
+# ---------------------------------------------------------------------------
 # Static cam → DPVO auto-disable
 # ---------------------------------------------------------------------------
 

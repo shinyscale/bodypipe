@@ -292,6 +292,67 @@ class TestPerfCaptureConfig:
 
 
 # ---------------------------------------------------------------------------
+# Solve config save/restore (Gradio parity)
+# ---------------------------------------------------------------------------
+
+
+class TestSolveConfigSaveRestore:
+    """Verify perfcap tab uses correct output dir and restores config on load.
+
+    Why: Gradio saves per-video settings to outputs/perfcap/<stem>/solve_config.json.
+    When a video is re-entered, settings (hand mode, face, FPS, etc.) are restored
+    so users don't need to reconfigure for previously-processed videos.
+    """
+
+    def test_output_dir_for_video_is_perfcap(self, qapp):
+        """PerfCaptureTab must use perfcap subdirectory, not demo."""
+        session = Session()
+        tab = PerfCaptureTab(session, Path("/tmp/GVHMR"))
+        result = tab._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
+        assert result == Path("/tmp/GVHMR/outputs/perfcap/dance")
+
+    def test_load_video_restores_perf_config(self, qapp, tmp_path):
+        """Loading a video should restore all perf capture settings."""
+        gvhmr_root = tmp_path / "GVHMR"
+        output_dir = gvhmr_root / "outputs" / "perfcap" / "test"
+        output_dir.mkdir(parents=True)
+        PipelineConfig(
+            mode="perf",
+            static_cam=False,
+            use_dpvo=True,
+            focal_mm=50.0,
+            use_hands=False,
+            use_face=True,
+            hand_mode="smplestx_only",
+            target_fps=24.0,
+            fbx_naming="UE5 Mannequin",
+            pitch_adjust=5.5,
+            hand_source="hamer",
+            body_smooth_preset="heavy",
+            use_vitpose_face_crops=False,
+        ).save(output_dir / "solve_config.json")
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = PerfCaptureTab(session, gvhmr_root)
+        tab._load_video(str(video_path))
+
+        assert tab._static_cam.isChecked() is False
+        assert tab._use_dpvo.isChecked() is True
+        assert tab._focal_mm.value() == 50.0
+        assert tab._use_hands.isChecked() is False
+        assert tab._use_face.isChecked() is True
+        assert tab._hand_smplestx.isChecked() is True
+        assert tab._target_fps.value() == 24.0
+        assert tab._fbx_naming.currentText() == "UE5 Mannequin"
+        assert tab._pitch_adjust.value() == 5.5
+        assert tab._hand_src_hamer.isChecked() is True
+        assert tab._body_smooth.currentIndex() == 2  # Heavy
+        assert not tab._use_vitpose_face.isChecked()
+
+
+# ---------------------------------------------------------------------------
 # Hand mode radio button interaction
 # ---------------------------------------------------------------------------
 
@@ -577,3 +638,23 @@ class TestMultiStageProgress:
         tab._on_progress(0.35, "SMPLest-X hand solve")
         tab._set_running(False)
         assert tab._progress_label.text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_test_video(path: Path, frames: int = 5, size: tuple = (64, 48)) -> Path:
+    """Create a minimal video file for testing."""
+    import cv2
+    import numpy as np
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(path), fourcc, 30.0, size)
+    for i in range(frames):
+        frame = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+        frame[:, :, 1] = i * 40
+        writer.write(frame)
+    writer.release()
+    return path

@@ -352,6 +352,122 @@ class TestWorkerLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Solve config save/restore (Gradio parity)
+# ---------------------------------------------------------------------------
+
+
+class TestSolveConfigSaveRestore:
+    """Verify solve_config.json is saved on run and restored on video load.
+
+    Why: Gradio saves UI settings to solve_config.json in the output directory
+    when a pipeline runs. When the same video is re-entered, settings are
+    restored. This provides session continuity — users don't need to
+    reconfigure settings for previously-processed videos.
+    """
+
+    def test_output_dir_for_video(self, qapp):
+        session = Session()
+        tab = SinglePersonTab(session, Path("/tmp/GVHMR"))
+        result = tab._output_dir_for_video(Path("/tmp/videos/dance.mp4"))
+        assert result == Path("/tmp/GVHMR/outputs/demo/dance")
+
+    def test_on_run_saves_config(self, qapp, tmp_path):
+        """_on_run should save solve_config.json to the output directory."""
+        gvhmr_root = tmp_path / "GVHMR"
+        gvhmr_root.mkdir()
+        session = Session()
+        tab = SinglePersonTab(session, gvhmr_root)
+        tab._video_path = Path("/tmp/test_video.mp4")
+        tab._static_cam.setChecked(False)
+        tab._use_dpvo.setChecked(True)
+        tab._focal_mm.setValue(50.0)
+
+        # Mock the worker to prevent actual execution
+        with patch("views.single_person_tab.GVHMRWorker") as MockWorker:
+            mock_instance = MagicMock()
+            MockWorker.return_value = mock_instance
+            tab._on_run()
+
+        config_path = gvhmr_root / "outputs" / "demo" / "test_video" / "solve_config.json"
+        assert config_path.is_file()
+
+        loaded = PipelineConfig.load(config_path)
+        assert loaded.static_cam is False
+        assert loaded.use_dpvo is True
+        assert loaded.focal_mm == 50.0
+
+    def test_load_video_restores_config(self, qapp, tmp_path):
+        """Loading a video should restore settings from solve_config.json."""
+        gvhmr_root = tmp_path / "GVHMR"
+        # Pre-create solve_config.json in expected output dir
+        output_dir = gvhmr_root / "outputs" / "demo" / "test"
+        output_dir.mkdir(parents=True)
+        PipelineConfig(
+            static_cam=False, use_dpvo=True, focal_mm=50.0,
+        ).save(output_dir / "solve_config.json")
+
+        # Create test video
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = SinglePersonTab(session, gvhmr_root)
+        tab._load_video(str(video_path))
+
+        assert tab._static_cam.isChecked() is False
+        assert tab._use_dpvo.isChecked() is True
+        assert tab._focal_mm.value() == 50.0
+
+    def test_load_video_no_config_keeps_defaults(self, qapp, tmp_path):
+        """Loading a video without solve_config.json keeps default settings."""
+        gvhmr_root = tmp_path / "GVHMR"
+        gvhmr_root.mkdir()
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = SinglePersonTab(session, gvhmr_root)
+        tab._load_video(str(video_path))
+
+        # Defaults preserved
+        assert tab._static_cam.isChecked() is True
+        assert tab._use_dpvo.isChecked() is False
+        assert tab._focal_mm.value() == 24.0
+
+    def test_load_video_corrupt_config_ignored(self, qapp, tmp_path):
+        """Corrupt solve_config.json should be silently ignored."""
+        gvhmr_root = tmp_path / "GVHMR"
+        output_dir = gvhmr_root / "outputs" / "demo" / "test"
+        output_dir.mkdir(parents=True)
+        (output_dir / "solve_config.json").write_text("not valid json{{{")
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = SinglePersonTab(session, gvhmr_root)
+        # Should not raise
+        tab._load_video(str(video_path))
+        # Defaults preserved
+        assert tab._static_cam.isChecked() is True
+
+    def test_restore_emits_log_message(self, qapp, tmp_path):
+        """Restoring config should emit a log message."""
+        gvhmr_root = tmp_path / "GVHMR"
+        output_dir = gvhmr_root / "outputs" / "demo" / "test"
+        output_dir.mkdir(parents=True)
+        PipelineConfig(static_cam=False).save(output_dir / "solve_config.json")
+
+        video_path = _create_test_video(tmp_path / "test.mp4")
+
+        session = Session()
+        tab = SinglePersonTab(session, gvhmr_root)
+        logs = []
+        tab.log_message.connect(lambda text, level: logs.append((text, level)))
+        tab._load_video(str(video_path))
+
+        assert any("restored" in text.lower() for text, _ in logs)
+
+
+# ---------------------------------------------------------------------------
 # DropArea
 # ---------------------------------------------------------------------------
 
