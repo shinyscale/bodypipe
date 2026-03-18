@@ -359,6 +359,33 @@ class AppWindow(QMainWindow):
             tab.log_message.connect(
                 lambda text, level: self._log_panel.append_line(text, level)
             )
+            # Wire video player frame changes to status bar
+            tab.video_player.frame_changed.connect(
+                lambda idx, t=tab: self._on_tab_frame_changed(t, idx)
+            )
+
+        # Update status bar on tab switch
+        self._tabs.currentChanged.connect(self._on_tab_switched)
+
+    def _on_tab_frame_changed(self, tab, frame_idx: int):
+        """Update status bar frame/FPS when the active tab's video player changes frame."""
+        if self._tabs.currentWidget() is not tab:
+            return
+        player = tab.video_player
+        self.set_frame_info(frame_idx, player.num_frames)
+        self.set_fps_info(player.fps)
+
+    def _on_tab_switched(self, index: int):
+        """Update status bar frame/FPS info when switching tabs."""
+        tab = self._tabs.widget(index)
+        if tab and hasattr(tab, "video_player"):
+            player = tab.video_player
+            if player.num_frames > 0:
+                self.set_frame_info(player.current_frame_index(), player.num_frames)
+                self.set_fps_info(player.fps)
+            else:
+                self._frame_label.setText("")
+                self._fps_label.setText("")
 
     def _on_open_video(self):
         """Open Video menu action — load video into the active tab."""

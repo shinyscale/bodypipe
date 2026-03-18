@@ -276,6 +276,11 @@ class MultiPersonTab(QWidget):
 
         outer.addWidget(main_splitter)
 
+    @property
+    def video_player(self) -> "VideoPlayer":
+        """Public access to the tab's VideoPlayer for status bar wiring."""
+        return self._video_player
+
     def _connect_signals(self):
         self._drop_area.file_dropped.connect(self._load_video)
         self._browse_btn.clicked.connect(self._on_browse)

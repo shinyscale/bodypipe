@@ -232,6 +232,10 @@ class VideoPlayer(QWidget):
         self._frame_label.setMinimumWidth(100)
         slider_row.addWidget(self._frame_label)
 
+        self._fps_label = QLabel("")
+        self._fps_label.setMinimumWidth(70)
+        slider_row.addWidget(self._fps_label)
+
         layout.addLayout(slider_row)
 
     def _connect_signals(self):
@@ -255,7 +259,16 @@ class VideoPlayer(QWidget):
         self._slider.setRange(0, max(0, num_frames - 1))
         self._slider.setValue(0)
         self._update_label()
+        self._fps_label.setText(f"FPS: {fps:.1f}")
         self._show_current_frame()
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def num_frames(self) -> int:
+        return self._num_frames
 
     def set_frame(self, frame: np.ndarray):
         """Set the displayed frame (already composited with overlays)."""

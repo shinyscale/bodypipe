@@ -213,6 +213,30 @@ class TestVideoPlayer:
         player = VideoPlayer()
         assert player._frame_label is not None
 
+    def test_fps_label_exists(self, qapp):
+        """Spec requires FPS display in slider row."""
+        player = VideoPlayer()
+        assert player._fps_label is not None
+        assert player._fps_label.text() == ""
+
+    def test_fps_label_set_on_video_load(self, qapp):
+        """FPS label shows video FPS after set_video."""
+        player = VideoPlayer()
+        player.set_video(Path("dummy.mp4"), 100, 24.0)
+        assert "24.0" in player._fps_label.text()
+
+    def test_fps_property(self, qapp):
+        player = VideoPlayer()
+        assert player.fps == 30.0
+        player.set_video(Path("dummy.mp4"), 200, 60.0)
+        assert player.fps == 60.0
+
+    def test_num_frames_property(self, qapp):
+        player = VideoPlayer()
+        assert player.num_frames == 0
+        player.set_video(Path("dummy.mp4"), 500, 30.0)
+        assert player.num_frames == 500
+
     def test_set_video(self, qapp):
         player = VideoPlayer()
         player.set_video(Path("dummy.mp4"), 100, 24.0)

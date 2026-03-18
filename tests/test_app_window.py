@@ -447,3 +447,88 @@ class TestStatusAndLogging:
         app_window.log_panel.append_stdout("RuntimeError: something broke")
         text = app_window.log_panel.toPlainText()
         assert "RuntimeError" in text
+
+
+# ---------------------------------------------------------------------------
+# Tab video_player property
+# ---------------------------------------------------------------------------
+
+
+class TestTabVideoPlayerProperty:
+    """Each tab exposes a video_player property for status bar wiring."""
+
+    def test_single_tab_has_video_player(self, app_window):
+        from views.video_player import VideoPlayer
+        assert isinstance(app_window._tab_single.video_player, VideoPlayer)
+
+    def test_perf_tab_has_video_player(self, app_window):
+        from views.video_player import VideoPlayer
+        assert isinstance(app_window._tab_perf.video_player, VideoPlayer)
+
+    def test_multi_tab_has_video_player(self, app_window):
+        from views.video_player import VideoPlayer
+        assert isinstance(app_window._tab_multi.video_player, VideoPlayer)
+
+
+# ---------------------------------------------------------------------------
+# Status bar frame/FPS wiring
+# ---------------------------------------------------------------------------
+
+
+class TestStatusBarWiring:
+    """Status bar updates from active tab's video player frame changes."""
+
+    def test_frame_change_updates_status_bar(self, app_window):
+        """When active tab's video player emits frame_changed, status bar updates."""
+        # Set up the single tab's player with a video
+        player = app_window._tab_single.video_player
+        player._num_frames = 200
+        player._fps = 24.0
+
+        # Make sure single tab is active (tab 0)
+        app_window._tabs.setCurrentIndex(0)
+
+        # Simulate frame change
+        app_window._on_tab_frame_changed(app_window._tab_single, 42)
+
+        assert "42" in app_window._frame_label.text()
+        assert "200" in app_window._frame_label.text()
+        assert "24.0" in app_window._fps_label.text()
+
+    def test_inactive_tab_frame_change_ignored(self, app_window):
+        """Frame changes from non-active tabs do not update status bar."""
+        # Tab 0 is active
+        app_window._tabs.setCurrentIndex(0)
+        app_window._frame_label.setText("")
+
+        # Simulate frame change from tab 2 (not active)
+        app_window._on_tab_frame_changed(app_window._tab_multi, 99)
+
+        assert app_window._frame_label.text() == ""
+
+    def test_tab_switch_updates_status_bar(self, app_window):
+        """Switching tabs updates status bar with new tab's video state."""
+        # Set up multi tab player
+        multi_player = app_window._tab_multi.video_player
+        multi_player._num_frames = 500
+        multi_player._fps = 60.0
+        multi_player._current_frame = 123
+
+        # Switch to multi tab
+        app_window._on_tab_switched(2)
+
+        assert "123" in app_window._frame_label.text()
+        assert "500" in app_window._frame_label.text()
+        assert "60.0" in app_window._fps_label.text()
+
+    def test_tab_switch_clears_when_no_video(self, app_window):
+        """Switching to a tab with no video clears the status bar."""
+        # Set something in status bar first
+        app_window.set_frame_info(50, 100)
+        app_window.set_fps_info(30.0)
+
+        # Switch to tab with no video loaded (num_frames=0)
+        app_window._on_tab_switched(0)
+
+        assert app_window._frame_label.text() == ""
+        assert app_window._fps_label.text() == ""
