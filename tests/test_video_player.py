@@ -196,6 +196,8 @@ class TestVideoPlayer:
         assert hasattr(player, "frame_changed")
         assert hasattr(player, "frame_clicked")
         assert hasattr(player, "playback_toggled")
+        assert hasattr(player, "scrub_started")
+        assert hasattr(player, "scrub_ended")
 
     def test_transport_buttons_exist(self, qapp):
         player = VideoPlayer()

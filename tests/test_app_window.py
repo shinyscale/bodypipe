@@ -893,3 +893,52 @@ class TestWorkspacePresets:
         """No custom workspaces initially."""
         names = app_window._get_custom_workspace_names()
         assert names == []
+
+
+class TestScrubAutoSwitch:
+    """Verify that scrubbing/playback auto-switches the viewport to wireframe.
+
+    Why: The SMPL-X forward pass is expensive (~50ms per frame). During
+    slider scrubbing or playback, this latency makes the viewport choppy.
+    Auto-switching to wireframe (skeleton-only, FK-only) ensures smooth
+    60fps frame updates, restoring full quality when the user stops.
+    """
+
+    def test_scrub_started_switches_viewport(self, qapp):
+        """scrub_started signal should set viewport to wireframe."""
+        from app_window import AppWindow
+        from views.mesh_viewport import RenderMode
+
+        window = AppWindow()
+        assert window._mesh_viewport._render_mode is RenderMode.FULL
+        window._video_player.scrub_started.emit()
+        assert window._mesh_viewport._render_mode is RenderMode.WIREFRAME
+
+    def test_scrub_ended_restores_viewport(self, qapp):
+        """scrub_ended signal should restore viewport to previous mode."""
+        from app_window import AppWindow
+        from views.mesh_viewport import RenderMode
+
+        window = AppWindow()
+        window._video_player.scrub_started.emit()
+        window._video_player.scrub_ended.emit()
+        assert window._mesh_viewport._render_mode is RenderMode.FULL
+
+    def test_playback_start_switches_viewport(self, qapp):
+        """playback_toggled(True) should switch to wireframe."""
+        from app_window import AppWindow
+        from views.mesh_viewport import RenderMode
+
+        window = AppWindow()
+        window._video_player.playback_toggled.emit(True)
+        assert window._mesh_viewport._render_mode is RenderMode.WIREFRAME
+
+    def test_playback_stop_restores_viewport(self, qapp):
+        """playback_toggled(False) should restore mode."""
+        from app_window import AppWindow
+        from views.mesh_viewport import RenderMode
+
+        window = AppWindow()
+        window._video_player.playback_toggled.emit(True)
+        window._video_player.playback_toggled.emit(False)
+        assert window._mesh_viewport._render_mode is RenderMode.FULL

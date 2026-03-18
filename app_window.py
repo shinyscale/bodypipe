@@ -713,6 +713,17 @@ class AppWindow(QMainWindow):
         # Shared VideoPlayer → status bar + multi-mode broadcast
         self._video_player.frame_changed.connect(self._on_video_frame_changed)
 
+        # Auto-switch 3D viewport to wireframe during scrubbing/playback
+        self._video_player.scrub_started.connect(
+            lambda: self._mesh_viewport.set_scrubbing(True)
+        )
+        self._video_player.scrub_ended.connect(
+            lambda: self._mesh_viewport.set_scrubbing(False)
+        )
+        self._video_player.playback_toggled.connect(
+            lambda playing: self._mesh_viewport.set_scrubbing(playing)
+        )
+
         # Multi-mode signal hub (signals only fire when panels are visible)
         self._video_player.frame_clicked.connect(self._identity_inspector.on_frame_click)
         self._mesh_viewport.joint_clicked.connect(self._pose_corrector.set_joint)

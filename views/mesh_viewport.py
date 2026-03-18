@@ -18,6 +18,7 @@ distance for overlapping joints.  Toggled via set_picking_mode().
 
 from __future__ import annotations
 
+import enum
 import logging
 from pathlib import Path
 
@@ -28,6 +29,23 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QMenu
 
 from models.session import Session
 from theme import COLORS
+
+
+class RenderMode(enum.Enum):
+    """Viewport rendering quality level.
+
+    WIREFRAME skips the SMPL-X mesh entirely — only skeleton joints and bones
+    are drawn.  This is the fastest mode because it avoids the expensive
+    torch forward pass for vertex computation.
+
+    FAST renders the mesh with ambient-only shading (no Phong diffuse term),
+    suitable for real-time scrubbing when mesh visibility is still desired.
+
+    FULL is the default — full SMPL-X mesh with Phong shading and all overlays.
+    """
+    WIREFRAME = "wireframe"
+    FAST = "fast"
+    FULL = "full"
 
 logger = logging.getLogger(__name__)
 
@@ -1052,6 +1070,11 @@ class MeshViewport(_BaseWidget):
         # Video frame background for in-camera composite
         self._video_frame: np.ndarray | None = None  # RGB (H, W, 3) uint8
 
+        # Render quality mode (wireframe/fast/full)
+        self._render_mode: RenderMode = RenderMode.FULL
+        # Saved mode before auto-switch during scrubbing (None = not scrubbing)
+        self._pre_scrub_mode: RenderMode | None = None
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -1202,6 +1225,46 @@ class MeshViewport(_BaseWidget):
         self._show_joint_labels = show
         if _HAS_GL:
             self.update()
+
+    def set_render_mode(self, mode: str | RenderMode):
+        """Set viewport render quality ('wireframe', 'fast', or 'full').
+
+        In wireframe mode only skeleton joints/bones are drawn — the SMPL-X
+        mesh forward pass is skipped entirely for maximum scrubbing speed.
+        In fast mode the mesh is rendered with ambient-only shading.
+        In full mode (default) full Phong shading is applied.
+        """
+        if isinstance(mode, str):
+            try:
+                mode = RenderMode(mode)
+            except ValueError:
+                return
+        if mode == self._render_mode:
+            return
+        self._render_mode = mode
+        # Refresh mesh data — in wireframe mode we can skip vertex computation
+        self._refresh_mesh()
+
+    def set_scrubbing(self, active: bool):
+        """Auto-switch to wireframe during active scrubbing/playback.
+
+        When *active* is True the current render mode is saved and the
+        viewport switches to wireframe.  When *active* becomes False the
+        previous mode is restored.
+        """
+        if active:
+            if self._pre_scrub_mode is None:
+                self._pre_scrub_mode = self._render_mode
+                if self._render_mode != RenderMode.WIREFRAME:
+                    self._render_mode = RenderMode.WIREFRAME
+                    self._refresh_mesh()
+        else:
+            if self._pre_scrub_mode is not None:
+                restore = self._pre_scrub_mode
+                self._pre_scrub_mode = None
+                if restore != self._render_mode:
+                    self._render_mode = restore
+                    self._refresh_mesh()
 
     def set_pose_override(self, override: dict | None):
         """Set temporary per-frame pose override for real-time preview.
@@ -1940,7 +2003,12 @@ class MeshViewport(_BaseWidget):
         if self._show_grid and self._camera_mode == "orbit":
             self._draw_grid()
 
-        if self._vertices is not None and self._n_indices > 0:
+        # Mesh triangles — skip entirely in wireframe mode
+        if (
+            self._render_mode != RenderMode.WIREFRAME
+            and self._vertices is not None
+            and self._n_indices > 0
+        ):
             self._shader.bind()
 
             # Uniforms
@@ -1948,8 +2016,13 @@ class MeshViewport(_BaseWidget):
             self._set_mat4("view", self._view)
             self._set_mat4("projection", self._projection)
             self._set_vec3("light_dir", _LIGHT_DIR)
-            self._set_vec3("light_color", _LIGHT_COLOR)
-            self._set_vec3("ambient", _AMBIENT)
+            if self._render_mode == RenderMode.FAST:
+                # Ambient-only: no diffuse shading for speed
+                self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+                self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+            else:
+                self._set_vec3("light_color", _LIGHT_COLOR)
+                self._set_vec3("ambient", _AMBIENT)
 
             gl.glBindVertexArray(self._vao_id)
             gl.glDrawElements(
@@ -1959,9 +2032,9 @@ class MeshViewport(_BaseWidget):
 
             self._shader.release()
 
-            # Skeleton overlay (drawn on top of mesh)
-            if self._show_skeleton and self._joint_positions is not None:
-                self._draw_skeleton()
+        # Skeleton overlay (always drawn when visible — even in wireframe)
+        if self._show_skeleton and self._joint_positions is not None:
+            self._draw_skeleton()
 
         painter.endNativePainting()
 
@@ -2324,22 +2397,25 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        result = self._compute_vertices(self._person_id, self._current_frame)
-        if result is not None:
-            self._vertices, self._normals = result
-            self._n_vertices = len(self._vertices)
-            if self._gl_ready:
-                self._upload_buffers()
-            # Auto-center orbit camera on first mesh load
-            if self._camera_mode == "orbit" and not self._orbit_auto_centered:
-                self._auto_center_orbit()
-                self._update_camera()
-        else:
-            self._vertices = None
-            self._normals = None
-            self._n_indices = 0
+        # In wireframe mode skip the expensive SMPL-X forward pass —
+        # only compute FK joint positions for the skeleton overlay.
+        if self._render_mode != RenderMode.WIREFRAME:
+            result = self._compute_vertices(self._person_id, self._current_frame)
+            if result is not None:
+                self._vertices, self._normals = result
+                self._n_vertices = len(self._vertices)
+                if self._gl_ready:
+                    self._upload_buffers()
+                # Auto-center orbit camera on first mesh load
+                if self._camera_mode == "orbit" and not self._orbit_auto_centered:
+                    self._auto_center_orbit()
+                    self._update_camera()
+            else:
+                self._vertices = None
+                self._normals = None
+                self._n_indices = 0
 
-        # Recompute skeleton joint positions
+        # Recompute skeleton joint positions (lightweight FK — always computed)
         self._joint_positions = self._compute_joints()
 
         if _HAS_GL:

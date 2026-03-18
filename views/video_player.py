@@ -157,6 +157,8 @@ class VideoPlayer(QWidget):
     frame_changed = Signal(int)
     frame_clicked = Signal(float, float)
     playback_toggled = Signal(bool)
+    scrub_started = Signal()   # slider press — user is actively scrubbing
+    scrub_ended = Signal()     # slider release — scrubbing finished
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -242,6 +244,8 @@ class VideoPlayer(QWidget):
     def _connect_signals(self):
         self._display.clicked.connect(self.frame_clicked.emit)
         self._slider.valueChanged.connect(self._on_slider_changed)
+        self._slider.sliderPressed.connect(self.scrub_started.emit)
+        self._slider.sliderReleased.connect(self.scrub_ended.emit)
         self._btn_first.clicked.connect(lambda: self.seek(0))
         self._btn_last.clicked.connect(lambda: self.seek(self._num_frames - 1))
         self._btn_back1.clicked.connect(lambda: self.seek(self._current_frame - 1))

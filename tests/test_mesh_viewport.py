@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.session import Session, PersonTrack
 from views.mesh_viewport import (
     MeshViewport,
+    RenderMode,
     compute_normals,
     k_to_projection,
     estimate_K,
@@ -2789,3 +2790,215 @@ class TestSkeletonHeatmapRendering:
         # (verified by the _draw_skeleton logic: selected check comes first)
         assert w._skeleton_heatmap is True
         assert w._selected_joint == 5
+
+
+# ======================================================================
+# Phase 7: Viewport Quality Toggle — RenderMode enum + API tests
+# ======================================================================
+
+
+class TestRenderModeEnum:
+    """RenderMode enum values and identity."""
+
+    def test_wireframe_value(self):
+        assert RenderMode.WIREFRAME.value == "wireframe"
+
+    def test_fast_value(self):
+        assert RenderMode.FAST.value == "fast"
+
+    def test_full_value(self):
+        assert RenderMode.FULL.value == "full"
+
+    def test_from_string(self):
+        """Enum should be constructible from string values."""
+        assert RenderMode("wireframe") is RenderMode.WIREFRAME
+        assert RenderMode("fast") is RenderMode.FAST
+        assert RenderMode("full") is RenderMode.FULL
+
+    def test_invalid_string_raises(self):
+        with pytest.raises(ValueError):
+            RenderMode("invalid")
+
+    def test_three_members(self):
+        assert len(RenderMode) == 3
+
+
+class TestSetRenderMode:
+    """MeshViewport.set_render_mode: quality switching API."""
+
+    def test_default_mode_is_full(self, qapp):
+        w = MeshViewport()
+        assert w._render_mode is RenderMode.FULL
+
+    def test_set_wireframe_by_string(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("wireframe")
+        assert w._render_mode is RenderMode.WIREFRAME
+
+    def test_set_fast_by_string(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("fast")
+        assert w._render_mode is RenderMode.FAST
+
+    def test_set_full_by_string(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("wireframe")
+        w.set_render_mode("full")
+        assert w._render_mode is RenderMode.FULL
+
+    def test_set_by_enum(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode(RenderMode.WIREFRAME)
+        assert w._render_mode is RenderMode.WIREFRAME
+
+    def test_invalid_string_ignored(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("invalid")
+        assert w._render_mode is RenderMode.FULL
+
+    def test_same_mode_noop(self, qapp):
+        """Setting the same mode should not trigger a refresh."""
+        w = MeshViewport()
+        w._refresh_mesh = MagicMock()
+        w.set_render_mode("full")  # already full
+        w._refresh_mesh.assert_not_called()
+
+    def test_wireframe_skips_vertex_computation(self, qapp, session):
+        """In wireframe mode, _refresh_mesh should not call _compute_vertices.
+
+        Why: Wireframe skips the expensive SMPL-X torch forward pass to
+        achieve fast scrubbing. Only FK joint positions are computed.
+        """
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((10, 3)),
+                "body_pose": np.zeros((10, 21, 3)),
+                "transl": np.zeros((10, 3)),
+            },
+        )
+        w.set_session(session)
+        w._person_id = 0
+        w._render_mode = RenderMode.WIREFRAME
+        w._compute_vertices = MagicMock(return_value=None)
+        w._current_frame = -1  # force refresh
+        w.on_frame_changed(0)
+        w._compute_vertices.assert_not_called()
+        # But joints should still be computed
+        assert w._joint_positions is not None
+
+    def test_full_mode_computes_vertices(self, qapp, session):
+        """In full mode, _refresh_mesh should call _compute_vertices."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((10, 3)),
+                "body_pose": np.zeros((10, 21, 3)),
+                "transl": np.zeros((10, 3)),
+            },
+        )
+        w.set_session(session)
+        w._person_id = 0
+        w._render_mode = RenderMode.FULL
+        w._compute_vertices = MagicMock(return_value=None)
+        w._current_frame = -1
+        w.on_frame_changed(0)
+        w._compute_vertices.assert_called_once()
+
+    def test_fast_mode_computes_vertices(self, qapp, session):
+        """Fast mode still computes vertices (ambient-only shading)."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((10, 3)),
+                "body_pose": np.zeros((10, 21, 3)),
+                "transl": np.zeros((10, 3)),
+            },
+        )
+        w.set_session(session)
+        w._person_id = 0
+        w._render_mode = RenderMode.FAST
+        w._compute_vertices = MagicMock(return_value=None)
+        w._current_frame = -1
+        w.on_frame_changed(0)
+        w._compute_vertices.assert_called_once()
+
+
+class TestSetScrubbing:
+    """MeshViewport.set_scrubbing: auto-switch to wireframe during active scrubbing.
+
+    Why: During slider scrubbing or playback, the SMPL-X forward pass is
+    too expensive for real-time frame updates. Auto-switching to wireframe
+    ensures 60fps scrubbing by only computing FK joint positions, then
+    restoring the user's chosen quality when scrubbing stops.
+    """
+
+    def test_scrubbing_switches_to_wireframe(self, qapp):
+        w = MeshViewport()
+        assert w._render_mode is RenderMode.FULL
+        w.set_scrubbing(True)
+        assert w._render_mode is RenderMode.WIREFRAME
+
+    def test_scrubbing_saves_previous_mode(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("fast")
+        w.set_scrubbing(True)
+        assert w._pre_scrub_mode is RenderMode.FAST
+        assert w._render_mode is RenderMode.WIREFRAME
+
+    def test_scrub_end_restores_mode(self, qapp):
+        w = MeshViewport()
+        w.set_render_mode("fast")
+        w.set_scrubbing(True)
+        w.set_scrubbing(False)
+        assert w._render_mode is RenderMode.FAST
+        assert w._pre_scrub_mode is None
+
+    def test_scrub_end_restores_full(self, qapp):
+        w = MeshViewport()
+        w.set_scrubbing(True)
+        w.set_scrubbing(False)
+        assert w._render_mode is RenderMode.FULL
+
+    def test_double_scrub_start_no_clobber(self, qapp):
+        """Starting scrubbing twice should not overwrite the saved mode."""
+        w = MeshViewport()
+        w.set_render_mode("fast")
+        w.set_scrubbing(True)
+        assert w._pre_scrub_mode is RenderMode.FAST
+        w.set_scrubbing(True)  # redundant start
+        assert w._pre_scrub_mode is RenderMode.FAST  # not clobbered
+
+    def test_double_scrub_end_is_noop(self, qapp):
+        """Ending scrubbing twice should not change the mode."""
+        w = MeshViewport()
+        w.set_scrubbing(True)
+        w.set_scrubbing(False)
+        assert w._render_mode is RenderMode.FULL
+        w.set_scrubbing(False)  # redundant end
+        assert w._render_mode is RenderMode.FULL
+
+    def test_scrub_already_wireframe(self, qapp):
+        """If user is already in wireframe, scrubbing should be a no-op."""
+        w = MeshViewport()
+        w.set_render_mode("wireframe")
+        w.set_scrubbing(True)
+        assert w._render_mode is RenderMode.WIREFRAME
+        w.set_scrubbing(False)
+        assert w._render_mode is RenderMode.WIREFRAME
+
+    def test_pre_scrub_mode_default_none(self, qapp):
+        w = MeshViewport()
+        assert w._pre_scrub_mode is None
+
+    def test_scrub_cycle_full(self, qapp):
+        """Full scrub cycle: full → wireframe → full."""
+        w = MeshViewport()
+        assert w._render_mode is RenderMode.FULL
+        w.set_scrubbing(True)
+        assert w._render_mode is RenderMode.WIREFRAME
+        w.set_scrubbing(False)
+        assert w._render_mode is RenderMode.FULL

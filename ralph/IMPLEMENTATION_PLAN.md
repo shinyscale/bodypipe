@@ -165,25 +165,36 @@ Full spec: `spec/ux-overhaul.md`
 
 **File:** `views/mesh_viewport.py`, `tests/test_mesh_viewport.py`
 
-### Phase 7: Viewport Quality Toggle *(1 commit, ~60 LOC)*
+### Phase 7: Viewport Quality Toggle *(DONE)*
 
-- [ ] Add render mode enum: Wireframe / Fast / Full
-- [ ] Wireframe = skeleton only, no mesh, no shading
-- [ ] Auto-switch to Wireframe during active scrubbing, restore on pause
+- [x] Added `RenderMode` enum (WIREFRAME / FAST / FULL) in `views/mesh_viewport.py`
+- [x] `set_render_mode(mode)` — validates, sets mode, triggers refresh
+- [x] Wireframe = skeleton only, no mesh, no SMPL-X forward pass — fastest for scrubbing
+- [x] Fast = mesh rendered with ambient-only shading (no Phong diffuse)
+- [x] Full = default, full Phong shading
+- [x] `set_scrubbing(active)` — auto-switch to wireframe, saves/restores previous mode
+- [x] `_refresh_mesh()` skips `_compute_vertices()` in wireframe mode (FK joints still computed)
+- [x] `paintGL()` skips mesh triangle draw in wireframe, uses ambient-only in fast mode
+- [x] Added `scrub_started`/`scrub_ended` signals to `VideoPlayer` (from QSlider pressed/released)
+- [x] AppWindow wires `scrub_started`, `scrub_ended`, `playback_toggled` → `set_scrubbing()`
+- [x] 29 new tests: `TestRenderModeEnum` (6), `TestSetRenderMode` (10), `TestSetScrubbing` (9), `TestScrubAutoSwitch` (4 in test_app_window.py)
+- [x] All 1275 tests pass (1246 original + 29 new)
 
-**File:** `views/mesh_viewport.py`
+**Files:** `views/mesh_viewport.py`, `views/video_player.py`, `app_window.py`, `tests/test_mesh_viewport.py`, `tests/test_video_player.py`, `tests/test_app_window.py`
 
 ---
 
-## Execution Order
+## Execution Order (all complete)
 
-1A → 1B → (Phases 4/6/7 in parallel) → 1C → 1D → 1E → 1F
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7
 
-## Verification (after each commit)
+All UX overhaul phases and independent viewport improvements are complete.
 
-1. `python -m pytest tests/ -x -q` — all tests pass
-2. `python main.py` — app launches, dark theme, panels visible
-3. Load a video → pipeline settings populate, run button works
-4. After 1C: dock panels can be dragged, floated, tabbed, closed/reopened via View menu
-5. After 1D: workspace presets restore correct layouts
-6. After Phase 4/6/7: 3D viewport shows chain highlights, heatmap toggle, quality modes
+## Verification
+
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — 1275 tests pass
+2. `QT_QPA_PLATFORM=offscreen python main.py --smoke-test` — app launches
+3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
+4. Workspace presets restore correct layouts
+5. 3D viewport: chain highlights, heatmap toggle, quality modes (wireframe/fast/full)
+6. Auto-switch to wireframe during slider scrubbing and playback
