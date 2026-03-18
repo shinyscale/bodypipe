@@ -1527,3 +1527,271 @@ class TestMeshViewportSkeleton:
         # Joint positions should have been computed
         assert w._joint_positions is not None
         assert w._joint_positions.shape == (52, 3)
+
+
+# ======================================================================
+# Color mode tests
+# ======================================================================
+
+from views.mesh_viewport import (
+    compute_joint_colors,
+    confidence_to_color,
+    _JOINT_PALETTE,
+    _SKIN_COLOR,
+)
+
+
+class TestComputeJointColors:
+    """compute_joint_colors: LBS weight → per-vertex joint coloring."""
+
+    def test_output_shape(self):
+        """Output should be (V, 3) float32."""
+        V, J = 50, 55
+        weights = np.random.rand(V, J).astype(np.float32)
+        # Normalize rows to sum to 1
+        weights /= weights.sum(axis=1, keepdims=True)
+        colors = compute_joint_colors(weights)
+        assert colors.shape == (V, 3)
+        assert colors.dtype == np.float32
+
+    def test_body_joint_dominant(self):
+        """Vertex dominated by body joint 3 should get palette color 3."""
+        V, J = 10, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[:, 3] = 1.0  # all verts dominated by joint 3 (Spine1)
+        colors = compute_joint_colors(weights)
+        expected = _JOINT_PALETTE[3]
+        for i in range(V):
+            np.testing.assert_allclose(colors[i], expected, atol=1e-6)
+
+    def test_left_hand_inherits_wrist(self):
+        """Vertex dominated by left hand joint (22-36) should get L_Wrist color (20)."""
+        V, J = 5, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[:, 25] = 1.0  # joint 25 = L_Middle1 (left hand)
+        colors = compute_joint_colors(weights)
+        expected = _JOINT_PALETTE[20]  # L_Wrist
+        for i in range(V):
+            np.testing.assert_allclose(colors[i], expected, atol=1e-6)
+
+    def test_right_hand_inherits_wrist(self):
+        """Vertex dominated by right hand joint (37-51) should get R_Wrist color (21)."""
+        V, J = 5, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[:, 40] = 1.0  # joint 40 = R_Middle1 (right hand)
+        colors = compute_joint_colors(weights)
+        expected = _JOINT_PALETTE[21]  # R_Wrist
+        for i in range(V):
+            np.testing.assert_allclose(colors[i], expected, atol=1e-6)
+
+    def test_jaw_eye_joints_inherit_head(self):
+        """Joints beyond 51 (jaw/eyes) should map to Head color (15)."""
+        V, J = 5, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[:, 53] = 1.0  # joint 53 = jaw/eye area
+        colors = compute_joint_colors(weights)
+        expected = _JOINT_PALETTE[15]  # Head
+        for i in range(V):
+            np.testing.assert_allclose(colors[i], expected, atol=1e-6)
+
+    def test_mixed_joints(self):
+        """Different vertices dominated by different joints get different colors."""
+        V, J = 3, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[0, 0] = 1.0   # Pelvis
+        weights[1, 15] = 1.0  # Head
+        weights[2, 21] = 1.0  # R_Wrist
+        colors = compute_joint_colors(weights)
+        np.testing.assert_allclose(colors[0], _JOINT_PALETTE[0], atol=1e-6)
+        np.testing.assert_allclose(colors[1], _JOINT_PALETTE[15], atol=1e-6)
+        np.testing.assert_allclose(colors[2], _JOINT_PALETTE[21], atol=1e-6)
+
+    def test_custom_palette(self):
+        """Should accept a custom palette."""
+        V, J = 3, 55
+        weights = np.zeros((V, J), dtype=np.float32)
+        weights[:, 0] = 1.0
+        custom = np.zeros((22, 3), dtype=np.float32)
+        custom[0] = [0.1, 0.2, 0.3]
+        colors = compute_joint_colors(weights, palette=custom)
+        np.testing.assert_allclose(colors[0], [0.1, 0.2, 0.3], atol=1e-6)
+
+
+class TestConfidenceToColor:
+    """confidence_to_color: scalar → RGB gradient."""
+
+    def test_zero_is_red(self):
+        color = confidence_to_color(0.0)
+        np.testing.assert_allclose(color, [1.0, 0.0, 0.0], atol=1e-6)
+
+    def test_half_is_yellow(self):
+        color = confidence_to_color(0.5)
+        np.testing.assert_allclose(color, [1.0, 1.0, 0.0], atol=1e-6)
+
+    def test_one_is_green(self):
+        color = confidence_to_color(1.0)
+        np.testing.assert_allclose(color, [0.0, 1.0, 0.0], atol=1e-6)
+
+    def test_clamp_below_zero(self):
+        color = confidence_to_color(-0.5)
+        np.testing.assert_allclose(color, [1.0, 0.0, 0.0], atol=1e-6)
+
+    def test_clamp_above_one(self):
+        color = confidence_to_color(1.5)
+        np.testing.assert_allclose(color, [0.0, 1.0, 0.0], atol=1e-6)
+
+    def test_quarter(self):
+        """0.25 → halfway between red and yellow."""
+        color = confidence_to_color(0.25)
+        np.testing.assert_allclose(color, [1.0, 0.5, 0.0], atol=1e-6)
+
+    def test_three_quarter(self):
+        """0.75 → halfway between yellow and green."""
+        color = confidence_to_color(0.75)
+        np.testing.assert_allclose(color, [0.5, 1.0, 0.0], atol=1e-6)
+
+    def test_output_dtype(self):
+        assert confidence_to_color(0.5).dtype == np.float32
+
+
+class TestMeshViewportColorMode:
+    """MeshViewport.set_color_mode integration tests."""
+
+    def test_default_color_mode(self, qapp):
+        w = MeshViewport()
+        assert w._color_mode == "solid"
+
+    def test_set_color_mode_solid(self, qapp):
+        w = MeshViewport()
+        w._color_mode = "joint"  # change away first
+        w.set_color_mode("solid")
+        assert w._color_mode == "solid"
+
+    def test_set_color_mode_joint(self, qapp):
+        w = MeshViewport()
+        w.set_color_mode("joint")
+        assert w._color_mode == "joint"
+
+    def test_set_color_mode_confidence(self, qapp):
+        w = MeshViewport()
+        w.set_color_mode("confidence")
+        assert w._color_mode == "confidence"
+
+    def test_set_invalid_mode_ignored(self, qapp):
+        w = MeshViewport()
+        w.set_color_mode("invalid")
+        assert w._color_mode == "solid"
+
+    def test_set_same_mode_noop(self, qapp):
+        """Setting the same mode should be a no-op."""
+        w = MeshViewport()
+        w.set_color_mode("solid")
+        # Should not error even when called twice
+        assert w._color_mode == "solid"
+
+    def test_compute_colors_solid(self, qapp):
+        """Solid mode should return skin tone for all vertices."""
+        w = MeshViewport()
+        w._n_vertices = 10
+        colors = w._compute_colors()
+        assert colors.shape == (10, 3)
+        for i in range(10):
+            np.testing.assert_allclose(colors[i], _SKIN_COLOR, atol=1e-6)
+
+    def test_compute_colors_joint_with_weights(self, qapp):
+        """Joint mode with LBS weights should use joint coloring."""
+        w = MeshViewport()
+        w._n_vertices = 20
+        w._color_mode = "joint"
+        # Create fake LBS weights: all vertices dominated by joint 5
+        lbs = np.zeros((20, 55), dtype=np.float32)
+        lbs[:, 5] = 1.0
+        w._lbs_weights = lbs
+        colors = w._compute_colors()
+        assert colors.shape == (20, 3)
+        np.testing.assert_allclose(colors[0], _JOINT_PALETTE[5], atol=1e-6)
+
+    def test_compute_colors_joint_no_weights_falls_back(self, qapp):
+        """Joint mode without LBS weights should fall back to solid."""
+        w = MeshViewport()
+        w._n_vertices = 10
+        w._color_mode = "joint"
+        w._lbs_weights = None
+        colors = w._compute_colors()
+        assert colors.shape == (10, 3)
+        np.testing.assert_allclose(colors[0], _SKIN_COLOR, atol=1e-6)
+
+    def test_compute_colors_confidence_default(self, qapp):
+        """Confidence mode with no session should use mid confidence (yellow)."""
+        w = MeshViewport()
+        w._n_vertices = 10
+        w._color_mode = "confidence"
+        colors = w._compute_colors()
+        assert colors.shape == (10, 3)
+        expected = confidence_to_color(0.5)
+        np.testing.assert_allclose(colors[0], expected, atol=1e-6)
+
+    def test_compute_colors_confidence_from_breakdown(self, qapp, session):
+        """Confidence mode should read from confidence_breakdown['overall']."""
+        w = MeshViewport()
+        w._n_vertices = 10
+        w._color_mode = "confidence"
+        track = PersonTrack(
+            person_id=0,
+            confidence_breakdown={"overall": [0.2, 0.8, 0.5]},
+        )
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 1  # confidence 0.8
+        colors = w._compute_colors()
+        expected = confidence_to_color(0.8)
+        np.testing.assert_allclose(colors[0], expected, atol=1e-6)
+
+    def test_compute_colors_confidence_from_raw_list(self, qapp, session):
+        """Confidence mode should fall back to raw confidences list."""
+        w = MeshViewport()
+        w._n_vertices = 10
+        w._color_mode = "confidence"
+        track = PersonTrack(
+            person_id=0,
+            confidences=[0.9, 0.1, 0.5],
+        )
+        session.person_tracks[0] = track
+        w.set_session(session)
+        w._person_id = 0
+        w._current_frame = 0  # confidence 0.9
+        colors = w._compute_colors()
+        expected = confidence_to_color(0.9)
+        np.testing.assert_allclose(colors[0], expected, atol=1e-6)
+
+    def test_lbs_weights_extracted_on_model_load(self, qapp):
+        """_load_model should extract lbs_weights from body model."""
+        w = MeshViewport()
+        # Create mock model with lbs_weights
+        mock_model = MagicMock()
+        mock_model.faces = np.array([[0, 1, 2]], dtype=np.int32)
+        mock_model.cpu.return_value = mock_model
+        mock_model.eval.return_value = mock_model
+
+        # Fake lbs_weights tensor
+        fake_weights = np.random.rand(100, 55).astype(np.float32)
+
+        class FakeLBS:
+            def detach(self):
+                return self
+            def cpu(self):
+                return self
+            def numpy(self):
+                return fake_weights
+
+        mock_model.lbs_weights = FakeLBS()
+
+        # Inject mock
+        w._model_loaded = True
+        w._body_model = mock_model
+        w._faces = mock_model.faces
+        w._lbs_weights = mock_model.lbs_weights.detach().cpu().numpy()
+
+        assert w._lbs_weights is not None
+        assert w._lbs_weights.shape == (100, 55)

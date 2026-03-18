@@ -39,7 +39,7 @@ All spec-defined menu actions are wired and functional. Without session save/loa
 
 ### Known remaining spec gaps (lower priority)
 
-- 3D viewport color modes (`set_color_mode`) are stubbed — only solid color works. Joint influence and confidence modes not yet implemented.
+- [x] 3D viewport color modes: `views/mesh_viewport.py` — `set_color_mode()` fully implemented with three modes. **Solid**: skin-tone (default). **Joint**: per-vertex coloring from LBS weights argmax with 22-color body palette, hand joints inherit wrist color, jaw/eye joints inherit head color via `compute_joint_colors()`. **Confidence**: red→yellow→green gradient from per-frame confidence (reads `confidence_breakdown["overall"]` then falls back to raw `confidences` list) via `confidence_to_color()`. Colors recomputed in `_compute_colors()` called from `_upload_buffers()`. LBS weights extracted from SmplxLite model on load. PoseCorrectorPanel color dropdown already wired. Tests in `tests/test_mesh_viewport.py` (28 new: TestComputeJointColors 7, TestConfidenceToColor 8, TestMeshViewportColorMode 13). (896 total pass).
 - 3D viewport grid floor not implemented (orbit mode reference plane).
 - 3D viewport joint name text overlay (QPainter) not implemented.
 - FullPipelineWorker stages 3-6 (face, BVH/FBX, render) are stubs — depend on backend modules.

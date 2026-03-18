@@ -225,6 +225,33 @@ _JOINT_POINT_SIZE = 6.0
 _SELECTED_JOINT_POINT_SIZE = 12.0
 _BONE_LINE_WIDTH = 2.0
 
+# Joint color palette for per-joint vertex coloring — 22 distinct colors for body joints.
+# Hand joints (22–51) inherit the color of their parent wrist (L=20, R=21).
+_JOINT_PALETTE = np.array([
+    [0.90, 0.10, 0.10],  # 0  Pelvis — red
+    [0.10, 0.72, 0.30],  # 1  L_Hip — green
+    [0.30, 0.10, 0.72],  # 2  R_Hip — purple
+    [0.90, 0.50, 0.10],  # 3  Spine1 — orange
+    [0.10, 0.90, 0.50],  # 4  L_Knee — teal
+    [0.50, 0.10, 0.90],  # 5  R_Knee — violet
+    [0.90, 0.90, 0.10],  # 6  Spine2 — yellow
+    [0.10, 0.70, 0.90],  # 7  L_Ankle — sky blue
+    [0.72, 0.10, 0.60],  # 8  R_Ankle — magenta
+    [0.60, 0.80, 0.20],  # 9  Spine3 — lime
+    [0.20, 0.50, 0.80],  # 10 L_Foot — blue
+    [0.80, 0.30, 0.50],  # 11 R_Foot — rose
+    [0.40, 0.90, 0.90],  # 12 Neck — cyan
+    [0.90, 0.60, 0.40],  # 13 L_Collar — peach
+    [0.60, 0.40, 0.90],  # 14 R_Collar — lavender
+    [0.90, 0.20, 0.50],  # 15 Head — crimson
+    [0.20, 0.90, 0.20],  # 16 L_Shoulder — bright green
+    [0.20, 0.20, 0.90],  # 17 R_Shoulder — bright blue
+    [0.80, 0.80, 0.20],  # 18 L_Elbow — gold
+    [0.20, 0.80, 0.80],  # 19 R_Elbow — aqua
+    [0.90, 0.50, 0.70],  # 20 L_Wrist — pink
+    [0.50, 0.90, 0.70],  # 21 R_Wrist — mint
+], dtype=np.float32)
+
 
 # ---------------------------------------------------------------------------
 # Pure helper functions (testable without OpenGL)
@@ -541,6 +568,71 @@ _CV_TO_GL = np.array(
     dtype=np.float32,
 )
 
+def compute_joint_colors(
+    lbs_weights: np.ndarray,
+    palette: np.ndarray | None = None,
+) -> np.ndarray:
+    """Assign per-vertex RGB colors based on dominant LBS joint weight.
+
+    Parameters
+    ----------
+    lbs_weights : (V, J) float array
+        Linear blend skinning weights from the SMPL-X body model.
+    palette : (22, 3) float array, optional
+        Joint color palette.  Defaults to ``_JOINT_PALETTE``.
+
+    Returns
+    -------
+    (V, 3) float32 array of per-vertex RGB colors.
+
+    Hand joints (22+) inherit the color of their parent wrist
+    (L_Wrist=20 for left hand joints 22-36, R_Wrist=21 for right hand 37-51).
+    Joints beyond 51 (jaw/eyes) map to the Head color (15).
+    """
+    if palette is None:
+        palette = _JOINT_PALETTE
+
+    V, J = lbs_weights.shape
+    # Map each SMPL-X joint index → body palette index (0-21)
+    joint_map = np.zeros(J, dtype=np.int32)
+    for j in range(J):
+        if j < 22:
+            joint_map[j] = j
+        elif j < 37:
+            joint_map[j] = 20  # L_Wrist
+        elif j < 52:
+            joint_map[j] = 21  # R_Wrist
+        else:
+            joint_map[j] = 15  # Head (jaw/eyes)
+
+    # Find dominant joint per vertex
+    dominant = np.argmax(lbs_weights, axis=1)  # (V,)
+    palette_idx = joint_map[dominant]  # (V,)
+    return palette[palette_idx].astype(np.float32)
+
+
+def confidence_to_color(confidence: float) -> np.ndarray:
+    """Map a confidence value [0, 1] to an RGB color (red → yellow → green).
+
+    Parameters
+    ----------
+    confidence : float
+        Value in [0, 1].  Values outside this range are clamped.
+
+    Returns
+    -------
+    (3,) float32 RGB array.
+    """
+    c = float(np.clip(confidence, 0.0, 1.0))
+    # 0.0 → red, 0.5 → yellow, 1.0 → green
+    if c < 0.5:
+        t = c * 2.0
+        return np.array([1.0, t, 0.0], dtype=np.float32)
+    else:
+        t = (c - 0.5) * 2.0
+        return np.array([1.0 - t, 1.0, 0.0], dtype=np.float32)
+
+
 # Default skin-tone for mesh rendering (warm beige).
 _SKIN_COLOR = np.array([0.82, 0.72, 0.63], dtype=np.float32)
 
@@ -606,6 +698,10 @@ class MeshViewport(_BaseWidget):
         # SMPL-X body model (loaded lazily)
         self._body_model: object | None = None
         self._model_loaded: bool = False
+        self._lbs_weights: np.ndarray | None = None  # (V, J) from model
+
+        # Vertex color mode ("solid", "joint", "confidence")
+        self._color_mode: str = "solid"
 
         # Camera matrices
         self._projection = np.eye(4, dtype=np.float32)
@@ -718,7 +814,20 @@ class MeshViewport(_BaseWidget):
         self.camera_changed.emit(self._camera_state())
 
     def set_color_mode(self, mode: str):
-        """Set vertex color mode ('solid', 'joint', 'confidence'). Stub."""
+        """Set vertex color mode ('solid', 'joint', 'confidence').
+
+        Recomputes vertex colors and triggers a repaint.
+        """
+        if mode not in ("solid", "joint", "confidence"):
+            return
+        if mode == self._color_mode:
+            return
+        self._color_mode = mode
+        # Re-upload colors if we have vertices loaded
+        if self._vertices is not None and self._gl_ready:
+            self._upload_buffers()
+        if _HAS_GL:
+            self.update()
 
     def highlight_joint(self, joint_idx: int):
         """Highlight a joint in accent color and trigger repaint."""
@@ -1023,6 +1132,12 @@ class MeshViewport(_BaseWidget):
             # Extract face topology (static — does not change across frames)
             self._faces = np.asarray(self._body_model.faces, dtype=np.int32)
             self._n_faces = len(self._faces)
+
+            # Extract LBS weights for joint-influence coloring
+            if hasattr(self._body_model, "lbs_weights"):
+                self._lbs_weights = self._body_model.lbs_weights.detach().cpu().numpy()
+                logger.info("LBS weights: %s", self._lbs_weights.shape)
+
             logger.info("SMPL-X model loaded: %d faces", self._n_faces)
             return True
         except Exception as e:
@@ -1363,6 +1478,38 @@ class MeshViewport(_BaseWidget):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _compute_colors(self) -> np.ndarray:
+        """Compute per-vertex RGB colors based on current color mode.
+
+        Returns (V, 3) float32 array.
+        """
+        V = self._n_vertices
+
+        if self._color_mode == "joint" and self._lbs_weights is not None:
+            return compute_joint_colors(self._lbs_weights)
+
+        if self._color_mode == "confidence":
+            conf = 0.5  # default mid confidence
+            if self._session is not None and self._person_id >= 0:
+                track = self._session.person_tracks.get(self._person_id)
+                if track is not None:
+                    # Try confidence_breakdown["overall"] first, then raw confidences
+                    if (
+                        track.confidence_breakdown is not None
+                        and "overall" in track.confidence_breakdown
+                    ):
+                        vals = track.confidence_breakdown["overall"]
+                        if 0 <= self._current_frame < len(vals):
+                            conf = float(vals[self._current_frame])
+                    elif track.confidences is not None:
+                        if 0 <= self._current_frame < len(track.confidences):
+                            conf = float(track.confidences[self._current_frame])
+            color = confidence_to_color(conf)
+            return np.tile(color, (V, 1)).astype(np.float32)
+
+        # Default: solid skin tone
+        return np.tile(_SKIN_COLOR, (V, 1)).astype(np.float32)
+
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
         result = self._compute_vertices(self._person_id, self._current_frame)
@@ -1422,10 +1569,8 @@ class MeshViewport(_BaseWidget):
         gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
         gl.glEnableVertexAttribArray(1)
 
-        # Color VBO (location 2) — solid skin tone for now
-        colors = np.tile(_SKIN_COLOR, (self._n_vertices, 1)).astype(
-            np.float32
-        )
+        # Color VBO (location 2) — computed from current color mode
+        colors = self._compute_colors()
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo_color)
         gl.glBufferData(
             gl.GL_ARRAY_BUFFER,
