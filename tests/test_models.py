@@ -35,7 +35,7 @@ class TestSession:
         s.person_tracks[1] = PersonTrack(person_id=1, person_dir=Path("/tmp/p1"))
         s.person_tracks[2] = PersonTrack(person_id=2, person_dir=Path("/tmp/p2"))
         s.inactive_tracks = {3}
-        s.crossing_spans = [(100, 200, 1, 2)]
+        s.crossing_spans = {1: [(100, 200)]}
 
         path = tmp_path / "session.json"
         s.save(path)
@@ -51,7 +51,8 @@ class TestSession:
         assert 2 in loaded.person_tracks
         assert loaded.person_tracks[1].person_id == 1
         assert 3 in loaded.inactive_tracks
-        assert len(loaded.crossing_spans) == 1
+        assert 1 in loaded.crossing_spans
+        assert (100, 200) in loaded.crossing_spans[1]
 
     def test_reset(self):
         s = Session(video_path=Path("/tmp/test.mp4"), num_frames=50)

@@ -86,6 +86,7 @@ class IdentityInspector(QWidget):
     reprocess_requested = Signal(list)     # list of dirty person_ids
     bbox_overlay_changed = Signal(object)  # updated overlay data for video player
     keyframe_changed = Signal(int, int)    # person_id, frame_index
+    track_modified = Signal()              # tracks split/merged/swapped
 
     def __init__(self, session: Session, parent=None):
         super().__init__(parent)
@@ -96,6 +97,9 @@ class IdentityInspector(QWidget):
         # BBox edit state machine: None → "click1" → "click2" → None
         self._bbox_edit_state: str | None = None
         self._bbox_edit_corner1: tuple[int, int] | None = None
+
+        # Crossing span two-click state
+        self._crossing_start_frame: int | None = None
 
         self._setup_ui()
         self._connect_signals()
@@ -244,6 +248,74 @@ class IdentityInspector(QWidget):
 
         layout.addWidget(bbox_group)
 
+        # ---- Track Operations ----
+        track_ops_group = QGroupBox("Track Operations")
+        track_ops_layout = QVBoxLayout(track_ops_group)
+
+        # Swap row
+        swap_row = QHBoxLayout()
+        swap_row.addWidget(QLabel("Swap with:"))
+        self._swap_combo = QComboBox()
+        self._swap_combo.setMinimumWidth(80)
+        swap_row.addWidget(self._swap_combo, 1)
+        self._swap_btn = QPushButton("Swap IDs")
+        self._swap_btn.setToolTip("Swap person IDs from current frame onward")
+        swap_row.addWidget(self._swap_btn)
+        track_ops_layout.addLayout(swap_row)
+
+        # Split
+        self._split_btn = QPushButton("Split at Frame")
+        self._split_btn.setToolTip(
+            "Split track at current frame — subsequent frames become a new inactive track"
+        )
+        track_ops_layout.addWidget(self._split_btn)
+
+        # Merge row
+        merge_row = QHBoxLayout()
+        merge_row.addWidget(QLabel("Merge from:"))
+        self._merge_combo = QComboBox()
+        self._merge_combo.setMinimumWidth(80)
+        merge_row.addWidget(self._merge_combo, 1)
+        self._merge_btn = QPushButton("Merge")
+        self._merge_btn.setToolTip("Merge selected inactive track into current person")
+        merge_row.addWidget(self._merge_btn)
+        track_ops_layout.addLayout(merge_row)
+
+        # Crossing spans
+        crossing_label = QLabel("Crossing Spans")
+        crossing_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        track_ops_layout.addWidget(crossing_label)
+
+        crossing_row = QHBoxLayout()
+        self._crossing_start_btn = QPushButton("Mark Start")
+        self._crossing_start_btn.setToolTip("Mark start of a crossing/occlusion span")
+        crossing_row.addWidget(self._crossing_start_btn)
+        self._crossing_end_btn = QPushButton("Mark End")
+        self._crossing_end_btn.setToolTip("Mark end of the crossing span")
+        self._crossing_end_btn.setEnabled(False)
+        crossing_row.addWidget(self._crossing_end_btn)
+        track_ops_layout.addLayout(crossing_row)
+
+        self._crossing_status = QLabel("")
+        self._crossing_status.setStyleSheet("font-style: italic;")
+        track_ops_layout.addWidget(self._crossing_status)
+
+        self._crossing_table = QTableWidget(0, 4)
+        self._crossing_table.setHorizontalHeaderLabels(
+            ["Person", "Start", "End", "Actions"]
+        )
+        self._crossing_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._crossing_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._crossing_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._crossing_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._crossing_table.verticalHeader().hide()
+        self._crossing_table.setMaximumHeight(120)
+        track_ops_layout.addWidget(self._crossing_table)
+
+        layout.addWidget(track_ops_group)
+
         layout.addStretch()
 
     def _connect_signals(self):
@@ -260,6 +332,11 @@ class IdentityInspector(QWidget):
         self._cancel_edit_btn.clicked.connect(self._on_cancel_edit)
         self._interpolate_btn.clicked.connect(self._on_interpolate)
         self._apply_btn.clicked.connect(self._on_apply_all)
+        self._swap_btn.clicked.connect(self._on_swap_ids)
+        self._split_btn.clicked.connect(self._on_split_track)
+        self._merge_btn.clicked.connect(self._on_merge_track)
+        self._crossing_start_btn.clicked.connect(self._on_crossing_start)
+        self._crossing_end_btn.clicked.connect(self._on_crossing_end)
 
     # ------------------------------------------------------------------
     # Public API
@@ -293,6 +370,7 @@ class IdentityInspector(QWidget):
     def refresh(self):
         """Rebuild all UI from session state (e.g., after pipeline finishes)."""
         self._update_person_selector()
+        self._update_merge_combo()
         if self._current_person_id >= 0:
             self._refresh_for_person()
 
@@ -405,6 +483,9 @@ class IdentityInspector(QWidget):
         self._update_timeline()
         self._update_confidence_breakdown(self._current_frame)
         self._update_keyframe_table()
+        self._update_swap_combo()
+        self._update_merge_combo()
+        self._update_crossing_table()
 
     def _update_timeline(self):
         """Update the confidence timeline for the current person."""
@@ -819,6 +900,322 @@ class IdentityInspector(QWidget):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as fp:
             json.dump(data, fp, indent=2)
+
+    # ------------------------------------------------------------------
+    # Track operations
+    # ------------------------------------------------------------------
+
+    def _on_swap_ids(self):
+        """Swap bboxes and confidences with target from current frame onward.
+
+        Why: When the tracker switches person IDs mid-sequence (e.g., after an
+        occlusion), swapping corrects the identity assignment from that point on
+        without requiring manual bbox editing of every frame.
+        """
+        if self._current_person_id < 0:
+            return
+        target_id = self._swap_combo.currentData()
+        if target_id is None or target_id == self._current_person_id:
+            return
+
+        track_a = self._session.person_tracks.get(self._current_person_id)
+        track_b = self._session.person_tracks.get(target_id)
+        if track_a is None or track_b is None:
+            return
+
+        frame_idx = self._current_frame
+
+        # Swap numpy arrays from frame_idx onward
+        for attr in ("bboxes", "original_bboxes", "bbox_corrections"):
+            arr_a = getattr(track_a, attr, None)
+            arr_b = getattr(track_b, attr, None)
+            if arr_a is not None and arr_b is not None:
+                n = min(len(arr_a), len(arr_b))
+                for f in range(frame_idx, n):
+                    arr_a[f], arr_b[f] = arr_b[f].copy(), arr_a[f].copy()
+
+        # Swap confidences from frame_idx onward
+        if track_a.confidences is not None and track_b.confidences is not None:
+            n = min(len(track_a.confidences), len(track_b.confidences))
+            for f in range(frame_idx, n):
+                track_a.confidences[f], track_b.confidences[f] = (
+                    track_b.confidences[f], track_a.confidences[f],
+                )
+
+        # Add verified keyframes at the swap point
+        for track in (track_a, track_b):
+            existing = [kf for kf in track.keyframes if kf["frame"] == frame_idx]
+            if existing:
+                existing[0]["verified"] = True
+            else:
+                track.keyframes.append({"frame": frame_idx, "verified": True})
+
+        # Mark dirty
+        self._session.dirty_persons.add(self._current_person_id)
+        self._session.dirty_persons.add(target_id)
+        self.person_dirty.emit(self._current_person_id)
+        self.person_dirty.emit(target_id)
+
+        self._refresh_for_person()
+        self.track_modified.emit()
+        log.info(
+            "Swapped IDs %d and %d from frame %d onward",
+            self._current_person_id, target_id, frame_idx,
+        )
+
+    def _on_split_track(self):
+        """Split track at current frame — frames onward become new inactive track.
+
+        Why: When a person exits and re-enters the scene, the tracker may assign
+        a single long track spanning both appearances. Splitting isolates the
+        segments so they can be independently verified or merged with other tracks.
+        """
+        track = self._get_current_track()
+        if track is None:
+            return
+
+        frame_idx = self._current_frame
+        num_frames = self._session.num_frames
+
+        if frame_idx <= 0 or frame_idx >= num_frames - 1:
+            log.warning(
+                "Cannot split at frame %d (must be 1..%d)", frame_idx, num_frames - 2
+            )
+            return
+
+        # Generate new person ID
+        all_ids = set(self._session.person_tracks.keys())
+        new_id = max(all_ids) + 1 if all_ids else 0
+        new_track = PersonTrack(person_id=new_id)
+
+        # Split bboxes
+        if track.bboxes is not None:
+            new_bboxes = np.zeros_like(track.bboxes)
+            new_bboxes[frame_idx:] = track.bboxes[frame_idx:]
+            new_track.bboxes = new_bboxes
+            track.bboxes[frame_idx:] = 0
+
+        # Split confidences
+        if track.confidences is not None:
+            new_confs = [0.0] * len(track.confidences)
+            for f in range(frame_idx, len(track.confidences)):
+                new_confs[f] = track.confidences[f]
+                track.confidences[f] = 0.0
+            new_track.confidences = new_confs
+
+        # Split bbox_corrections
+        if track.bbox_corrections is not None:
+            new_corrections = np.zeros_like(track.bbox_corrections)
+            new_corrections[frame_idx:] = track.bbox_corrections[frame_idx:]
+            new_track.bbox_corrections = new_corrections
+            track.bbox_corrections[frame_idx:] = 0
+
+        # Split keyframes
+        track.keyframes, new_track.keyframes = (
+            [kf for kf in track.keyframes if kf["frame"] < frame_idx],
+            [kf for kf in track.keyframes if kf["frame"] >= frame_idx],
+        )
+
+        # Add to session as inactive
+        self._session.person_tracks[new_id] = new_track
+        self._session.inactive_tracks.add(new_id)
+
+        # Mark dirty
+        self._session.dirty_persons.add(self._current_person_id)
+        self.person_dirty.emit(self._current_person_id)
+
+        self._refresh_for_person()
+        self.track_modified.emit()
+        log.info(
+            "Split person %d at frame %d -> new inactive track %d",
+            self._current_person_id, frame_idx, new_id,
+        )
+
+    def _on_merge_track(self):
+        """Merge selected inactive track into current active person.
+
+        Why: After splitting or when the tracker creates fragmented tracks,
+        merging recombines identity segments that belong to the same person.
+        Non-zero frames from the source overwrite the target.
+        """
+        if self._current_person_id < 0:
+            return
+        source_id = self._merge_combo.currentData()
+        if source_id is None:
+            return
+
+        source = self._session.person_tracks.get(source_id)
+        target = self._get_current_track()
+        if source is None or target is None:
+            return
+
+        # Merge bboxes: non-zero source frames overwrite target
+        if source.bboxes is not None:
+            if target.bboxes is None:
+                target.bboxes = source.bboxes.copy()
+            else:
+                n = min(len(source.bboxes), len(target.bboxes))
+                for f in range(n):
+                    if not np.all(source.bboxes[f] == 0):
+                        target.bboxes[f] = source.bboxes[f].copy()
+
+        # Merge confidences: non-zero source overwrites target
+        if source.confidences is not None:
+            if target.confidences is None:
+                target.confidences = list(source.confidences)
+            else:
+                n = min(len(source.confidences), len(target.confidences))
+                for f in range(n):
+                    if source.confidences[f] > 0:
+                        target.confidences[f] = source.confidences[f]
+
+        # Merge bbox_corrections
+        if source.bbox_corrections is not None:
+            if target.bbox_corrections is None:
+                target.bbox_corrections = source.bbox_corrections.copy()
+            else:
+                n = min(len(source.bbox_corrections), len(target.bbox_corrections))
+                for f in range(n):
+                    if not np.all(source.bbox_corrections[f] == 0):
+                        target.bbox_corrections[f] = source.bbox_corrections[f].copy()
+
+        # Merge keyframes
+        existing_frames = {kf["frame"] for kf in target.keyframes}
+        for kf in source.keyframes:
+            if kf["frame"] not in existing_frames:
+                target.keyframes.append(kf)
+
+        # Remove source from session
+        del self._session.person_tracks[source_id]
+        self._session.inactive_tracks.discard(source_id)
+
+        # Mark dirty
+        self._session.dirty_persons.add(self._current_person_id)
+        self.person_dirty.emit(self._current_person_id)
+
+        self._refresh_for_person()
+        self.track_modified.emit()
+        log.info("Merged track %d into person %d", source_id, self._current_person_id)
+
+    def _on_crossing_start(self):
+        """Mark start of a crossing/occlusion span at the current frame."""
+        if self._current_person_id < 0:
+            return
+        self._crossing_start_frame = self._current_frame
+        self._crossing_status.setText(
+            f"Start marked at frame {self._current_frame}. Click 'Mark End'."
+        )
+        self._crossing_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+        self._crossing_start_btn.setEnabled(False)
+        self._crossing_end_btn.setEnabled(True)
+
+    def _on_crossing_end(self):
+        """Complete crossing span and store in session."""
+        if self._current_person_id < 0 or self._crossing_start_frame is None:
+            return
+
+        start = self._crossing_start_frame
+        end = self._current_frame
+
+        if end <= start:
+            self._crossing_status.setText(
+                f"End frame ({end}) must be after start ({start})"
+            )
+            self._crossing_status.setStyleSheet("font-style: italic; color: #ff6b6b;")
+            return
+
+        pid = self._current_person_id
+        if pid not in self._session.crossing_spans:
+            self._session.crossing_spans[pid] = []
+        self._session.crossing_spans[pid].append((start, end))
+        self._session.crossing_spans[pid].sort()
+
+        # Reset state
+        self._crossing_start_frame = None
+        self._crossing_status.setText(f"Span added: frames {start}\u2013{end}")
+        self._crossing_status.setStyleSheet("font-style: italic; color: #4ecca3;")
+        self._crossing_start_btn.setEnabled(True)
+        self._crossing_end_btn.setEnabled(False)
+
+        self._update_crossing_table()
+        log.info("Crossing span for person %d: frames %d-%d", pid, start, end)
+
+    def _on_crossing_delete(self, person_id: int, start: int, end: int):
+        """Remove a crossing span from session and refresh table."""
+        if person_id in self._session.crossing_spans:
+            self._session.crossing_spans[person_id] = [
+                (s, e)
+                for s, e in self._session.crossing_spans[person_id]
+                if not (s == start and e == end)
+            ]
+            if not self._session.crossing_spans[person_id]:
+                del self._session.crossing_spans[person_id]
+        self._update_crossing_table()
+
+    # ------------------------------------------------------------------
+    # Track operations helpers
+    # ------------------------------------------------------------------
+
+    def _update_swap_combo(self):
+        """Rebuild swap target combo — all active persons except current."""
+        self._swap_combo.blockSignals(True)
+        self._swap_combo.clear()
+        for pid in sorted(self._session.person_tracks.keys()):
+            if pid != self._current_person_id and pid not in self._session.inactive_tracks:
+                self._swap_combo.addItem(f"Person {pid}", pid)
+        self._swap_combo.blockSignals(False)
+
+    def _update_merge_combo(self):
+        """Rebuild merge source combo — all inactive tracks with frame info."""
+        self._merge_combo.blockSignals(True)
+        self._merge_combo.clear()
+        for pid in sorted(self._session.inactive_tracks):
+            track = self._session.person_tracks.get(pid)
+            if track is None:
+                continue
+            label = f"Track {pid}"
+            if track.bboxes is not None:
+                nonzero = np.any(track.bboxes != 0, axis=1)
+                count = int(np.sum(nonzero))
+                frames = np.where(nonzero)[0]
+                if len(frames) > 0:
+                    label += f" (frames {frames[0]}-{frames[-1]}, {count} dets)"
+            self._merge_combo.addItem(label, pid)
+        self._merge_combo.blockSignals(False)
+
+    def _update_crossing_table(self):
+        """Rebuild crossing spans table from session data."""
+        self._crossing_table.setRowCount(0)
+
+        rows: list[tuple[int, int, int]] = []
+        for pid, spans in sorted(self._session.crossing_spans.items()):
+            for start, end in sorted(spans):
+                rows.append((pid, start, end))
+
+        self._crossing_table.setRowCount(len(rows))
+        for row_idx, (pid, start, end) in enumerate(rows):
+            pid_item = QTableWidgetItem(f"Person {pid}")
+            pid_item.setTextAlignment(Qt.AlignCenter)
+            self._crossing_table.setItem(row_idx, 0, pid_item)
+
+            start_item = QTableWidgetItem(str(start))
+            start_item.setTextAlignment(Qt.AlignCenter)
+            self._crossing_table.setItem(row_idx, 1, start_item)
+
+            end_item = QTableWidgetItem(str(end))
+            end_item.setTextAlignment(Qt.AlignCenter)
+            self._crossing_table.setItem(row_idx, 2, end_item)
+
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 0, 2, 0)
+            del_btn = QPushButton("Del")
+            del_btn.setFixedSize(32, 22)
+            del_btn.clicked.connect(
+                lambda checked, p=pid, s=start, e=end: self._on_crossing_delete(p, s, e)
+            )
+            actions_layout.addWidget(del_btn)
+            self._crossing_table.setCellWidget(row_idx, 3, actions_widget)
 
 
 # ------------------------------------------------------------------

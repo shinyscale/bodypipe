@@ -293,6 +293,7 @@ class MultiPersonTab(QWidget):
         self._identity_panel.person_changed.connect(self._on_identity_person_changed)
         self._identity_panel.bbox_overlay_changed.connect(self._on_bbox_overlay_changed)
         self._identity_panel.keyframe_changed.connect(self._on_keyframe_changed)
+        self._identity_panel.track_modified.connect(self._on_tracks_modified)
 
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
@@ -327,6 +328,12 @@ class MultiPersonTab(QWidget):
 
     def _on_keyframe_changed(self, person_id: int, frame_idx: int):
         """Redraw overlay when keyframes change (may affect bbox corrections)."""
+        self._show_frame(self._session.current_frame)
+
+    def _on_tracks_modified(self):
+        """Handle track modifications (swap, split, merge) — refresh everything."""
+        self._populate_tracks()
+        self._identity_panel.refresh()
         self._show_frame(self._session.current_frame)
 
     def _show_frame(self, frame_idx: int):

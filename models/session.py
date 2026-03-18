@@ -72,7 +72,7 @@ class Session:
     # Multi-person tracking
     person_tracks: dict[int, PersonTrack] = field(default_factory=dict)
     inactive_tracks: set[int] = field(default_factory=set)
-    crossing_spans: list[tuple[int, int, int, int]] = field(default_factory=list)
+    crossing_spans: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
 
     # Pose correction (CorrectionTrack objects, keyed by person_id)
     correction_tracks: dict[int, Any] = field(default_factory=dict)
@@ -102,7 +102,9 @@ class Session:
                 str(k): v.to_dict() for k, v in self.person_tracks.items()
             },
             "inactive_tracks": list(self.inactive_tracks),
-            "crossing_spans": self.crossing_spans,
+            "crossing_spans": {
+                str(k): v for k, v in self.crossing_spans.items()
+            },
         }
         if self.camera_K is not None:
             d["camera_K"] = self.camera_K.tolist()
@@ -123,7 +125,14 @@ class Session:
             use_dpvo=data.get("use_dpvo", False),
             focal_mm=data.get("focal_mm", 24.0),
             inactive_tracks=set(data.get("inactive_tracks", [])),
-            crossing_spans=[tuple(s) for s in data.get("crossing_spans", [])],
+            crossing_spans=(
+                {
+                    int(k): [tuple(s) for s in v]
+                    for k, v in data.get("crossing_spans", {}).items()
+                }
+                if isinstance(data.get("crossing_spans", {}), dict)
+                else {}
+            ),
         )
         for k, v in data.get("person_tracks", {}).items():
             session.person_tracks[int(k)] = PersonTrack.from_dict(v)
