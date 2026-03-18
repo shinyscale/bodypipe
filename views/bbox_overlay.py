@@ -242,3 +242,40 @@ def render_bbox_overlay(
             cv2.circle(out, dot_center, 5, dot_color, -1, cv2.LINE_AA)
 
     return out
+
+
+def render_edit_preview(
+    frame: np.ndarray,
+    edit_state: dict,
+) -> np.ndarray:
+    """Render bbox edit preview markers on frame.
+
+    Draws a crosshair at corner1 while waiting for the second click.
+    The frame is assumed to already be a copy (from render_bbox_overlay).
+
+    Args:
+        frame: RGB numpy array — modified in-place if already a copy.
+        edit_state: Dict with 'corner1' key → (x, y) pixel coords.
+
+    Returns:
+        RGB numpy array with preview drawn.
+    """
+    if frame is None or not edit_state:
+        return frame
+
+    out = frame.copy()
+    corner1 = edit_state.get("corner1")
+    accent = _hex_to_rgb("#e94560")
+
+    if corner1:
+        x, y = int(corner1[0]), int(corner1[1])
+        h, w = out.shape[:2]
+        # Draw crosshair at first corner
+        x1_line = max(0, x - 15)
+        x2_line = min(w - 1, x + 15)
+        y1_line = max(0, y - 15)
+        y2_line = min(h - 1, y + 15)
+        cv2.line(out, (x1_line, y), (x2_line, y), accent, 2, cv2.LINE_AA)
+        cv2.line(out, (x, y1_line), (x, y2_line), accent, 2, cv2.LINE_AA)
+
+    return out

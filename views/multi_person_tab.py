@@ -40,7 +40,7 @@ from views.video_player import VideoPlayer
 from views.confidence_timeline import ConfidenceTimeline
 from views.identity_inspector import IdentityInspector
 from views.single_person_tab import _DropArea, VIDEO_EXTENSIONS
-from views.bbox_overlay import render_bbox_overlay
+from views.bbox_overlay import render_bbox_overlay, render_edit_preview
 from workers.pipeline_orchestrator import MultiPersonWorker
 
 
@@ -108,6 +108,7 @@ class MultiPersonTab(QWidget):
         self._worker: MultiPersonWorker | None = None
         self._running = False
         self._show_all_tracks = False
+        self._edit_preview: dict | None = None
 
         self._setup_ui()
         self._connect_signals()
@@ -281,6 +282,9 @@ class MultiPersonTab(QWidget):
         # Frame sync: video player → track overview + identity inspector
         self._video_player.frame_changed.connect(self._on_frame_changed)
 
+        # Frame click → identity inspector bbox editing
+        self._video_player.frame_clicked.connect(self._identity_panel.on_frame_click)
+
         # Track overview → seek + select person
         self._track_overview.person_clicked.connect(self._on_track_clicked)
 
@@ -313,10 +317,12 @@ class MultiPersonTab(QWidget):
         self._show_frame(self._session.current_frame)
 
     def _on_bbox_overlay_changed(self, data: object):
-        """Handle show-all-tracks toggle or other overlay parameter changes."""
+        """Handle show-all-tracks toggle, edit preview, or other overlay changes."""
         if isinstance(data, dict):
             if "show_all" in data:
                 self._show_all_tracks = data["show_all"]
+            if "edit_preview" in data:
+                self._edit_preview = data["edit_preview"]
         self._show_frame(self._session.current_frame)
 
     def _on_keyframe_changed(self, person_id: int, frame_idx: int):
@@ -324,7 +330,7 @@ class MultiPersonTab(QWidget):
         self._show_frame(self._session.current_frame)
 
     def _show_frame(self, frame_idx: int):
-        """Display the current frame with bbox overlays."""
+        """Display the current frame with bbox overlays and edit preview."""
         frame = self._video_player.get_raw_frame(frame_idx)
         if frame is not None:
             composited = render_bbox_overlay(
@@ -334,6 +340,8 @@ class MultiPersonTab(QWidget):
                 selected_person=self._session.selected_person,
                 show_all_tracks=self._show_all_tracks,
             )
+            if self._edit_preview:
+                composited = render_edit_preview(composited, self._edit_preview)
             self._video_player.set_frame(composited)
 
     # ------------------------------------------------------------------

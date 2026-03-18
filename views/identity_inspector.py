@@ -1,13 +1,18 @@
 """Identity Inspector panel — person selection, confidence visualization,
-keyframe management, and identity verification.
+keyframe management, bbox editing, and identity verification.
 
 Why: The identity inspector is the primary tool for verifying and correcting
 multi-person tracking results. It provides per-person confidence visualization,
-keyframe-based annotation, and CRUD operations for managing tracked identities.
-All state flows through Session.person_tracks — no module-level dicts.
+keyframe-based annotation, two-click bbox editing with interpolation, and CRUD
+operations for managing tracked identities. All state flows through
+Session.person_tracks — no module-level dicts.
 """
 
 from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtWidgets import (
@@ -29,6 +34,8 @@ from PySide6.QtGui import QColor
 
 from models.session import Session, PersonTrack
 from views.confidence_timeline import ConfidenceTimeline
+
+log = logging.getLogger(__name__)
 
 
 # Confidence metric names and their display labels
@@ -85,6 +92,10 @@ class IdentityInspector(QWidget):
         self._session = session
         self._current_person_id: int = -1
         self._current_frame: int = 0
+
+        # BBox edit state machine: None → "click1" → "click2" → None
+        self._bbox_edit_state: str | None = None
+        self._bbox_edit_corner1: tuple[int, int] | None = None
 
         self._setup_ui()
         self._connect_signals()
@@ -200,6 +211,39 @@ class IdentityInspector(QWidget):
 
         layout.addWidget(kf_group)
 
+        # ---- BBox Editing ----
+        bbox_group = QGroupBox("BBox Editing")
+        bbox_layout = QVBoxLayout(bbox_group)
+
+        self._bbox_status = QLabel("Idle")
+        self._bbox_status.setStyleSheet("font-style: italic;")
+        bbox_layout.addWidget(self._bbox_status)
+
+        bbox_btn_row1 = QHBoxLayout()
+        self._edit_bbox_btn = QPushButton("Edit BBox")
+        self._edit_bbox_btn.setToolTip("Start two-click bbox editing on video frame")
+        bbox_btn_row1.addWidget(self._edit_bbox_btn)
+
+        self._cancel_edit_btn = QPushButton("Cancel Edit")
+        self._cancel_edit_btn.setToolTip("Abort current bbox edit")
+        self._cancel_edit_btn.setEnabled(False)
+        bbox_btn_row1.addWidget(self._cancel_edit_btn)
+        bbox_layout.addLayout(bbox_btn_row1)
+
+        bbox_btn_row2 = QHBoxLayout()
+        self._interpolate_btn = QPushButton("Interpolate")
+        self._interpolate_btn.setToolTip(
+            "Linear interpolation of bbox corrections between keyframes"
+        )
+        bbox_btn_row2.addWidget(self._interpolate_btn)
+
+        self._apply_btn = QPushButton("Apply All")
+        self._apply_btn.setToolTip("Save bbox corrections to disk")
+        bbox_btn_row2.addWidget(self._apply_btn)
+        bbox_layout.addLayout(bbox_btn_row2)
+
+        layout.addWidget(bbox_group)
+
         layout.addStretch()
 
     def _connect_signals(self):
@@ -212,6 +256,10 @@ class IdentityInspector(QWidget):
         self._next_kf_btn.clicked.connect(self._on_next_keyframe)
         self._show_all_tracks.toggled.connect(self._on_show_all_toggled)
         self._keyframe_table.cellDoubleClicked.connect(self._on_table_double_clicked)
+        self._edit_bbox_btn.clicked.connect(self._on_edit_bbox)
+        self._cancel_edit_btn.clicked.connect(self._on_cancel_edit)
+        self._interpolate_btn.clicked.connect(self._on_interpolate)
+        self._apply_btn.clicked.connect(self._on_apply_all)
 
     # ------------------------------------------------------------------
     # Public API
@@ -222,6 +270,10 @@ class IdentityInspector(QWidget):
         if person_id == self._current_person_id:
             return
         self._current_person_id = person_id
+
+        # Cancel any in-progress bbox edit when switching person
+        if self._bbox_edit_state is not None:
+            self._cancel_bbox_edit()
 
         # Update combo box without re-triggering signal
         idx = self._person_combo.findData(person_id)
@@ -243,6 +295,83 @@ class IdentityInspector(QWidget):
         self._update_person_selector()
         if self._current_person_id >= 0:
             self._refresh_for_person()
+
+    def on_frame_click(self, x_norm: float, y_norm: float):
+        """Handle click on video frame during bbox editing.
+
+        Called by MultiPersonTab when VideoPlayer emits frame_clicked.
+        Coordinates are normalized [0, 1] in image space.
+        """
+        if self._bbox_edit_state is None:
+            return
+
+        track = self._get_current_track()
+        if track is None:
+            return
+
+        # Convert normalized coords to pixel coords
+        x_px = int(x_norm * self._session.img_width)
+        y_px = int(y_norm * self._session.img_height)
+
+        if self._bbox_edit_state == "click1":
+            # First click: store top-left corner
+            self._bbox_edit_corner1 = (x_px, y_px)
+            self._bbox_edit_state = "click2"
+            self._update_bbox_edit_status()
+            # Emit overlay to show crosshair at corner1
+            self.bbox_overlay_changed.emit({
+                "edit_preview": {"corner1": self._bbox_edit_corner1}
+            })
+
+        elif self._bbox_edit_state == "click2":
+            # Second click: complete the bbox
+            x1, y1 = self._bbox_edit_corner1
+            x2, y2 = x_px, y_px
+
+            # Normalize: ensure x1 < x2, y1 < y2
+            bbox = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+
+            # Enforce minimum size (20px)
+            if bbox[2] - bbox[0] < 20:
+                bbox[2] = bbox[0] + 20
+            if bbox[3] - bbox[1] < 20:
+                bbox[3] = bbox[1] + 20
+
+            # Clamp to image bounds
+            bbox[0] = max(0, bbox[0])
+            bbox[1] = max(0, bbox[1])
+            bbox[2] = min(self._session.img_width - 1, bbox[2])
+            bbox[3] = min(self._session.img_height - 1, bbox[3])
+
+            # Store correction
+            self._store_bbox_correction(track, self._current_frame, bbox)
+
+            # Add keyframe at this frame if not present
+            if not any(kf["frame"] == self._current_frame for kf in track.keyframes):
+                track.keyframes.append({
+                    "frame": self._current_frame,
+                    "verified": False,
+                })
+
+            # Mark person dirty
+            self._session.dirty_persons.add(self._current_person_id)
+            self.person_dirty.emit(self._current_person_id)
+
+            log.info(
+                "BBox correction applied: person=%d frame=%d bbox=%s",
+                self._current_person_id, self._current_frame, bbox,
+            )
+
+            # Reset edit state
+            self._bbox_edit_state = None
+            self._bbox_edit_corner1 = None
+            self._update_bbox_edit_status()
+
+            # Refresh displays
+            self._update_keyframe_table()
+            self._update_timeline()
+            self.keyframe_changed.emit(self._current_person_id, self._current_frame)
+            self.bbox_overlay_changed.emit({"edit_preview": None})
 
     # ------------------------------------------------------------------
     # Internal updates
@@ -571,3 +700,188 @@ class IdentityInspector(QWidget):
         if item:
             frame = int(item.text())
             self.frame_requested.emit(frame)
+
+    # ------------------------------------------------------------------
+    # BBox editing
+    # ------------------------------------------------------------------
+
+    def _on_edit_bbox(self):
+        """Enter bbox edit mode — next two clicks define top-left and bottom-right."""
+        track = self._get_current_track()
+        if track is None:
+            return
+        self._bbox_edit_state = "click1"
+        self._bbox_edit_corner1 = None
+        self._update_bbox_edit_status()
+
+    def _on_cancel_edit(self):
+        """Abort current bbox edit."""
+        self._cancel_bbox_edit()
+
+    def _cancel_bbox_edit(self):
+        """Reset bbox edit state machine to idle."""
+        self._bbox_edit_state = None
+        self._bbox_edit_corner1 = None
+        self._update_bbox_edit_status()
+        self.bbox_overlay_changed.emit({"edit_preview": None})
+
+    def _update_bbox_edit_status(self):
+        """Update status label and button enabled states for bbox edit mode."""
+        editing = self._bbox_edit_state is not None
+        self._edit_bbox_btn.setEnabled(not editing)
+        self._cancel_edit_btn.setEnabled(editing)
+
+        if self._bbox_edit_state == "click1":
+            self._bbox_status.setText("Click top-left corner on video frame")
+            self._bbox_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+        elif self._bbox_edit_state == "click2":
+            self._bbox_status.setText("Click bottom-right corner on video frame")
+            self._bbox_status.setStyleSheet("font-style: italic; color: #ffd93d;")
+        else:
+            self._bbox_status.setText("Idle")
+            self._bbox_status.setStyleSheet("font-style: italic;")
+
+    def _store_bbox_correction(
+        self, track: PersonTrack, frame_idx: int, bbox: list[float]
+    ):
+        """Store a bbox correction [x1, y1, x2, y2] for a specific frame."""
+        # Ensure original_bboxes are backed up before first correction
+        if track.original_bboxes is None and track.bboxes is not None:
+            track.original_bboxes = track.bboxes.copy()
+
+        # Initialize corrections array if needed
+        if track.bbox_corrections is None:
+            n = max(self._session.num_frames, frame_idx + 1)
+            track.bbox_corrections = np.zeros((n, 4), dtype=float)
+        elif frame_idx >= len(track.bbox_corrections):
+            # Extend array
+            old = track.bbox_corrections
+            track.bbox_corrections = np.zeros((frame_idx + 1, 4), dtype=float)
+            track.bbox_corrections[: len(old)] = old
+
+        track.bbox_corrections[frame_idx] = bbox
+
+    def _on_interpolate(self):
+        """Interpolate bbox corrections between keyframes using delta-space blending.
+
+        Works in delta space (correction - original) so that small adjustments
+        blend smoothly across frames. Requires at least two corrected keyframes.
+        """
+        track = self._get_current_track()
+        if track is None or track.bbox_corrections is None:
+            return
+
+        original = (
+            track.original_bboxes if track.original_bboxes is not None
+            else track.bboxes
+        )
+        if original is None:
+            return
+
+        result = interpolate_bbox_corrections(original, track.bbox_corrections)
+        track.bbox_corrections = result
+
+        self._session.dirty_persons.add(self._current_person_id)
+        self.person_dirty.emit(self._current_person_id)
+        self.keyframe_changed.emit(self._current_person_id, self._current_frame)
+        log.info("BBox interpolation applied for person %d", self._current_person_id)
+
+    def _on_apply_all(self):
+        """Save bbox corrections to disk for the current person."""
+        track = self._get_current_track()
+        if track is None or track.bbox_corrections is None:
+            return
+
+        self._save_bbox_corrections(track)
+        self.bbox_overlay_changed.emit({"applied": True})
+        log.info("BBox corrections saved for person %d", self._current_person_id)
+
+    def _save_bbox_corrections(self, track: PersonTrack):
+        """Persist bbox corrections to JSON at person_dir/bbox_corrections.json."""
+        if track.person_dir is None:
+            log.warning(
+                "Cannot save bbox corrections: person_dir is None for person %d",
+                track.person_id,
+            )
+            return
+
+        corrections = track.bbox_corrections
+        if corrections is None:
+            return
+
+        # Build sparse dict of non-zero corrections
+        data: dict = {"person_id": track.person_id, "corrections": {}}
+        for f in range(len(corrections)):
+            if not np.all(corrections[f] == 0):
+                data["corrections"][str(f)] = corrections[f].tolist()
+
+        out_path = Path(track.person_dir) / "bbox_corrections.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as fp:
+            json.dump(data, fp, indent=2)
+
+
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
+
+
+def interpolate_bbox_corrections(
+    original: np.ndarray, corrections: np.ndarray
+) -> np.ndarray:
+    """Linear interpolation of bbox corrections in delta space.
+
+    Why delta space: interpolating the difference between corrected and original
+    bboxes produces smoother results than interpolating absolute coordinates.
+    A 5px nudge at frame 10 and 10px at frame 20 blends naturally between them.
+
+    Args:
+        original: (N, 4) original bboxes.
+        corrections: (N, 4) correction array — non-zero entries are user edits.
+
+    Returns:
+        (N, 4) interpolated corrections array.
+    """
+    n = len(original)
+    result = corrections.copy()
+
+    # Find frames with non-zero corrections
+    corrected_frames = [f for f in range(min(n, len(corrections)))
+                        if not np.all(corrections[f] == 0)]
+
+    if len(corrected_frames) < 2:
+        return result  # Need at least 2 points to interpolate
+
+    # Compute deltas at corrected frames
+    deltas = {}
+    for f in corrected_frames:
+        deltas[f] = corrections[f] - original[f]
+
+    sorted_frames = sorted(corrected_frames)
+    first_f = sorted_frames[0]
+    last_f = sorted_frames[-1]
+
+    # Before first correction: constant extrapolation
+    first_delta = deltas[first_f]
+    for f in range(0, first_f):
+        if f < n:
+            result[f] = original[f] + first_delta
+
+    # Between corrections: linear interpolation of delta
+    for i in range(len(sorted_frames) - 1):
+        f_a = sorted_frames[i]
+        f_b = sorted_frames[i + 1]
+        delta_a = deltas[f_a]
+        delta_b = deltas[f_b]
+        span = f_b - f_a
+
+        for f in range(f_a + 1, f_b):
+            t = (f - f_a) / span
+            result[f] = original[f] + (1 - t) * delta_a + t * delta_b
+
+    # After last correction: constant extrapolation
+    last_delta = deltas[last_f]
+    for f in range(last_f + 1, min(n, len(result))):
+        result[f] = original[f] + last_delta
+
+    return result
