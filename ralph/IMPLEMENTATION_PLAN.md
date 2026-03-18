@@ -130,10 +130,11 @@ Full spec: `spec/ux-overhaul.md`
 
 **Files:** deleted 3 tab files, new `views/track_overview.py`, updated `app_window.py`, `views/dock_widgets.py`, 12 test files
 
-### Commit 1F: Remove backward-compat shims *(cleanup)*
+### Commit 1F: Remove backward-compat shims *(DONE)*
 
-- [ ] Drop `_tab_single`, `_tab_perf`, `_tab_multi` properties
-- [ ] Final test cleanup
+- [x] Dropped `_tab_single`, `_tab_perf`, `_tab_multi` properties from `app_window.py`
+- [x] No test references remained (already cleaned in Commit 1E)
+- [x] All 1227 tests pass
 
 ---
 

@@ -325,24 +325,6 @@ class AppWindow(QMainWindow):
         self._restore_pipeline_configs()
 
     # ------------------------------------------------------------------
-    # Backward-compat properties (point to settings widgets so existing
-    # tests that access _tab_single._static_cam etc. keep working).
-    # Removed in Commit 1F.
-    # ------------------------------------------------------------------
-
-    @property
-    def _tab_single(self):
-        return self._single_settings
-
-    @property
-    def _tab_perf(self):
-        return self._perf_settings
-
-    @property
-    def _tab_multi(self):
-        return self._multi_settings
-
-    # ------------------------------------------------------------------
     # UI Setup
     # ------------------------------------------------------------------
 
