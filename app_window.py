@@ -23,6 +23,7 @@ from models.session import Session
 from views.single_person_tab import SinglePersonTab
 from views.perf_capture_tab import PerfCaptureTab
 from views.multi_person_tab import MultiPersonTab
+from views.keyboard_shortcuts_dialog import KeyboardShortcutsDialog
 
 # Theme colors matching Gradio dark mode
 COLORS = {
@@ -294,6 +295,12 @@ class AppWindow(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
+        shortcuts_action = QAction("&Keyboard Shortcuts", self)
+        shortcuts_action.triggered.connect(self._on_keyboard_shortcuts)
+        help_menu.addAction(shortcuts_action)
+
+        help_menu.addSeparator()
+
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
@@ -527,6 +534,13 @@ class AppWindow(QMainWindow):
                 self._update_recent_menu()
             return
         self._load_session(path)
+
+    # --- Keyboard Shortcuts ---
+
+    def _on_keyboard_shortcuts(self):
+        """Show the Keyboard Shortcuts dialog."""
+        dlg = KeyboardShortcutsDialog(self)
+        dlg.exec()
 
     # --- About ---
 
