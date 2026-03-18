@@ -20,6 +20,7 @@ Phase 3.6: Space overrides table + BVH/FBX export.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -270,6 +271,266 @@ def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, join
     return np.zeros(3, dtype=np.float32)
 
 
+# ------------------------------------------------------------------
+# Auto-Detect: Pose Issue Detection
+# ------------------------------------------------------------------
+
+
+@dataclass
+class PoseIssue:
+    """A flagged pose quality issue detected by automatic scanning.
+
+    Why: Manual frame-by-frame pose review is tedious. Auto-detection
+    highlights problematic spans — large angular jumps (bad HMR estimates),
+    jitter (high-frequency oscillation), and low confidence — so users can
+    focus correction effort on the frames that matter most.
+    """
+
+    frame: int                   # representative frame (midpoint of span)
+    person_id: int
+    issue_type: str              # "angular_jump", "low_confidence", "jitter"
+    description: str
+    severity: float              # 0-1, higher = more urgent
+    span: tuple[int, int]        # (start, end) inclusive frame range
+
+
+def _rotation_angles_deg(poses_a: np.ndarray, poses_b: np.ndarray) -> np.ndarray:
+    """Compute per-joint angular difference between axis-angle arrays (degrees).
+
+    Uses L2 norm of axis-angle difference as an efficient approximation.
+    For detecting large jumps this is sufficient; exact geodesic distance
+    would require scipy Rotation composition.
+
+    Parameters
+    ----------
+    poses_a, poses_b : (..., 3) axis-angle arrays of matching shape.
+
+    Returns
+    -------
+    (...) angular differences in degrees.
+    """
+    diff = np.linalg.norm(poses_b - poses_a, axis=-1)
+    return np.degrees(diff)
+
+
+def compute_pose_issues(
+    session: Session,
+    jump_threshold_deg: float = 45.0,
+    jitter_window: int = 7,
+    jitter_threshold_deg: float = 20.0,
+    conf_threshold: float = 0.4,
+    min_span: int = 3,
+) -> list[PoseIssue]:
+    """Scan active person tracks for pose quality issues.
+
+    Detects three issue types:
+    - angular_jump: single-frame change > jump_threshold_deg in any body joint
+    - jitter: high std of angular velocity in sliding window > jitter_threshold_deg
+    - low_confidence: spans of >= min_span frames where confidence < conf_threshold
+
+    Returns issues sorted by severity (desc) then frame (asc).
+    """
+    issues: list[PoseIssue] = []
+
+    for pid, track in session.person_tracks.items():
+        if pid in session.inactive_tracks:
+            continue
+
+        params = track.smplx_params
+        if params is not None:
+            bp = params.get("body_pose")
+            if bp is not None:
+                bp = np.asarray(bp, dtype=np.float32)
+                if bp.ndim == 2 and bp.shape[-1] != 3:
+                    bp = bp.reshape(bp.shape[0], -1, 3)
+                if bp.ndim == 3 and bp.shape[0] > 1:
+                    issues.extend(
+                        _detect_angular_jumps(bp, pid, jump_threshold_deg)
+                    )
+                    issues.extend(
+                        _detect_jitter(bp, pid, jitter_window, jitter_threshold_deg)
+                    )
+
+        confs = track.confidences
+        if confs and len(confs) > 0:
+            issues.extend(
+                _detect_low_confidence(confs, pid, conf_threshold, min_span)
+            )
+
+    issues.sort(key=lambda i: (-i.severity, i.frame))
+    return issues
+
+
+def _detect_angular_jumps(
+    body_pose: np.ndarray,
+    person_id: int,
+    threshold_deg: float = 45.0,
+) -> list[PoseIssue]:
+    """Detect frames with large sudden rotations in body pose.
+
+    Computes per-joint angular change between consecutive frames using
+    vectorized operations. Flags any frame where the worst joint exceeds
+    the threshold.
+    """
+    # body_pose: (N, J, 3)
+    angles_deg = _rotation_angles_deg(body_pose[:-1], body_pose[1:])  # (N-1, J)
+    max_per_frame = angles_deg.max(axis=1)       # (N-1,)
+    worst_joint = angles_deg.argmax(axis=1)      # (N-1,)
+
+    issues: list[PoseIssue] = []
+    for i in range(len(max_per_frame)):
+        if max_per_frame[i] >= threshold_deg:
+            f = i + 1  # change detected AT frame f
+            j = int(worst_joint[i])
+            j_name = (
+                JOINT_NAMES[j + 1]
+                if j + 1 < len(JOINT_NAMES)
+                else f"joint_{j}"
+            )
+            severity = min(1.0, float(max_per_frame[i]) / 180.0)
+            issues.append(PoseIssue(
+                frame=f,
+                person_id=person_id,
+                issue_type="angular_jump",
+                description=(
+                    f"Large pose jump: {j_name} changed "
+                    f"{max_per_frame[i]:.1f}\u00b0 at frame {f}"
+                ),
+                severity=severity,
+                span=(max(0, f - 1), f),
+            ))
+
+    return issues
+
+
+def _detect_jitter(
+    body_pose: np.ndarray,
+    person_id: int,
+    window: int = 7,
+    threshold_deg: float = 20.0,
+) -> list[PoseIssue]:
+    """Detect spans with high-frequency oscillation in body pose.
+
+    Computes the max angular velocity per frame, then uses a sliding
+    window standard deviation to identify noisy spans.
+    """
+    n_frames = body_pose.shape[0]
+    if n_frames < window + 1:
+        return []
+
+    angles_deg = _rotation_angles_deg(body_pose[:-1], body_pose[1:])  # (N-1, J)
+    ang_vel = angles_deg.max(axis=1)  # (N-1,)
+
+    half_w = window // 2
+    issues: list[PoseIssue] = []
+    in_span = False
+    span_start = 0
+
+    for f in range(half_w, len(ang_vel) - half_w):
+        w_slice = ang_vel[f - half_w : f + half_w + 1]
+        std_val = float(np.std(w_slice))
+        if std_val >= threshold_deg:
+            if not in_span:
+                span_start = f
+                in_span = True
+        else:
+            if in_span:
+                span_len = f - span_start
+                if span_len >= 3:
+                    mid = (span_start + f - 1) // 2
+                    issues.append(PoseIssue(
+                        frame=mid,
+                        person_id=person_id,
+                        issue_type="jitter",
+                        description=(
+                            f"Jitter frames {span_start}\u2013{f - 1} "
+                            f"({span_len} frames)"
+                        ),
+                        severity=0.6,
+                        span=(span_start, f - 1),
+                    ))
+                in_span = False
+
+    if in_span:
+        f_end = len(ang_vel) - half_w
+        span_len = f_end - span_start
+        if span_len >= 3:
+            mid = (span_start + f_end - 1) // 2
+            issues.append(PoseIssue(
+                frame=mid,
+                person_id=person_id,
+                issue_type="jitter",
+                description=(
+                    f"Jitter frames {span_start}\u2013{f_end - 1} "
+                    f"({span_len} frames)"
+                ),
+                severity=0.6,
+                span=(span_start, f_end - 1),
+            ))
+
+    return issues
+
+
+def _detect_low_confidence(
+    confidences: list,
+    person_id: int,
+    threshold: float = 0.4,
+    min_span: int = 3,
+) -> list[PoseIssue]:
+    """Detect spans of low confidence scores.
+
+    Handles both raw float lists and TrackConfidence objects (with .overall).
+    """
+    n = len(confidences)
+    conf_values = []
+    for c in confidences:
+        if isinstance(c, (int, float)):
+            conf_values.append(float(c))
+        elif hasattr(c, "overall"):
+            conf_values.append(float(c.overall))
+        else:
+            conf_values.append(1.0)
+
+    issues: list[PoseIssue] = []
+    span_start: int | None = None
+
+    for f in range(n):
+        if conf_values[f] < threshold:
+            if span_start is None:
+                span_start = f
+        else:
+            if span_start is not None and f - span_start >= min_span:
+                mid = (span_start + f - 1) // 2
+                issues.append(PoseIssue(
+                    frame=mid,
+                    person_id=person_id,
+                    issue_type="low_confidence",
+                    description=(
+                        f"Low confidence frames {span_start}\u2013{f - 1} "
+                        f"({f - span_start} frames)"
+                    ),
+                    severity=0.7,
+                    span=(span_start, f - 1),
+                ))
+            span_start = None
+
+    if span_start is not None and n - span_start >= min_span:
+        mid = (span_start + n - 1) // 2
+        issues.append(PoseIssue(
+            frame=mid,
+            person_id=person_id,
+            issue_type="low_confidence",
+            description=(
+                f"Low confidence frames {span_start}\u2013{n - 1} "
+                f"({n - span_start} frames)"
+            ),
+            severity=0.7,
+            span=(span_start, n - 1),
+        ))
+
+    return issues
+
+
 class PoseCorrectorPanel(QWidget):
     """Pose correction panel with embedded 3D viewport and joint controls.
 
@@ -294,6 +555,10 @@ class PoseCorrectorPanel(QWidget):
         self._current_frame: int = 0
         self._current_joint: int = -1
         self._updating_sliders: bool = False  # guard against signal loops
+
+        # Auto-detect state
+        self._pose_issues: list[PoseIssue] = []
+        self._pose_issue_idx: int = 0
 
         self._setup_ui()
         self._connect_signals()
@@ -448,6 +713,45 @@ class PoseCorrectorPanel(QWidget):
 
         ctrl_layout.addWidget(qf_group)
 
+        # Auto-Detect group
+        ad_group = QGroupBox("Auto-Detect")
+        ad_layout = QVBoxLayout(ad_group)
+
+        ad_btn_row = QHBoxLayout()
+        self._detect_btn = QPushButton("Detect Bad Spans")
+        self._detect_btn.setToolTip(
+            "Scan for angular jumps, jitter, and low confidence spans"
+        )
+        ad_btn_row.addWidget(self._detect_btn)
+        self._prev_issue_btn = QPushButton("\u25c4 Prev")
+        self._prev_issue_btn.setToolTip("Navigate to previous issue")
+        self._prev_issue_btn.setEnabled(False)
+        ad_btn_row.addWidget(self._prev_issue_btn)
+        self._next_issue_btn = QPushButton("\u25ba Next")
+        self._next_issue_btn.setToolTip("Navigate to next issue")
+        self._next_issue_btn.setEnabled(False)
+        ad_btn_row.addWidget(self._next_issue_btn)
+        ad_layout.addLayout(ad_btn_row)
+
+        self._issues_label = QLabel("No scan performed")
+        self._issues_label.setStyleSheet("font-style: italic;")
+        ad_layout.addWidget(self._issues_label)
+
+        self._issues_table = QTableWidget(0, 4)
+        self._issues_table.setHorizontalHeaderLabels(
+            ["Frame", "Person", "Type", "Description"]
+        )
+        self._issues_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._issues_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._issues_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._issues_table.verticalHeader().hide()
+        self._issues_table.setMaximumHeight(120)
+        ad_layout.addWidget(self._issues_table)
+
+        ctrl_layout.addWidget(ad_group)
+
         # Space Overrides group
         so_group = QGroupBox("Space Overrides")
         so_layout = QVBoxLayout(so_group)
@@ -596,6 +900,14 @@ class PoseCorrectorPanel(QWidget):
         # Export buttons
         self._reexport_bvh_btn.clicked.connect(self._on_reexport_bvh)
         self._reexport_fbx_btn.clicked.connect(self._on_reexport_fbx)
+
+        # Auto-detect buttons
+        self._detect_btn.clicked.connect(self._on_detect_bad_spans)
+        self._prev_issue_btn.clicked.connect(self._on_prev_pose_issue)
+        self._next_issue_btn.clicked.connect(self._on_next_pose_issue)
+        self._issues_table.cellDoubleClicked.connect(
+            self._on_pose_issue_double_clicked
+        )
 
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
@@ -1753,3 +2065,94 @@ class PoseCorrectorPanel(QWidget):
                 log.info("Saved correction track: %s", path)
             except Exception as e:
                 log.warning("Failed to save correction track: %s", e)
+
+    # ------------------------------------------------------------------
+    # Auto-Detect: Bad span detection
+    # ------------------------------------------------------------------
+
+    def _on_detect_bad_spans(self):
+        """Run automatic pose issue detection across active tracks.
+
+        Why: Users need to quickly identify frames that need correction
+        without scrubbing through the entire video. This scans for angular
+        jumps (bad HMR estimates), jitter (high-frequency noise), and low
+        confidence spans, presenting results in a navigable table.
+        """
+        self._pose_issues = compute_pose_issues(self._session)
+        self._pose_issue_idx = 0
+
+        n = len(self._pose_issues)
+        self._update_pose_issues_table()
+
+        if n == 0:
+            self._issues_label.setText("No issues found.")
+            self._issues_label.setStyleSheet("font-style: italic; color: #4ecca3;")
+        else:
+            self._issues_label.setText(
+                f"Found {n} issue{'s' if n != 1 else ''}. "
+                f"Use Next/Prev to navigate."
+            )
+            self._issues_label.setStyleSheet("font-style: italic; color: #ffd93d;")
+            self._navigate_to_pose_issue(0)
+
+        has_issues = n > 0
+        self._prev_issue_btn.setEnabled(has_issues)
+        self._next_issue_btn.setEnabled(has_issues)
+
+        log.info("Pose scan complete: %d issues found", n)
+
+    def _on_next_pose_issue(self):
+        """Navigate to the next pose issue (wraps around)."""
+        if not self._pose_issues:
+            return
+        self._pose_issue_idx = (self._pose_issue_idx + 1) % len(self._pose_issues)
+        self._navigate_to_pose_issue(self._pose_issue_idx)
+
+    def _on_prev_pose_issue(self):
+        """Navigate to the previous pose issue (wraps around)."""
+        if not self._pose_issues:
+            return
+        self._pose_issue_idx = (self._pose_issue_idx - 1) % len(self._pose_issues)
+        self._navigate_to_pose_issue(self._pose_issue_idx)
+
+    def _navigate_to_pose_issue(self, idx: int):
+        """Seek to an issue's frame and update the status label."""
+        issue = self._pose_issues[idx]
+        n = len(self._pose_issues)
+        self._issues_label.setText(
+            f"[{idx + 1}/{n}] P{issue.person_id}: {issue.description}"
+        )
+        # Select the issue's person if different
+        if issue.person_id != self._current_person:
+            self.set_person(issue.person_id)
+        # Seek to the issue's frame
+        self.frame_requested.emit(issue.frame)
+        # Highlight row in table
+        self._issues_table.selectRow(idx)
+
+    def _on_pose_issue_double_clicked(self, row: int, _col: int):
+        """Navigate to an issue when double-clicking its table row."""
+        if 0 <= row < len(self._pose_issues):
+            self._pose_issue_idx = row
+            self._navigate_to_pose_issue(row)
+
+    def _update_pose_issues_table(self):
+        """Rebuild the issues table from current scan results."""
+        self._issues_table.setRowCount(0)
+        self._issues_table.setRowCount(len(self._pose_issues))
+
+        for row, issue in enumerate(self._pose_issues):
+            frame_item = QTableWidgetItem(str(issue.frame))
+            frame_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 0, frame_item)
+
+            person_item = QTableWidgetItem(f"Person {issue.person_id}")
+            person_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 1, person_item)
+
+            type_item = QTableWidgetItem(issue.issue_type.replace("_", " "))
+            type_item.setTextAlignment(Qt.AlignCenter)
+            self._issues_table.setItem(row, 2, type_item)
+
+            desc_item = QTableWidgetItem(issue.description)
+            self._issues_table.setItem(row, 3, desc_item)

@@ -32,8 +32,14 @@ from models.session import Session, PersonTrack
 from views.mesh_viewport import JOINT_NAMES, JOINT_PARENTS, MeshViewport
 from views.pose_corrector_panel import (
     PoseCorrectorPanel,
+    PoseIssue,
     get_joint_euler,
     _get_joint_axis_angle,
+    _rotation_angles_deg,
+    _detect_angular_jumps,
+    _detect_jitter,
+    _detect_low_confidence,
+    compute_pose_issues,
     _safe_import_pose_correction,
     _safe_import_quick_fix,
     _safe_import_space_override,
@@ -2130,3 +2136,412 @@ class TestFBXExport:
 
         assert signals == ["bvh"]
         assert "failed" in panel._export_status.text().lower()
+
+
+# ======================================================================
+# Auto-Detect: Pure function tests
+# ======================================================================
+
+
+class TestRotationAnglesDeg:
+    """_rotation_angles_deg: vectorized angular difference."""
+
+    def test_identical_returns_zero(self):
+        a = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
+        result = _rotation_angles_deg(a, a)
+        np.testing.assert_allclose(result, 0.0, atol=1e-5)
+
+    def test_known_difference(self):
+        a = np.zeros((1, 3), dtype=np.float32)
+        b = np.array([[np.pi / 2, 0, 0]], dtype=np.float32)
+        result = _rotation_angles_deg(a, b)
+        np.testing.assert_allclose(result, [90.0], atol=0.1)
+
+    def test_output_shape_2d(self):
+        a = np.zeros((5, 3), dtype=np.float32)
+        b = np.ones((5, 3), dtype=np.float32)
+        result = _rotation_angles_deg(a, b)
+        assert result.shape == (5,)
+
+    def test_output_shape_3d(self):
+        """(N, J, 3) input → (N, J) output."""
+        a = np.zeros((10, 21, 3), dtype=np.float32)
+        b = np.ones((10, 21, 3), dtype=np.float32)
+        result = _rotation_angles_deg(a, b)
+        assert result.shape == (10, 21)
+
+    def test_symmetric(self):
+        a = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
+        b = np.array([[0.4, 0.5, 0.6]], dtype=np.float32)
+        np.testing.assert_allclose(
+            _rotation_angles_deg(a, b), _rotation_angles_deg(b, a), atol=1e-5
+        )
+
+
+class TestDetectAngularJumps:
+    """_detect_angular_jumps: detect large single-frame pose changes."""
+
+    def test_no_motion_no_issues(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        issues = _detect_angular_jumps(bp, person_id=0)
+        assert len(issues) == 0
+
+    def test_detects_large_jump(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        # Insert a 90° jump at frame 10 on joint 0 (L_Hip)
+        bp[10, 0] = [np.pi / 2, 0, 0]
+        issues = _detect_angular_jumps(bp, person_id=0, threshold_deg=45.0)
+        assert len(issues) >= 1
+        # Should detect the jump AT frame 10
+        jump_frames = [i.frame for i in issues]
+        assert 10 in jump_frames
+
+    def test_small_motion_ignored(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        # 10° change — should be below 45° threshold
+        bp[10, 0] = [np.radians(10), 0, 0]
+        issues = _detect_angular_jumps(bp, person_id=0, threshold_deg=45.0)
+        assert len(issues) == 0
+
+    def test_custom_threshold(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        bp[10, 0] = [np.radians(20), 0, 0]
+        # With a 15° threshold, should detect
+        issues = _detect_angular_jumps(bp, person_id=0, threshold_deg=15.0)
+        assert len(issues) >= 1
+
+    def test_issue_fields(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        bp[10, 0] = [np.pi / 2, 0, 0]
+        issues = _detect_angular_jumps(bp, person_id=7, threshold_deg=45.0)
+        issue = [i for i in issues if i.frame == 10][0]
+        assert issue.person_id == 7
+        assert issue.issue_type == "angular_jump"
+        assert issue.severity > 0.0
+        assert issue.span == (9, 10)
+        assert "jump" in issue.description.lower()
+
+    def test_jump_at_first_frame(self):
+        bp = np.zeros((5, 21, 3), dtype=np.float32)
+        bp[0, 0] = [np.pi, 0, 0]  # Big value at frame 0
+        bp[1, 0] = [0, 0, 0]      # Then zero
+        # The jump is at frame 1 (comparing frame 0 and 1)
+        issues = _detect_angular_jumps(bp, person_id=0, threshold_deg=45.0)
+        assert len(issues) >= 1
+        assert issues[0].frame == 1
+
+    def test_multiple_joints_worst_reported(self):
+        bp = np.zeros((5, 21, 3), dtype=np.float32)
+        bp[2, 3] = [np.pi, 0, 0]  # 180° on joint 3 (body_pose index)
+        bp[2, 5] = [np.radians(50), 0, 0]  # 50° on joint 5
+        issues = _detect_angular_jumps(bp, person_id=0, threshold_deg=45.0)
+        # Should report the worst joint (index 3 → SMPL-X joint 4 = L_Knee)
+        jump_at_2 = [i for i in issues if i.frame == 2]
+        assert len(jump_at_2) >= 1
+
+
+class TestDetectJitter:
+    """_detect_jitter: detect high-frequency oscillation."""
+
+    def test_smooth_motion_no_jitter(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        # Smooth linear motion
+        for f in range(50):
+            bp[f, 0, 0] = f * 0.01  # tiny increment
+        issues = _detect_jitter(bp, person_id=0)
+        assert len(issues) == 0
+
+    def test_static_no_jitter(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        issues = _detect_jitter(bp, person_id=0)
+        assert len(issues) == 0
+
+    def test_detects_oscillation(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        # Create high-frequency oscillation in frames 10-25
+        for f in range(10, 25):
+            if f % 2 == 0:
+                bp[f, 0] = [np.radians(40), 0, 0]
+            else:
+                bp[f, 0] = [np.radians(-40), 0, 0]
+        issues = _detect_jitter(bp, person_id=0, threshold_deg=15.0)
+        assert len(issues) >= 1
+        assert all(i.issue_type == "jitter" for i in issues)
+
+    def test_short_sequence_returns_empty(self):
+        bp = np.zeros((5, 21, 3), dtype=np.float32)
+        issues = _detect_jitter(bp, person_id=0, window=7)
+        assert len(issues) == 0
+
+    def test_jitter_issue_fields(self):
+        bp = np.zeros((50, 21, 3), dtype=np.float32)
+        for f in range(10, 30):
+            bp[f, 0] = [np.radians(50 * ((-1) ** f)), 0, 0]
+        issues = _detect_jitter(bp, person_id=3, threshold_deg=10.0)
+        if issues:
+            issue = issues[0]
+            assert issue.person_id == 3
+            assert issue.issue_type == "jitter"
+            assert issue.severity == 0.6
+            assert issue.span[0] <= issue.span[1]
+            assert issue.span[0] >= 0
+
+
+class TestDetectLowConfidence:
+    """_detect_low_confidence: detect spans of low confidence."""
+
+    def test_all_high_confidence(self):
+        confs = [0.9] * 50
+        issues = _detect_low_confidence(confs, person_id=0)
+        assert len(issues) == 0
+
+    def test_detects_low_span(self):
+        confs = [0.9] * 10 + [0.2] * 10 + [0.9] * 30
+        issues = _detect_low_confidence(confs, person_id=0, threshold=0.4, min_span=3)
+        assert len(issues) == 1
+        assert issues[0].issue_type == "low_confidence"
+        assert issues[0].span == (10, 19)
+
+    def test_short_span_ignored(self):
+        confs = [0.9] * 10 + [0.2] * 2 + [0.9] * 38
+        issues = _detect_low_confidence(confs, person_id=0, threshold=0.4, min_span=3)
+        assert len(issues) == 0
+
+    def test_span_at_end(self):
+        confs = [0.9] * 10 + [0.1] * 10
+        issues = _detect_low_confidence(confs, person_id=0, threshold=0.4, min_span=3)
+        assert len(issues) == 1
+        assert issues[0].span == (10, 19)
+
+    def test_multiple_spans(self):
+        confs = [0.2] * 5 + [0.9] * 10 + [0.1] * 5 + [0.9] * 10
+        issues = _detect_low_confidence(confs, person_id=0, threshold=0.4, min_span=3)
+        assert len(issues) == 2
+
+    def test_handles_track_confidence_objects(self):
+        """Objects with .overall attribute should work."""
+        class MockConf:
+            def __init__(self, val):
+                self.overall = val
+        confs = [MockConf(0.9)] * 5 + [MockConf(0.1)] * 5 + [MockConf(0.9)] * 5
+        issues = _detect_low_confidence(confs, person_id=0, threshold=0.4, min_span=3)
+        assert len(issues) == 1
+
+    def test_issue_fields(self):
+        confs = [0.1] * 10 + [0.9] * 10
+        issues = _detect_low_confidence(confs, person_id=5, threshold=0.4, min_span=3)
+        assert len(issues) == 1
+        issue = issues[0]
+        assert issue.person_id == 5
+        assert issue.issue_type == "low_confidence"
+        assert issue.severity == 0.7
+        assert issue.span == (0, 9)
+
+
+class TestComputePoseIssues:
+    """compute_pose_issues: integration test scanning session."""
+
+    def test_empty_session_no_issues(self):
+        session = Session()
+        issues = compute_pose_issues(session)
+        assert issues == []
+
+    def test_no_params_no_issues(self):
+        session = Session()
+        session.person_tracks[0] = PersonTrack(person_id=0)
+        issues = compute_pose_issues(session)
+        assert issues == []
+
+    def test_clean_params_no_issues(self):
+        """All-zero body_pose should produce no issues."""
+        session = Session(num_frames=50, fps=30.0)
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "body_pose": np.zeros((50, 21, 3), dtype=np.float32),
+                "global_orient": np.zeros((50, 3), dtype=np.float32),
+            },
+        )
+        issues = compute_pose_issues(session)
+        assert issues == []
+
+    def test_detects_jump_in_session(self):
+        session = _make_session_with_params(n_frames=50, n_persons=1)
+        params = session.person_tracks[0].smplx_params
+        params["body_pose"][25, 0] = [np.pi, 0, 0]  # 180° jump
+        issues = compute_pose_issues(session, jump_threshold_deg=45.0)
+        jump_issues = [i for i in issues if i.issue_type == "angular_jump"]
+        assert len(jump_issues) >= 1
+
+    def test_detects_low_confidence_in_session(self):
+        session = _make_session_with_params(n_frames=50, n_persons=1)
+        session.person_tracks[0].confidences = (
+            [0.9] * 10 + [0.1] * 10 + [0.9] * 30
+        )
+        issues = compute_pose_issues(session, conf_threshold=0.4, min_span=3)
+        conf_issues = [i for i in issues if i.issue_type == "low_confidence"]
+        assert len(conf_issues) >= 1
+
+    def test_skips_inactive_tracks(self):
+        session = _make_session_with_params(n_frames=50, n_persons=2)
+        # Add big jump to person 1
+        session.person_tracks[1].smplx_params["body_pose"][10, 0] = [np.pi, 0, 0]
+        session.inactive_tracks.add(1)
+        issues = compute_pose_issues(session, jump_threshold_deg=45.0)
+        person_1_issues = [i for i in issues if i.person_id == 1]
+        assert len(person_1_issues) == 0
+
+    def test_sorted_by_severity_desc(self):
+        session = _make_session_with_params(n_frames=50, n_persons=1)
+        # Add jump (severity ~ 1.0) and low confidence (severity 0.7)
+        session.person_tracks[0].smplx_params["body_pose"][10, 0] = [np.pi, 0, 0]
+        session.person_tracks[0].confidences = (
+            [0.9] * 30 + [0.1] * 10 + [0.9] * 10
+        )
+        issues = compute_pose_issues(session)
+        if len(issues) >= 2:
+            assert issues[0].severity >= issues[1].severity
+
+    def test_handles_flat_body_pose(self):
+        """body_pose as (N, 63) should be reshaped to (N, 21, 3)."""
+        session = Session(num_frames=50)
+        params = {
+            "body_pose": np.zeros((50, 63), dtype=np.float32),
+            "global_orient": np.zeros((50, 3), dtype=np.float32),
+        }
+        # Insert jump in flat format
+        params["body_pose"][10, :3] = [np.pi, 0, 0]
+        session.person_tracks[0] = PersonTrack(person_id=0, smplx_params=params)
+        issues = compute_pose_issues(session, jump_threshold_deg=45.0)
+        jump_issues = [i for i in issues if i.issue_type == "angular_jump"]
+        assert len(jump_issues) >= 1
+
+
+# ======================================================================
+# Auto-Detect: UI widget tests
+# ======================================================================
+
+
+class TestAutoDetectUI:
+    """Auto-Detect UI group on PoseCorrectorPanel."""
+
+    @pytest.fixture()
+    def panel(self, qapp):
+        session = _make_session_with_params(n_frames=50, n_persons=2)
+        p = PoseCorrectorPanel(session=session)
+        yield p
+        p.close()
+
+    def test_detect_button_exists(self, panel):
+        assert hasattr(panel, "_detect_btn")
+        assert panel._detect_btn.text() == "Detect Bad Spans"
+
+    def test_prev_next_buttons_exist(self, panel):
+        assert hasattr(panel, "_prev_issue_btn")
+        assert hasattr(panel, "_next_issue_btn")
+        assert panel._prev_issue_btn.isHidden() is False
+        assert panel._next_issue_btn.isHidden() is False
+
+    def test_prev_next_initially_disabled(self, panel):
+        assert not panel._prev_issue_btn.isEnabled()
+        assert not panel._next_issue_btn.isEnabled()
+
+    def test_issues_table_exists(self, panel):
+        assert hasattr(panel, "_issues_table")
+        assert panel._issues_table.columnCount() == 4
+        headers = [
+            panel._issues_table.horizontalHeaderItem(c).text()
+            for c in range(4)
+        ]
+        assert headers == ["Frame", "Person", "Type", "Description"]
+
+    def test_issues_label_default(self, panel):
+        assert panel._issues_label.text() == "No scan performed"
+
+    def test_detect_no_issues(self, qapp):
+        """Truly clean params (all zeros) should produce no issues."""
+        session = Session(num_frames=50, fps=30.0, img_width=640, img_height=480)
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "body_pose": np.zeros((50, 21, 3), dtype=np.float32),
+                "global_orient": np.zeros((50, 3), dtype=np.float32),
+            },
+        )
+        panel = PoseCorrectorPanel(session=session)
+        panel._on_detect_bad_spans()
+        assert panel._issues_label.text() == "No issues found."
+        assert not panel._prev_issue_btn.isEnabled()
+        assert not panel._next_issue_btn.isEnabled()
+        assert panel._issues_table.rowCount() == 0
+        panel.close()
+
+    def test_detect_with_issues(self, panel):
+        """Insert a jump and verify detection populates the table."""
+        panel._session.person_tracks[0].smplx_params["body_pose"][25, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._on_detect_bad_spans()
+        assert panel._issues_table.rowCount() > 0
+        assert panel._prev_issue_btn.isEnabled()
+        assert panel._next_issue_btn.isEnabled()
+        # Auto-navigates to first issue, label shows [1/N] format
+        assert "[1/" in panel._issues_label.text()
+
+    def test_next_prev_wraps(self, panel):
+        """Next/Prev navigation wraps around the issue list."""
+        panel._session.person_tracks[0].smplx_params["body_pose"][10, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._session.person_tracks[0].smplx_params["body_pose"][30, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._on_detect_bad_spans()
+        n = len(panel._pose_issues)
+        assert n >= 2
+
+        # Navigate forward through all issues and wrap
+        for _ in range(n):
+            panel._on_next_pose_issue()
+        assert panel._pose_issue_idx == 0  # wrapped
+
+        # Navigate backward
+        panel._on_prev_pose_issue()
+        assert panel._pose_issue_idx == n - 1  # wrapped to last
+
+    def test_double_click_navigates(self, panel):
+        """Double-clicking a row in the issues table navigates to that issue."""
+        panel._session.person_tracks[0].smplx_params["body_pose"][10, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._on_detect_bad_spans()
+        n = len(panel._pose_issues)
+        if n > 1:
+            panel._on_pose_issue_double_clicked(n - 1, 0)
+            assert panel._pose_issue_idx == n - 1
+
+    def test_navigate_emits_frame_requested(self, panel):
+        """Navigation should emit frame_requested signal."""
+        signals = []
+        panel.frame_requested.connect(lambda f: signals.append(f))
+        panel._session.person_tracks[0].smplx_params["body_pose"][20, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._on_detect_bad_spans()
+        assert len(signals) >= 1  # first issue auto-navigated
+
+    def test_navigate_changes_person(self, panel):
+        """Navigation to issue for a different person should update person."""
+        panel._session.person_tracks[0].smplx_params["body_pose"][10, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._session.person_tracks[1].smplx_params["body_pose"][20, 0] = [
+            np.pi, 0, 0,
+        ]
+        panel._on_detect_bad_spans()
+        # Find an issue for person 1
+        for idx, issue in enumerate(panel._pose_issues):
+            if issue.person_id == 1:
+                panel._navigate_to_pose_issue(idx)
+                assert panel._current_person == 1
+                break
