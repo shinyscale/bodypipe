@@ -29,6 +29,7 @@ def app_window(qapp):
     settings.remove("pipeline_config/perf")
     settings.remove("pipeline_config/multi")
     settings.remove("workspace")
+    settings.remove("last_video_path")
     settings.sync()
 
     window = AppWindow()
@@ -942,3 +943,385 @@ class TestScrubAutoSwitch:
         window._video_player.playback_toggled.emit(True)
         window._video_player.playback_toggled.emit(False)
         assert window._mesh_viewport._render_mode is RenderMode.FULL
+
+
+# ---------------------------------------------------------------------------
+# Dock data flow — startup restore and result loading
+# ---------------------------------------------------------------------------
+
+
+class TestVideoLoadSavesPath:
+    """_on_video_loaded persists the path for startup restore."""
+
+    def test_video_loaded_saves_path_to_qsettings(self, app_window, tmp_path):
+        """When video_loaded signal fires, the path is saved in QSettings."""
+        video = tmp_path / "test.mp4"
+        video.touch()
+
+        # Simulate settings panel metadata (normally set by _load_video)
+        app_window._session.num_frames = 100
+        app_window._session.fps = 30.0
+
+        with patch.object(app_window._video_player, "set_video"):
+            app_window._on_video_loaded(video)
+
+        saved = app_window._settings.value("last_video_path")
+        assert saved == str(video)
+
+    def test_video_loaded_calls_try_restore(self, app_window, tmp_path):
+        """_on_video_loaded triggers _try_restore_results."""
+        video = tmp_path / "test.mp4"
+        video.touch()
+        app_window._session.num_frames = 100
+        app_window._session.fps = 30.0
+
+        with patch.object(app_window._video_player, "set_video"), \
+             patch.object(app_window, "_try_restore_results") as mock_restore:
+            app_window._on_video_loaded(video)
+
+        mock_restore.assert_called_once_with(video)
+
+
+class TestRestoreLastVideo:
+    """_restore_last_video loads the previously-opened video on startup."""
+
+    def test_no_saved_path_is_noop(self, app_window):
+        """When no last_video_path in QSettings, nothing happens."""
+        app_window._settings.remove("last_video_path")
+        # Should not raise
+        app_window._restore_last_video()
+
+    def test_missing_file_is_noop(self, app_window, tmp_path):
+        """When saved path points to a missing file, nothing happens."""
+        app_window._settings.setValue("last_video_path", str(tmp_path / "gone.mp4"))
+        with patch.object(app_window._pipeline_dock.current_settings,
+                          "_load_video") as mock_load:
+            app_window._restore_last_video()
+        mock_load.assert_not_called()
+
+    def test_valid_path_loads_video(self, app_window, tmp_path):
+        """When saved path exists, it is loaded into the settings panel."""
+        video = tmp_path / "test_restore.mp4"
+        video.touch()
+        app_window._settings.setValue("last_video_path", str(video))
+
+        with patch.object(app_window._pipeline_dock.current_settings,
+                          "_load_video") as mock_load:
+            app_window._restore_last_video()
+        mock_load.assert_called_once_with(str(video))
+
+
+class TestTryRestoreResults:
+    """_try_restore_results loads cached pipeline output when available."""
+
+    def test_existing_session_tracks_triggers_hydrate(self, app_window, tmp_path):
+        """When session already has tracks, hydrate + refresh (no disk scan)."""
+        from models.session import PersonTrack
+
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+        app_window._session.person_tracks[0] = PersonTrack(
+            person_id=0, person_dir=pdir,
+        )
+        with patch.object(app_window, "_hydrate_person_tracks") as mock_h, \
+             patch.object(app_window, "_refresh_all_panels") as mock_r:
+            app_window._try_restore_results(tmp_path / "video.mp4")
+        mock_h.assert_called_once()
+        mock_r.assert_called_once()
+
+    def test_no_output_dir_is_noop(self, app_window, tmp_path):
+        """When no output directory exists, nothing happens."""
+        app_window._pipeline_dock.set_mode("multi")
+        with patch.object(app_window, "_load_results_from_output_dir") as mock_load:
+            app_window._try_restore_results(tmp_path / "nonexistent.mp4")
+        mock_load.assert_not_called()
+
+    def test_multi_mode_loads_from_output_dir(self, app_window, tmp_path):
+        """In multi mode, scans output dir for person directories."""
+        app_window._pipeline_dock.set_mode("multi")
+        # Use tmp_path as gvhmr_root to avoid touching real output dirs
+        app_window._gvhmr_root = tmp_path
+        output_dir = tmp_path / "outputs" / "multi_person" / "testvid"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch.object(app_window, "_load_results_from_output_dir") as mock_load:
+            app_window._try_restore_results(Path("testvid.mp4"))
+        mock_load.assert_called_once_with(output_dir)
+
+    def test_single_mode_loads_preview_video(self, app_window, tmp_path):
+        """In single mode, loads output preview video if available."""
+        app_window._pipeline_dock.set_mode("single")
+        # Use tmp_path as gvhmr_root to avoid touching real output dirs
+        app_window._gvhmr_root = tmp_path
+        output_dir = tmp_path / "outputs" / "demo" / "testvid2"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        incam = output_dir / "incam.mp4"
+        incam.touch()
+
+        with patch.object(app_window, "_load_output_preview") as mock_preview:
+            app_window._try_restore_results(Path("testvid2.mp4"))
+        mock_preview.assert_called_once_with(incam)
+
+    def test_uses_session_output_dir_if_set(self, app_window, tmp_path):
+        """Prefers session.output_dir over mode-derived path."""
+        out = tmp_path / "custom_output"
+        out.mkdir()
+        app_window._session.output_dir = out
+        app_window._pipeline_dock.set_mode("multi")
+
+        with patch.object(app_window, "_load_results_from_output_dir") as mock_load:
+            app_window._try_restore_results(tmp_path / "any.mp4")
+        mock_load.assert_called_once_with(out)
+
+
+class TestHydratePersonTracks:
+    """_hydrate_person_tracks fills heavy data from disk."""
+
+    def test_loads_smplx_and_confidences(self, app_window, tmp_path):
+        """Fills smplx_params and confidences from person_dir on disk."""
+        from models.session import PersonTrack
+        import csv
+
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+
+        # Write a minimal confidence.csv
+        csv_path = pdir / "confidence.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "detection", "visible_kp", "bbox_overlap",
+                "shape_dist", "motion_dist", "overall",
+            ])
+            writer.writeheader()
+            writer.writerow({
+                "detection": 0.9, "visible_kp": 0.8, "bbox_overlap": 0.1,
+                "shape_dist": 0.05, "motion_dist": 0.02, "overall": 0.85,
+            })
+
+        pt = PersonTrack(person_id=0, person_dir=pdir)
+        app_window._session.person_tracks[0] = pt
+
+        app_window._hydrate_person_tracks()
+
+        assert pt.confidences is not None
+        assert len(pt.confidences) == 1
+        assert abs(pt.confidences[0] - 0.85) < 0.01
+        assert pt.confidence_breakdown is not None
+        assert "overall" in pt.confidence_breakdown
+
+    def test_skips_missing_person_dir(self, app_window):
+        """Tracks with no person_dir or non-existent dir are skipped."""
+        from models.session import PersonTrack
+
+        pt = PersonTrack(person_id=0, person_dir=None)
+        app_window._session.person_tracks[0] = pt
+        # Should not raise
+        app_window._hydrate_person_tracks()
+        assert pt.smplx_params is None
+
+    def test_does_not_overwrite_existing_data(self, app_window, tmp_path):
+        """If smplx_params is already loaded, don't reload."""
+        from models.session import PersonTrack
+
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+
+        existing_params = {"body_pose": "already_loaded"}
+        pt = PersonTrack(
+            person_id=0, person_dir=pdir,
+            smplx_params=existing_params,
+            confidences=[0.9],
+        )
+        app_window._session.person_tracks[0] = pt
+
+        app_window._hydrate_person_tracks()
+
+        # Should not have been overwritten
+        assert pt.smplx_params is existing_params
+        assert pt.confidences == [0.9]
+
+
+class TestRefreshAllPanels:
+    """_refresh_all_panels syncs all panels from session state."""
+
+    def test_no_tracks_is_noop(self, app_window):
+        """With no person_tracks, nothing crashes."""
+        app_window._session.person_tracks.clear()
+        app_window._refresh_all_panels()  # Should not raise
+
+    def test_auto_selects_first_person(self, app_window):
+        """When selected_person is -1, auto-selects the first person."""
+        import numpy as np
+        from models.session import PersonTrack
+
+        app_window._session.person_tracks[3] = PersonTrack(
+            person_id=3, confidences=[0.9, 0.8],
+        )
+        app_window._session.person_tracks[7] = PersonTrack(
+            person_id=7, confidences=[0.7, 0.6],
+        )
+        app_window._session.selected_person = -1
+        app_window._session.num_frames = 2
+
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._refresh_all_panels()
+
+        assert app_window._session.selected_person == 3
+
+    def test_populates_track_overview(self, app_window):
+        """Track overview gets lanes after refresh."""
+        import numpy as np
+        from models.session import PersonTrack
+
+        app_window._session.person_tracks[0] = PersonTrack(
+            person_id=0, confidences=[0.9, 0.8, 0.7],
+        )
+        app_window._session.num_frames = 3
+
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._refresh_all_panels()
+
+        assert len(app_window._track_overview._lanes) == 1
+
+    def test_calls_identity_inspector_refresh(self, app_window):
+        """Identity inspector is refreshed after panel refresh."""
+        from models.session import PersonTrack
+
+        app_window._session.person_tracks[0] = PersonTrack(
+            person_id=0, confidences=[0.9],
+        )
+        app_window._session.num_frames = 1
+
+        with patch.object(app_window._identity_inspector, "refresh") as mock_r:
+            app_window._refresh_all_panels()
+        mock_r.assert_called_once()
+
+    def test_sets_person_on_all_panels(self, app_window):
+        """Mesh viewport and pose corrector receive set_person."""
+        from models.session import PersonTrack
+
+        app_window._session.person_tracks[5] = PersonTrack(
+            person_id=5, confidences=[0.9],
+        )
+        app_window._session.selected_person = 5
+        app_window._session.num_frames = 1
+
+        with patch.object(app_window._mesh_viewport, "set_person") as mock_mv, \
+             patch.object(app_window._pose_corrector, "set_person") as mock_pc:
+            app_window._refresh_all_panels()
+        mock_mv.assert_called_with(5)
+        mock_pc.assert_called_with(5)
+
+
+class TestLoadResultsFromOutputDir:
+    """_load_results_from_output_dir scans person directories on disk."""
+
+    def test_creates_tracks_from_person_dirs(self, app_window, tmp_path):
+        """Person directories are discovered and loaded into session."""
+        import csv
+
+        for i in range(2):
+            pdir = tmp_path / f"person_{i}"
+            pdir.mkdir()
+            csv_path = pdir / "confidence.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "detection", "visible_kp", "bbox_overlap",
+                    "shape_dist", "motion_dist", "overall",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "detection": 0.9, "visible_kp": 0.8, "bbox_overlap": 0.1,
+                    "shape_dist": 0.05, "motion_dist": 0.02, "overall": 0.85,
+                })
+
+        app_window._session.num_frames = 1
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._load_results_from_output_dir(tmp_path)
+
+        assert 0 in app_window._session.person_tracks
+        assert 1 in app_window._session.person_tracks
+        assert app_window._session.person_tracks[0].person_dir == tmp_path / "person_0"
+
+    def test_skips_non_person_dirs(self, app_window, tmp_path):
+        """Directories not matching person_N pattern are ignored."""
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "person_0").mkdir()
+        (tmp_path / "config.json").touch()
+
+        app_window._session.num_frames = 1
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._load_results_from_output_dir(tmp_path)
+
+        assert len(app_window._session.person_tracks) == 1
+
+    def test_empty_output_dir_is_noop(self, app_window, tmp_path):
+        """No person directories means no tracks loaded."""
+        app_window._session.num_frames = 1
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._load_results_from_output_dir(tmp_path)
+
+        assert len(app_window._session.person_tracks) == 0
+
+    def test_loads_crossing_spans(self, app_window, tmp_path):
+        """Crossing spans JSON files are loaded from person dirs."""
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+
+        spans = [[10, 20], [50, 60]]
+        (pdir / "crossing_spans.json").write_text(json.dumps(spans))
+
+        app_window._session.num_frames = 100
+        app_window._pipeline_dock.set_mode("multi")
+        app_window._load_results_from_output_dir(tmp_path)
+
+        assert 0 in app_window._session.crossing_spans
+        assert app_window._session.crossing_spans[0] == [(10, 20), (50, 60)]
+
+
+class TestMultiPipelineFinishedUsesRefresh:
+    """_on_multi_pipeline_finished uses _refresh_all_panels."""
+
+    def test_refresh_called_after_pipeline(self, app_window):
+        """After multi pipeline finishes, _refresh_all_panels is called."""
+        with patch.object(app_window, "_refresh_all_panels") as mock_r, \
+             patch.object(app_window, "_load_person_tracks_from_result"):
+            app_window._on_multi_pipeline_finished({"output_dir": "/tmp/out"})
+        mock_r.assert_called_once()
+
+
+class TestSessionLoadRefreshesData:
+    """Loading a session triggers hydration and panel refresh."""
+
+    def test_session_with_tracks_triggers_hydrate_via_video_load(
+        self, app_window, tmp_path,
+    ):
+        """When a session has person tracks and a video, hydration occurs."""
+        from models.session import PersonTrack
+
+        # Create a session with a person track
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+        session = Session(
+            video_path=tmp_path / "video.mp4",
+            num_frames=50,
+            fps=30.0,
+            output_dir=tmp_path,
+        )
+        session.person_tracks[0] = PersonTrack(
+            person_id=0, person_dir=pdir,
+        )
+        session_path = tmp_path / "session.json"
+        session.save(session_path)
+
+        # Create the video file so _load_video gets called
+        (tmp_path / "video.mp4").touch()
+
+        with patch.object(app_window._pipeline_dock.current_settings,
+                          "_load_video") as mock_load:
+            app_window._load_session(session_path)
+
+        # Video should have been loaded
+        mock_load.assert_called_once()
+        # Session path should be set
+        assert app_window._session_path == session_path

@@ -22,6 +22,9 @@ fi
 
 ITERATION=0
 
+# Ctrl+C kills the loop cleanly
+trap 'echo -e "\n━━━ Loop stopped by user ━━━"; exit 0' INT TERM
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Mode:   $MODE"
 echo "Prompt: $PROMPT_FILE"

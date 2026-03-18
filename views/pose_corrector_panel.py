@@ -532,6 +532,172 @@ def _detect_low_confidence(
     return issues
 
 
+def smooth_joint_rotations(
+    body_pose: np.ndarray,
+    start: int,
+    end: int,
+    joint_indices: list[int] | None = None,
+    window: int = 7,
+    method: str = "gaussian",
+) -> np.ndarray:
+    """Apply temporal smoothing to joint rotations over a frame range.
+
+    Why: GVHMR body pose estimates often exhibit high-frequency jitter,
+    especially in occluded joints. Temporal smoothing reduces this noise
+    while preserving deliberate motion. Operates on axis-angle representation
+    directly — sufficient for small perturbations where geodesic smoothing
+    would be overkill.
+
+    Parameters
+    ----------
+    body_pose : (N, J, 3) axis-angle array
+    start, end : inclusive frame range to smooth
+    joint_indices : which joints to smooth (body_pose indices, 0-based).
+        None means all joints.
+    window : smoothing kernel size (must be odd, >= 3)
+    method : "gaussian" or "moving_average"
+
+    Returns
+    -------
+    (N, J, 3) smoothed copy — only the [start:end+1] range is modified.
+    """
+    if body_pose.ndim != 3:
+        return body_pose.copy()
+
+    n_frames, n_joints, _ = body_pose.shape
+    if window < 3:
+        window = 3
+    if window % 2 == 0:
+        window += 1
+
+    result = body_pose.copy()
+    start = max(0, start)
+    end = min(n_frames - 1, end)
+
+    if joint_indices is None:
+        joint_indices = list(range(n_joints))
+
+    half = window // 2
+
+    if method == "gaussian":
+        x = np.arange(-half, half + 1, dtype=np.float64)
+        sigma = half / 2.0
+        kernel = np.exp(-0.5 * (x / sigma) ** 2)
+        kernel /= kernel.sum()
+    else:
+        kernel = np.ones(window, dtype=np.float64) / window
+
+    for ji in joint_indices:
+        if ji < 0 or ji >= n_joints:
+            continue
+        for f in range(start, end + 1):
+            w_start = max(0, f - half)
+            w_end = min(n_frames - 1, f + half)
+            k_start = w_start - (f - half)
+            k_end = window - ((f + half) - w_end)
+            k_slice = kernel[k_start:k_end]
+            k_slice = k_slice / k_slice.sum()  # renormalize at edges
+            result[f, ji] = np.einsum(
+                "f,fd->d", k_slice, body_pose[w_start : w_end + 1, ji],
+            )
+
+    return result
+
+
+def find_similar_frames(
+    body_pose: np.ndarray,
+    frame_idx: int,
+    joint_idx: int,
+    threshold_deg: float = 15.0,
+) -> list[int]:
+    """Find frames where a joint's rotation is similar to the reference frame.
+
+    Why: When GVHMR produces the same bad pose estimate repeatedly (e.g.,
+    a flipped arm in every other frame), manually correcting each frame is
+    tedious. Finding similar poses lets the user apply one correction to all
+    matching frames at once.
+
+    Parameters
+    ----------
+    body_pose : (N, J, 3) axis-angle array
+    frame_idx : reference frame
+    joint_idx : body_pose joint index (0-based, not SMPL-X index)
+    threshold_deg : maximum angular distance for a match
+
+    Returns
+    -------
+    Sorted list of matching frame indices (excluding the reference frame).
+    """
+    if body_pose.ndim != 3:
+        return []
+
+    n_frames, n_joints, _ = body_pose.shape
+    if joint_idx < 0 or joint_idx >= n_joints:
+        return []
+    if frame_idx < 0 or frame_idx >= n_frames:
+        return []
+
+    ref = body_pose[frame_idx, joint_idx]  # (3,)
+    all_joints = body_pose[:, joint_idx]  # (N, 3)
+    diffs = np.linalg.norm(all_joints - ref, axis=-1)  # (N,)
+    diffs_deg = np.degrees(diffs)
+    matches = np.where(diffs_deg <= threshold_deg)[0].tolist()
+    # Remove the reference frame itself
+    if frame_idx in matches:
+        matches.remove(frame_idx)
+    return sorted(matches)
+
+
+def propagate_corrections(
+    start_frame: int,
+    end_frame: int,
+    start_aa: np.ndarray,
+    end_aa: np.ndarray,
+) -> dict[int, np.ndarray]:
+    """Interpolate corrections between two keyframes using SLERP.
+
+    Why: When the user corrects poses at two keyframes (e.g., frame 10 and
+    frame 50), the correction should transition smoothly between them.
+    SLERP on the rotation produces natural interpolation through rotation
+    space, avoiding the gimbal-lock artifacts of linear euler interpolation.
+
+    Parameters
+    ----------
+    start_frame, end_frame : inclusive frame range
+    start_aa, end_aa : (3,) axis-angle rotations at keyframes
+
+    Returns
+    -------
+    Dict mapping frame_index → (3,) axis-angle for each intermediate frame.
+    Start and end frames are included.
+    """
+    if end_frame <= start_frame:
+        return {start_frame: start_aa.copy()}
+
+    try:
+        from scipy.spatial.transform import Rotation, Slerp
+
+        rots = Rotation.from_rotvec(np.stack([start_aa, end_aa]).astype(np.float64))
+        times = [0.0, 1.0]
+        slerp = Slerp(times, rots)
+
+        n = end_frame - start_frame + 1
+        t_values = np.linspace(0.0, 1.0, n)
+        interp = slerp(t_values)
+        result = {}
+        for i, f in enumerate(range(start_frame, end_frame + 1)):
+            result[f] = interp[i].as_rotvec().astype(np.float32)
+        return result
+    except ImportError:
+        # Fallback: linear interpolation in axis-angle space
+        n = end_frame - start_frame + 1
+        result = {}
+        for i, f in enumerate(range(start_frame, end_frame + 1)):
+            t = i / max(1, n - 1)
+            result[f] = ((1.0 - t) * start_aa + t * end_aa).astype(np.float32)
+        return result
+
+
 class PoseCorrectorPanel(QWidget):
     """Pose correction panel with embedded 3D viewport and joint controls.
 
@@ -690,6 +856,29 @@ class PoseCorrectorPanel(QWidget):
 
         ctrl_layout.addLayout(btn_row)
 
+        # Frame Range group — preview and apply corrections across frames
+        range_group = QGroupBox("Frame Range")
+        range_layout = QVBoxLayout(range_group)
+
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Start:"))
+        self._range_start = QSpinBox()
+        self._range_start.setRange(0, 999999)
+        range_row.addWidget(self._range_start)
+        range_row.addWidget(QLabel("End:"))
+        self._range_end = QSpinBox()
+        self._range_end.setRange(0, 999999)
+        range_row.addWidget(self._range_end)
+        range_layout.addLayout(range_row)
+
+        self._apply_range_check = QCheckBox("Apply to range")
+        self._apply_range_check.setToolTip(
+            "When checked, Apply commits the correction to all frames in range"
+        )
+        range_layout.addWidget(self._apply_range_check)
+
+        ctrl_layout.addWidget(range_group)
+
         # Quick Fix group
         qf_group = QGroupBox("Quick Fix")
         qf_layout = QVBoxLayout(qf_group)
@@ -713,6 +902,88 @@ class PoseCorrectorPanel(QWidget):
         qf_layout.addLayout(qf_row2)
 
         ctrl_layout.addWidget(qf_group)
+
+        # Smoothing group — temporal smoothing to reduce jitter
+        smooth_group = QGroupBox("Smoothing")
+        smooth_layout = QVBoxLayout(smooth_group)
+
+        smooth_row1 = QHBoxLayout()
+        smooth_row1.addWidget(QLabel("Window:"))
+        self._smooth_window = QSpinBox()
+        self._smooth_window.setRange(3, 31)
+        self._smooth_window.setSingleStep(2)
+        self._smooth_window.setValue(7)
+        self._smooth_window.setToolTip("Kernel size (odd, 3-31 frames)")
+        smooth_row1.addWidget(self._smooth_window)
+        smooth_row1.addWidget(QLabel("Method:"))
+        self._smooth_method = QComboBox()
+        self._smooth_method.addItems(["Gaussian", "Moving Average"])
+        smooth_row1.addWidget(self._smooth_method)
+        smooth_layout.addLayout(smooth_row1)
+
+        smooth_row2 = QHBoxLayout()
+        smooth_row2.addWidget(QLabel("Scope:"))
+        self._smooth_scope = QComboBox()
+        self._smooth_scope.addItems(["Current Joint", "All Body Joints"])
+        smooth_row2.addWidget(self._smooth_scope)
+        self._smooth_btn = QPushButton("Smooth")
+        self._smooth_btn.setToolTip(
+            "Apply temporal smoothing to the selected joint(s) over the frame range"
+        )
+        smooth_row2.addWidget(self._smooth_btn)
+        smooth_layout.addLayout(smooth_row2)
+
+        ctrl_layout.addWidget(smooth_group)
+
+        # Apply-to-Similar group — find and correct similar poses
+        sim_group = QGroupBox("Apply to Similar")
+        sim_layout = QVBoxLayout(sim_group)
+
+        sim_row = QHBoxLayout()
+        sim_row.addWidget(QLabel("Threshold:"))
+        self._sim_threshold = QDoubleSpinBox()
+        self._sim_threshold.setRange(1.0, 90.0)
+        self._sim_threshold.setValue(15.0)
+        self._sim_threshold.setSingleStep(1.0)
+        self._sim_threshold.setSuffix("°")
+        self._sim_threshold.setToolTip("Maximum angular distance for a match")
+        sim_row.addWidget(self._sim_threshold)
+        self._sim_apply_btn = QPushButton("Apply to Similar")
+        self._sim_apply_btn.setToolTip(
+            "Find frames with similar joint rotation and apply the same correction"
+        )
+        sim_row.addWidget(self._sim_apply_btn)
+        sim_layout.addLayout(sim_row)
+
+        self._sim_status = QLabel("")
+        self._sim_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._sim_status.setWordWrap(True)
+        sim_layout.addWidget(self._sim_status)
+
+        ctrl_layout.addWidget(sim_group)
+
+        # Propagation group — interpolate corrections between keyframes
+        prop_group = QGroupBox("Correction Propagation")
+        prop_layout = QVBoxLayout(prop_group)
+
+        self._propagate_btn = QPushButton("Propagate (SLERP)")
+        self._propagate_btn.setToolTip(
+            "Interpolate the current joint correction across the frame range "
+            "using spherical linear interpolation (SLERP). Set start/end "
+            "frames in the Frame Range group above."
+        )
+        prop_layout.addWidget(self._propagate_btn)
+
+        self._prop_status = QLabel("")
+        self._prop_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._prop_status.setWordWrap(True)
+        prop_layout.addWidget(self._prop_status)
+
+        ctrl_layout.addWidget(prop_group)
 
         # Auto-Detect group
         ad_group = QGroupBox("Auto-Detect")
@@ -901,6 +1172,15 @@ class PoseCorrectorPanel(QWidget):
         # Export buttons
         self._reexport_bvh_btn.clicked.connect(self._on_reexport_bvh)
         self._reexport_fbx_btn.clicked.connect(self._on_reexport_fbx)
+
+        # Smoothing
+        self._smooth_btn.clicked.connect(self._on_smooth)
+
+        # Apply to Similar
+        self._sim_apply_btn.clicked.connect(self._on_apply_to_similar)
+
+        # Propagation
+        self._propagate_btn.clicked.connect(self._on_propagate)
 
         # Auto-detect buttons
         self._detect_btn.clicked.connect(self._on_detect_bad_spans)
@@ -1123,54 +1403,37 @@ class PoseCorrectorPanel(QWidget):
                 body_pose=snap["body_pose"],
             )
 
-    def _on_apply(self):
-        """Commit current correction to CorrectionTrack."""
-        if self._current_joint < 0 or self._current_person < 0:
-            return
+    def _apply_correction_at_frame(
+        self,
+        pid: int,
+        frame: int,
+        joint: int,
+        aa: np.ndarray,
+        CorrectionTrack,
+    ):
+        """Apply a single correction at one frame (helper for _on_apply).
 
-        _, euler_to_aa, CorrectionTrack = _safe_import_pose_correction()
-        if euler_to_aa is None or CorrectionTrack is None:
-            log.warning("Cannot apply correction: pose_correction backend unavailable")
-            return
-
-        euler = np.array([
-            self._euler_x.value(),
-            self._euler_y.value(),
-            self._euler_z.value(),
-        ], dtype=np.float32)
-
-        aa = euler_to_aa(euler)
-
-        pid = self._current_person
-        frame = self._current_frame
-        joint = self._current_joint
-
-        # Snapshot for undo
+        Returns (old_corr_snap, old_raw, new_corr_snap, new_raw) for undo.
+        """
         old_corr_snap = self._snapshot_correction(pid, frame)
         old_raw = self._snapshot_raw_param(joint, frame)
 
-        # Ensure correction track exists
         if pid not in self._session.correction_tracks:
             self._session.correction_tracks[pid] = CorrectionTrack(person_id=pid)
-
         ct = self._session.correction_tracks[pid]
 
-        # Build correction (merge with existing if any)
         go = None
         bp = None
         ctype = "joint"
 
-        if self._current_joint == 0:
+        if joint == 0:
             go = aa
             ctype = "global_orient"
-        elif 1 <= self._current_joint <= 21:
-            bp = {self._current_joint - 1: aa}
+        elif 1 <= joint <= 21:
+            bp = {joint - 1: aa}
         else:
-            # Hand joints cannot be committed to CorrectionTrack
-            log.info("Hand joint corrections not supported in CorrectionTrack")
-            return
+            return None
 
-        # Merge with existing correction at this frame
         existing = ct.get_correction(frame)
         if existing is not None:
             if go is None:
@@ -1189,47 +1452,95 @@ class PoseCorrectorPanel(QWidget):
             body_pose=bp,
         )
 
-        # Also update the raw params so the mesh renders the corrected pose
-        # without needing the override active
-        self._apply_to_raw_params(self._current_joint, aa, frame)
+        self._apply_to_raw_params(joint, aa, frame)
 
-        # Snapshot post-state for redo
         new_corr_snap = self._snapshot_correction(pid, frame)
         new_raw = self._snapshot_raw_param(joint, frame)
 
-        def undo(p=pid, f=frame, j=joint, oc=old_corr_snap, oraw=old_raw):
-            self._restore_correction(p, f, oc)
-            if oraw is not None:
-                self._current_person = p
-                self._apply_to_raw_params(j, oraw, f)
-            self._viewport.invalidate_cache(p, f)
+        return (old_corr_snap, old_raw, new_corr_snap, new_raw)
+
+    def _on_apply(self):
+        """Commit current correction to CorrectionTrack.
+
+        When 'Apply to range' is checked, applies the same correction to
+        every frame in the Frame Range. Otherwise applies to current frame only.
+        """
+        if self._current_joint < 0 or self._current_person < 0:
+            return
+
+        _, euler_to_aa, CorrectionTrack = _safe_import_pose_correction()
+        if euler_to_aa is None or CorrectionTrack is None:
+            log.warning("Cannot apply correction: pose_correction backend unavailable")
+            return
+
+        euler = np.array([
+            self._euler_x.value(),
+            self._euler_y.value(),
+            self._euler_z.value(),
+        ], dtype=np.float32)
+
+        aa = euler_to_aa(euler)
+
+        pid = self._current_person
+        joint = self._current_joint
+
+        if joint > 21:
+            log.info("Hand joint corrections not supported in CorrectionTrack")
+            return
+
+        # Determine which frames to apply to
+        if self._apply_range_check.isChecked():
+            f_start = self._range_start.value()
+            f_end = self._range_end.value()
+            if f_end < f_start:
+                f_start, f_end = f_end, f_start
+            frames = list(range(f_start, f_end + 1))
+        else:
+            frames = [self._current_frame]
+
+        # Collect undo data for all frames
+        undo_data = []
+        for f in frames:
+            result = self._apply_correction_at_frame(pid, f, joint, aa, CorrectionTrack)
+            if result is not None:
+                undo_data.append((f, result))
+
+        if not undo_data:
+            return
+
+        def undo(p=pid, j=joint, ud=undo_data):
+            self._current_person = p
+            for f, (oc, oraw, _nc, _nraw) in ud:
+                self._restore_correction(p, f, oc)
+                if oraw is not None:
+                    self._apply_to_raw_params(j, oraw, f)
+                self._viewport.invalidate_cache(p, f)
             self._viewport._refresh_mesh()
             self._update_sliders()
             self._refresh_corrections_table()
 
-        def redo(p=pid, f=frame, j=joint, nc=new_corr_snap, nraw=new_raw):
-            self._restore_correction(p, f, nc)
-            if nraw is not None:
-                self._current_person = p
-                self._apply_to_raw_params(j, nraw, f)
-            self._viewport.invalidate_cache(p, f)
+        def redo(p=pid, j=joint, ud=undo_data):
+            self._current_person = p
+            for f, (_oc, _oraw, nc, nraw) in ud:
+                self._restore_correction(p, f, nc)
+                if nraw is not None:
+                    self._apply_to_raw_params(j, nraw, f)
+                self._viewport.invalidate_cache(p, f)
             self._viewport._refresh_mesh()
             self._update_sliders()
             self._refresh_corrections_table()
 
-        self._session.undo_stack.push(UndoEntry("Apply correction", undo, redo))
+        n = len(frames)
+        desc = f"Apply correction ({n} frame{'s' if n > 1 else ''})"
+        self._session.undo_stack.push(UndoEntry(desc, undo, redo))
 
-        # Clear preview override (correction is now committed)
         self._viewport.set_pose_override(None)
-
-        # Persist to file
         self._save_correction_track(pid)
-
         self._refresh_corrections_table()
 
-        log.info("Correction applied: person=%d, frame=%d, joint=%d",
-                 pid, frame, self._current_joint)
-        self.correction_applied.emit(pid, frame)
+        log.info("Correction applied: person=%d, %d frames, joint=%d",
+                 pid, n, self._current_joint)
+        self.correction_applied.emit(pid, frames[0])
 
     def _on_reset_joint(self):
         """Reset current joint to original pose (remove from correction)."""
@@ -1825,6 +2136,22 @@ class PoseCorrectorPanel(QWidget):
                 if pid not in self._session.inactive_tracks:
                     self._space_ref_combo.addItem(f"Person {pid}", userData=pid)
         self._space_ref_combo.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # Smoothing / Apply-to-Similar / Propagation (Phase 5 UX)
+    # ------------------------------------------------------------------
+
+    def _on_smooth(self):
+        """Apply temporal smoothing to selected joint(s). (Phase 5 — TODO)"""
+        logger.info("Smooth: not yet implemented")
+
+    def _on_apply_to_similar(self):
+        """Find and correct frames with similar pose errors. (Phase 5 — TODO)"""
+        logger.info("Apply to Similar: not yet implemented")
+
+    def _on_propagate(self):
+        """Propagate correction with falloff to neighboring frames. (Phase 5 — TODO)"""
+        logger.info("Propagate: not yet implemented")
 
     # ------------------------------------------------------------------
     # BVH/FBX export

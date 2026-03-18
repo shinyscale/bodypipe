@@ -323,6 +323,7 @@ class AppWindow(QMainWindow):
         self._default_state = self.saveState(self._DOCK_VERSION)
         self._restore_geometry()
         self._restore_pipeline_configs()
+        self._restore_last_video()
 
     # ------------------------------------------------------------------
     # UI Setup
@@ -778,10 +779,14 @@ class AppWindow(QMainWindow):
             self._show_frame(frame_idx)
 
     def _on_video_loaded(self, video_path):
-        """Load video into the shared VideoPlayer."""
+        """Load video into the shared VideoPlayer and restore cached results."""
         self._video_player.set_video(
             video_path, self._session.num_frames, self._session.fps,
         )
+        # Persist last video path for startup restore
+        self._settings.setValue("last_video_path", str(video_path))
+        # Check for existing pipeline results on disk
+        self._try_restore_results(video_path)
 
     def _show_frame(self, frame_idx: int):
         """Display the current frame with bbox overlays and edit preview."""
@@ -797,6 +802,187 @@ class AppWindow(QMainWindow):
             if self._edit_preview:
                 composited = render_edit_preview(composited, self._edit_preview)
             self._video_player.set_frame(composited)
+
+    # ------------------------------------------------------------------
+    # Startup restore & result loading
+    # ------------------------------------------------------------------
+
+    def _restore_last_video(self):
+        """On startup, restore the last-loaded video into the current settings panel.
+
+        Why: Without this, the app starts with all docks empty even if the user
+        was working on a video in the previous session. Pipeline configs are
+        restored by _restore_pipeline_configs(), but the video itself was not.
+        """
+        last_path = self._settings.value("last_video_path")
+        if not last_path or not isinstance(last_path, str):
+            return
+        path = Path(last_path)
+        if not path.is_file():
+            return
+        settings = self._pipeline_dock.current_settings
+        if hasattr(settings, "_load_video"):
+            settings._load_video(str(path))
+
+    def _try_restore_results(self, video_path):
+        """Load cached pipeline results if a previous run exists for this video.
+
+        Why: When a previously-processed video is loaded (on startup or via
+        File > Open), the user expects to see their results immediately — not
+        a blank 3D viewport and empty inspector.  This checks for existing
+        person tracks (from a loaded session) or scans the expected output
+        directory for the current pipeline mode.
+        """
+        video_path = Path(video_path)
+
+        # If session already has person tracks (loaded from session JSON),
+        # hydrate heavy data from disk and refresh all panels.
+        if self._session.person_tracks:
+            self._hydrate_person_tracks()
+            self._refresh_all_panels()
+            return
+
+        # Otherwise, check for cached results on disk
+        mode = self._pipeline_dock.current_mode
+
+        # Use existing output_dir from session if valid, else derive from mode
+        if self._session.output_dir and self._session.output_dir.is_dir():
+            output_dir = self._session.output_dir
+        elif mode == "multi":
+            output_dir = self._gvhmr_root / "outputs" / "multi_person" / video_path.stem
+        else:
+            output_dir = self._gvhmr_root / "outputs" / "demo" / video_path.stem
+
+        if not output_dir.is_dir():
+            return
+
+        self._session.output_dir = output_dir
+
+        if mode == "multi":
+            self._load_results_from_output_dir(output_dir)
+        else:
+            # Single/perf: load output preview video if available
+            for name in ("side_by_side.mp4", "incam.mp4"):
+                preview = output_dir / name
+                if preview.is_file():
+                    self._load_output_preview(preview)
+                    break
+
+    def _load_results_from_output_dir(self, output_dir: Path):
+        """Load person tracks from an existing multi-person output directory.
+
+        Why: After the tab→dock migration, pipeline results were only loaded
+        when the pipeline finished (via _on_multi_pipeline_finished). This
+        method enables loading cached results from disk on startup or when
+        a previously-processed video is opened, without re-running the pipeline.
+        """
+        from models.session import PersonTrack
+
+        # Discover person directories on disk
+        person_dirs = sorted(
+            [d for d in output_dir.iterdir()
+             if d.is_dir() and d.name.startswith("person_")],
+            key=lambda d: d.name,
+        )
+        if not person_dirs:
+            return
+
+        for pdir in person_dirs:
+            try:
+                pid = int(pdir.name.split("_")[1])
+            except (IndexError, ValueError):
+                continue
+
+            confidences, confidence_breakdown = self._load_confidences_csv(pdir)
+            smplx_params = self._load_smplx_params(pdir)
+
+            pt = PersonTrack(
+                person_id=pid,
+                person_dir=pdir,
+                confidences=confidences,
+                confidence_breakdown=confidence_breakdown,
+                smplx_params=smplx_params,
+            )
+            self._session.person_tracks[pid] = pt
+
+        # Load crossing spans
+        import json as _json
+        for pid, pt in self._session.person_tracks.items():
+            if pt.person_dir:
+                spans_path = pt.person_dir / "crossing_spans.json"
+                if spans_path.is_file():
+                    try:
+                        spans = _json.loads(spans_path.read_text())
+                        self._session.crossing_spans[pid] = [
+                            tuple(s) for s in spans
+                        ]
+                    except Exception:
+                        pass
+
+        self._refresh_all_panels()
+
+    def _hydrate_person_tracks(self):
+        """Load heavy data (smplx_params, confidences) from disk for existing tracks.
+
+        Why: Session JSON stores lightweight fields (person_id, person_dir,
+        keyframes) but not heavy data like SMPL-X parameters or per-frame
+        confidence arrays.  This method fills in the gaps from disk so that
+        the 3D viewport, identity inspector, and track overview can render.
+        """
+        for _pid, track in self._session.person_tracks.items():
+            if not track.person_dir or not track.person_dir.is_dir():
+                continue
+            if track.smplx_params is None:
+                track.smplx_params = self._load_smplx_params(track.person_dir)
+            if track.confidences is None:
+                track.confidences, track.confidence_breakdown = (
+                    self._load_confidences_csv(track.person_dir)
+                )
+
+    def _refresh_all_panels(self):
+        """Refresh all panels from current session state after results are loaded.
+
+        Why: Multiple code paths need the same "populate everything" logic —
+        startup restore, session load, pipeline finish, reprocess complete.
+        Centralising it here prevents duplication and ensures nothing is missed.
+        """
+        if not self._session.person_tracks:
+            return
+
+        # Populate track overview and markers
+        self._populate_tracks()
+
+        # Refresh identity inspector
+        self._identity_inspector.refresh()
+
+        # Auto-select first person if none selected
+        if self._session.selected_person < 0:
+            first_pid = min(self._session.person_tracks.keys())
+            self._session.selected_person = first_pid
+
+        pid = self._session.selected_person
+        self._identity_inspector.set_person(pid)
+        self._mesh_viewport.set_person(pid)
+        self._pose_corrector.set_person(pid)
+
+        # Broadcast current frame to all panels
+        frame = self._session.current_frame
+        self._track_overview.set_current_frame(frame)
+        self._identity_inspector.set_frame(frame)
+        self._pose_corrector.on_frame_changed(frame)
+        raw = self._video_player.get_raw_frame(frame)
+        if raw is not None:
+            self._mesh_viewport.set_video_frame(raw)
+            self._mesh_viewport.on_frame_changed(frame)
+
+        # Show composited frame with overlays in multi mode
+        if self._pipeline_dock.current_mode == "multi":
+            self._show_frame(frame)
+
+        log.info(
+            "Panels refreshed: %d person tracks, selected person %d",
+            len(self._session.person_tracks), pid,
+        )
 
     # ------------------------------------------------------------------
     # Track / person interaction (signal hub for multi mode)
@@ -872,8 +1058,7 @@ class AppWindow(QMainWindow):
         if multi_result is not None:
             self._load_person_tracks_from_result(multi_result)
 
-        self._populate_tracks()
-        self._identity_inspector.refresh()
+        self._refresh_all_panels()
 
     # ------------------------------------------------------------------
     # Reprocess

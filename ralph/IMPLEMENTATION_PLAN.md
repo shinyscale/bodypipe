@@ -212,20 +212,66 @@ Full spec: `spec/ux-overhaul.md`
 
 1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2
 
-## Remaining UX Overhaul Phases
+## Current Task Queue
 
-- [ ] **Phase 5**: Pose Correction UX Upgrades — preview range slider, smoothing controls, apply-to-similar, correction propagation
-- [ ] **Phase 3**: Transport & Scrubbing Polish — viewport-embedded transport, speed presets, read-ahead increase
-- [ ] **Phase 10**: Keyboard & Interaction Polish — context-aware shortcuts, on-screen HUD
-- [ ] **Phase 8**: Property Panel Refinement — tabbed parameter groups, consistent grid layout
-- [ ] **Phase 9**: Session Library — media pool dock with thumbnails, metadata, tags
+### CRITICAL: Fix dock data flow regressions
+
+The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock layout works and tests pass, but the live app has these issues:
+
+- [x] **Video Player dock is empty** — Fixed by saving last video path in QSettings and restoring on startup via `_restore_last_video()`. `_on_video_loaded` now also triggers `_try_restore_results()` to load cached pipeline output.
+- [x] **3D Mesh dock is empty** — Fixed by `_refresh_all_panels()` which calls `set_person()` and `on_frame_changed()` on MeshViewport after results are loaded.
+- [x] **Identity Inspector dock not populated** — Fixed by `_refresh_all_panels()` calling `refresh()`, `set_person()`, `set_frame()` on the inspector.
+- [x] **Pose Corrector dock not populated** — Fixed by `_refresh_all_panels()` calling `set_person()` and `on_frame_changed()` on PoseCorrectorPanel.
+- [x] **Track Overview not synced** — Fixed by `_refresh_all_panels()` calling `_populate_tracks()` and `set_current_frame()`. Track click signal hub was already wired correctly.
+- [x] **Pipeline results not loading on startup** — Fixed by `_try_restore_results()` which checks for existing output dirs and loads person tracks from disk via `_load_results_from_output_dir()`, or hydrates existing session tracks via `_hydrate_person_tracks()`.
+- [x] **Workspace presets should show correct panels** — Fixed as a side effect — the panels are now populated before workspace presets are applied.
+- [ ] **Missing stub methods** — `_on_smooth`, `_on_apply_to_similar`, `_on_propagate` in PoseCorrectorPanel were added as stubs (they log "not yet implemented"). These prevent the crash but need real implementations in Phase 5.
+
+**Test verification:** After fixes, `python main.py` with a previously-processed video should show: video frames in Video dock with working transport controls, 3D mesh in Mesh dock, populated Identity Inspector, populated Pose Corrector, and synced Track Timeline.
+
+**Architecture:** Added 5 new methods to AppWindow:
+- `_restore_last_video()` — startup video path restore from QSettings
+- `_try_restore_results(video_path)` — detects cached output and routes to loader
+- `_load_results_from_output_dir(output_dir)` — scans person_N dirs, creates PersonTrack objects
+- `_hydrate_person_tracks()` — loads smplx_params + confidences from disk for existing tracks
+- `_refresh_all_panels()` — centralised "populate everything" (replaces ad-hoc calls in _on_multi_pipeline_finished, etc.)
+24 new tests in tests/test_app_window.py. All 1355 tests pass.
+
+### Phase 3: Transport & Scrubbing Polish
+
+- [ ] Overlay transport controls semi-transparently on the Video Player dock (like Mocha Pro). Auto-hide after 2s of mouse inactivity. Show on mouse enter. Contents: play/pause, frame-back/forward, current frame / total, timecode, speed selector.
+- [ ] Replace freeform speed control with toggle chips: 0.25x | 0.5x | 1x | 2x | 4x. Display in transport bar and track timeline footer.
+- [ ] Increase frame cache read-ahead from 15 to 30 during playback.
+
+### Phase 5: Pose Correction UX Upgrades
+
+- [ ] **Preview range slider** — below Euler spinboxes, ±N frames (default ±15). When adjusting a correction, auto-play the range so artist sees temporal impact.
+- [ ] **Smoothing controls** — implement `_on_smooth()`: Gaussian or Moving Average filter on selected joint over configurable frame window (3/5/7/9 frames). Apply to "Current Joint" or "All Body Joints" scope.
+- [ ] **Apply to Similar** — implement `_on_apply_to_similar()`: find all frames matching current joint angle + velocity thresholds, apply same correction. For repeated errors like "all right knees flex past 150°".
+- [ ] **Correction propagation** — implement `_on_propagate()`: modes are "This frame only" (current), "Smooth falloff" (cosine blend over ±K frames), "Until next keyframe".
+
+### Phase 10: Keyboard & Interaction Polish
+
+- [ ] Context-aware shortcuts that change by active tool/mode: Navigate (WASD orbit, G go-to-frame), Select (click pick joint, shift+click add), Correct (G open euler, R reset), Track (G next unreviewed, Tab next person).
+- [ ] Mode indicator in status bar.
+- [ ] On-screen HUD overlay on viewport (bottom-right): current frame, playback speed, active mode, selected person, FPS counter. Auto-hide after 2s idle. Toggle via View menu.
+
+### Phase 8: Property Panel Refinement
+
+- [ ] Reorganize PoseCorrectorPanel into collapsible/tabbed sections: Pose, Corrections, Export, Space.
+- [ ] Consistent grid layout: labels 120px column, same-width spinboxes, same-height sliders, monospace numeric fields.
+
+### Phase 9: Session Library
+
+- [ ] New dock widget: media-pool-style panel. Thumbnail per session (first frame, 80px), metadata (video name, duration, person count, correction count, date), user-assignable tags, version indicator, double-click to load.
+- [ ] Session annotations: free-text notes stored in session JSON, displayed in tooltip.
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — 1331 tests pass
-2. `QT_QPA_PLATFORM=offscreen python main.py --smoke-test` — app launches
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1355 tests pass
+2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
-4. Workspace presets restore correct layouts
+4. Workspace presets restore correct layouts with populated panels
 5. 3D viewport: chain highlights, heatmap toggle, quality modes (wireframe/fast/full)
-6. Auto-switch to wireframe during slider scrubbing and playback
+6. Full end-to-end: load video → run pipeline → results populate all panels → corrections workflow functional
 7. Track timeline: zoom (scroll wheel), pan (middle-drag), click to select person + seek, collapsible lanes, marker overlays
