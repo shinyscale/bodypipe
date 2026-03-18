@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Signal, Qt, QSize
+from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from models.session import Session
@@ -224,6 +225,18 @@ _HAND_JOINT_COLOR = np.array([0.6, 0.6, 0.6], dtype=np.float32)
 _JOINT_POINT_SIZE = 6.0
 _SELECTED_JOINT_POINT_SIZE = 12.0
 _BONE_LINE_WIDTH = 2.0
+
+# Joint label rendering constants
+_LABEL_FONT_SIZE = 9
+_LABEL_BG_COLOR = QColor(0, 0, 0, 180)       # semi-transparent black
+_LABEL_TEXT_COLOR = QColor(220, 220, 220)      # light gray
+_LABEL_SELECTED_BG = QColor(233, 69, 96, 200) # accent with alpha
+_LABEL_SELECTED_TEXT = QColor(255, 255, 255)   # white
+_LABEL_PADDING_X = 3   # horizontal padding inside label bg
+_LABEL_PADDING_Y = 1   # vertical padding inside label bg
+_LABEL_OFFSET_X = 8    # pixels right of joint point
+_LABEL_OFFSET_Y = -4   # pixels above joint point center
+_LABEL_MARGIN = 4       # viewport edge margin (labels clamped inside)
 
 # Joint color palette for per-joint vertex coloring — 22 distinct colors for body joints.
 # Hand joints (22–51) inherit the color of their parent wrist (L=20, R=21).
@@ -663,6 +676,58 @@ _GRID_COLOR = np.array([0.25, 0.25, 0.28], dtype=np.float32)      # dim gray
 _GRID_AXIS_COLOR = np.array([0.40, 0.40, 0.45], dtype=np.float32) # brighter center lines
 
 
+def compute_joint_label_layout(
+    joints_2d: np.ndarray,
+    viewport_w: int,
+    viewport_h: int,
+    selected_joint: int = -1,
+    body_only: bool = True,
+    margin: int = _LABEL_MARGIN,
+) -> list[tuple[int, str, float, float, bool]]:
+    """Compute label positions for visible joints, clamped to viewport.
+
+    Pure function — no Qt dependency, testable without a widget.
+
+    Parameters
+    ----------
+    joints_2d : (N, 2) screen-space joint positions (from project_joints_to_screen)
+    viewport_w, viewport_h : widget pixel dimensions
+    selected_joint : index of the currently selected joint (-1 for none)
+    body_only : if True, only label body joints (0-21) plus selected joint
+    margin : minimum pixel distance from viewport edge
+
+    Returns
+    -------
+    labels : list of (joint_idx, name, screen_x, screen_y, is_selected)
+        Sorted with selected joint last (drawn on top).
+    """
+    n_joints = min(len(joints_2d), len(JOINT_NAMES))
+    max_idx = _N_BODY_JOINTS if body_only else n_joints
+
+    labels = []
+    for i in range(n_joints):
+        # Include body joints or all joints, always include selected
+        if i >= max_idx and i != selected_joint:
+            continue
+
+        sx, sy = float(joints_2d[i, 0]), float(joints_2d[i, 1])
+
+        # Skip joints projected outside the viewport (with margin)
+        if sx < -50 or sx > viewport_w + 50 or sy < -50 or sy > viewport_h + 50:
+            continue
+
+        # Clamp label anchor to within viewport bounds
+        sx = max(margin, min(sx, viewport_w - margin))
+        sy = max(margin, min(sy, viewport_h - margin))
+
+        is_sel = (i == selected_joint)
+        labels.append((i, JOINT_NAMES[i], sx, sy, is_sel))
+
+    # Sort so selected joint label is drawn last (on top)
+    labels.sort(key=lambda t: t[4])
+    return labels
+
+
 def compute_grid_lines(
     size: float = _GRID_SIZE,
     divisions: int = _GRID_DIVISIONS,
@@ -817,6 +882,9 @@ class MeshViewport(_BaseWidget):
         #                  body_pose {int: (3,)} optional
         self._pose_override: dict | None = None
 
+        # Joint label overlay state (QPainter text over GL)
+        self._show_joint_labels: bool = False  # off by default, toggled by user
+
         # Grid floor state (orbit mode reference plane)
         self._show_grid: bool = True  # visible by default in orbit mode
         self._grid_y: float = 0.0  # Y level of the grid in GL space
@@ -924,6 +992,14 @@ class MeshViewport(_BaseWidget):
         if show == self._show_grid:
             return
         self._show_grid = show
+        if _HAS_GL:
+            self.update()
+
+    def set_show_joint_labels(self, show: bool):
+        """Toggle joint name text labels drawn over the skeleton."""
+        if show == self._show_joint_labels:
+            return
+        self._show_joint_labels = show
         if _HAS_GL:
             self.update()
 
@@ -1397,36 +1473,52 @@ class MeshViewport(_BaseWidget):
         if not self._gl_ready:
             return
 
+        # Use QPainter to enable 2D text overlay after GL rendering.
+        # beginNativePainting() brackets the raw GL calls; after
+        # endNativePainting() we draw joint labels with QPainter.
+        painter = QPainter(self)
+        painter.beginNativePainting()
+
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
         # Grid floor (orbit mode only, drawn first so mesh occludes it)
         if self._show_grid and self._camera_mode == "orbit":
             self._draw_grid()
 
-        if self._vertices is None or self._n_indices == 0:
-            return
+        if self._vertices is not None and self._n_indices > 0:
+            self._shader.bind()
 
-        self._shader.bind()
+            # Uniforms
+            self._set_mat4("model", self._model_mat)
+            self._set_mat4("view", self._view)
+            self._set_mat4("projection", self._projection)
+            self._set_vec3("light_dir", _LIGHT_DIR)
+            self._set_vec3("light_color", _LIGHT_COLOR)
+            self._set_vec3("ambient", _AMBIENT)
 
-        # Uniforms
-        self._set_mat4("model", self._model_mat)
-        self._set_mat4("view", self._view)
-        self._set_mat4("projection", self._projection)
-        self._set_vec3("light_dir", _LIGHT_DIR)
-        self._set_vec3("light_color", _LIGHT_COLOR)
-        self._set_vec3("ambient", _AMBIENT)
+            gl.glBindVertexArray(self._vao_id)
+            gl.glDrawElements(
+                gl.GL_TRIANGLES, self._n_indices, gl.GL_UNSIGNED_INT, None
+            )
+            gl.glBindVertexArray(0)
 
-        gl.glBindVertexArray(self._vao_id)
-        gl.glDrawElements(
-            gl.GL_TRIANGLES, self._n_indices, gl.GL_UNSIGNED_INT, None
-        )
-        gl.glBindVertexArray(0)
+            self._shader.release()
 
-        self._shader.release()
+            # Skeleton overlay (drawn on top of mesh)
+            if self._show_skeleton and self._joint_positions is not None:
+                self._draw_skeleton()
 
-        # Skeleton overlay (drawn on top of mesh)
-        if self._show_skeleton and self._joint_positions is not None:
-            self._draw_skeleton()
+        painter.endNativePainting()
+
+        # Joint name text overlay (QPainter 2D, after GL rendering)
+        if (
+            self._show_joint_labels
+            and self._show_skeleton
+            and self._joint_positions is not None
+        ):
+            self._draw_joint_labels(painter)
+
+        painter.end()
 
     # ------------------------------------------------------------------
     # Skeleton GL rendering
@@ -1549,6 +1641,62 @@ class MeshViewport(_BaseWidget):
         gl.glEnable(gl.GL_CULL_FACE)
 
         self._shader.release()
+
+    def _draw_joint_labels(self, painter: QPainter):
+        """Draw joint name text labels at projected joint positions.
+
+        Called from paintGL() after endNativePainting(), using QPainter for
+        crisp 2D text over the GL-rendered scene.  Label layout is computed
+        by the pure helper compute_joint_label_layout().
+        """
+        joints = self._joint_positions
+        if joints is None:
+            return
+
+        w = self.width() if self.width() > 0 else 200
+        h = self.height() if self.height() > 0 else 150
+        mvp = self._projection @ self._view @ self._model_mat
+        screen = project_joints_to_screen(joints, mvp, w, h)
+
+        labels = compute_joint_label_layout(
+            screen, w, h,
+            selected_joint=self._selected_joint,
+            body_only=True,
+        )
+        if not labels:
+            return
+
+        font = QFont("sans-serif", _LABEL_FONT_SIZE)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+
+        for _idx, name, sx, sy, is_sel in labels:
+            text_w = fm.horizontalAdvance(name)
+            text_h = fm.height()
+
+            # Position label to the right and slightly above the joint point
+            lx = int(sx + _LABEL_OFFSET_X)
+            ly = int(sy + _LABEL_OFFSET_Y)
+
+            # Clamp label box within viewport
+            lx = max(_LABEL_MARGIN, min(lx, w - text_w - 2 * _LABEL_PADDING_X - _LABEL_MARGIN))
+            ly = max(_LABEL_MARGIN + text_h, min(ly, h - _LABEL_MARGIN))
+
+            # Background rect
+            bg_color = _LABEL_SELECTED_BG if is_sel else _LABEL_BG_COLOR
+            txt_color = _LABEL_SELECTED_TEXT if is_sel else _LABEL_TEXT_COLOR
+
+            bg_x = lx - _LABEL_PADDING_X
+            bg_y = ly - text_h - _LABEL_PADDING_Y + fm.descent()
+            bg_w = text_w + 2 * _LABEL_PADDING_X
+            bg_h = text_h + 2 * _LABEL_PADDING_Y
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bg_color)
+            painter.drawRoundedRect(bg_x, bg_y, bg_w, bg_h, 2, 2)
+
+            painter.setPen(txt_color)
+            painter.drawText(lx, ly, name)
 
     def _draw_primitive(
         self,

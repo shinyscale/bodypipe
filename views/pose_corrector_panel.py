@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QGroupBox,
     QLabel,
+    QCheckBox,
     QComboBox,
     QPushButton,
     QDoubleSpinBox,
@@ -330,6 +331,9 @@ class PoseCorrectorPanel(QWidget):
         self._color_combo = QComboBox()
         self._color_combo.addItems(["Solid", "Joint influence", "Confidence"])
         mode_row.addWidget(self._color_combo)
+        self._labels_checkbox = QCheckBox("Labels")
+        self._labels_checkbox.setToolTip("Show joint name labels on skeleton")
+        mode_row.addWidget(self._labels_checkbox)
         mode_row.addStretch()
         vp_layout.addLayout(mode_row)
 
@@ -559,9 +563,10 @@ class PoseCorrectorPanel(QWidget):
         self._joint_combo.currentIndexChanged.connect(self._on_joint_dropdown_changed)
         self._person_combo.currentIndexChanged.connect(self._on_person_dropdown_changed)
 
-        # Camera/color mode
+        # Camera/color mode and labels toggle
         self._camera_combo.currentIndexChanged.connect(self._on_camera_mode_changed)
         self._color_combo.currentIndexChanged.connect(self._on_color_mode_changed)
+        self._labels_checkbox.toggled.connect(self._viewport.set_show_joint_labels)
 
         # Euler spinboxes (primary — sliders sync from these)
         self._euler_x.valueChanged.connect(self._on_euler_changed)

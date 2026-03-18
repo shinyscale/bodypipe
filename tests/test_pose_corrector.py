@@ -271,6 +271,22 @@ class TestPoseCorrectorPanelConstruction:
         assert panel._color_combo is not None
         assert panel._color_combo.count() == 3  # Solid, Joint influence, Confidence
 
+    def test_has_labels_checkbox(self, qapp):
+        """Labels checkbox should exist and be unchecked by default."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._labels_checkbox is not None
+        assert not panel._labels_checkbox.isChecked()
+
+    def test_labels_checkbox_toggles_viewport(self, qapp):
+        """Toggling the labels checkbox should set viewport joint labels."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        panel._labels_checkbox.setChecked(True)
+        assert panel._viewport._show_joint_labels is True
+        panel._labels_checkbox.setChecked(False)
+        assert panel._viewport._show_joint_labels is False
+
     def test_signals_exist(self, qapp):
         session = _make_session_with_params()
         panel = PoseCorrectorPanel(session=session)

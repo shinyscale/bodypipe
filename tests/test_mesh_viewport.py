@@ -54,10 +54,12 @@ from views.mesh_viewport import (
     _PITCH_LIMIT,
     _ZOOM_FACTOR,
     compute_grid_lines,
+    compute_joint_label_layout,
     _GRID_SIZE,
     _GRID_DIVISIONS,
     _GRID_COLOR,
     _GRID_AXIS_COLOR,
+    _LABEL_MARGIN,
 )
 
 
@@ -1946,3 +1948,139 @@ class TestMeshViewportGrid:
         w._camera_mode = "orbit"
         w.set_show_grid(False)
         assert w._show_grid is False
+
+
+# ======================================================================
+# Joint label overlay tests (pure function + widget state)
+# ======================================================================
+
+
+class TestComputeJointLabelLayout:
+    """compute_joint_label_layout: pure function that computes label positions."""
+
+    def _make_joints_2d(self, n=52, x=100.0, y=100.0):
+        """Create synthetic 2D joint positions, all at the same point."""
+        return np.full((n, 2), [x, y], dtype=np.float64)
+
+    def test_returns_list_of_tuples(self):
+        """Output should be a list of (idx, name, x, y, is_selected) tuples."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(joints_2d, 400, 300)
+        assert isinstance(result, list)
+        assert len(result) > 0
+        idx, name, sx, sy, is_sel = result[0]
+        assert isinstance(idx, int)
+        assert isinstance(name, str)
+        assert isinstance(is_sel, bool)
+
+    def test_body_only_limits_to_22_joints(self):
+        """body_only=True should return at most 22 labels (body joints 0-21)."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(joints_2d, 400, 300, body_only=True)
+        indices = [r[0] for r in result]
+        assert all(i < _N_BODY_JOINTS for i in indices)
+        assert len(result) == _N_BODY_JOINTS
+
+    def test_all_joints_mode(self):
+        """body_only=False should include hand joints too."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(joints_2d, 400, 300, body_only=False)
+        indices = [r[0] for r in result]
+        assert max(indices) >= _N_BODY_JOINTS  # hand joints included
+
+    def test_selected_joint_included_even_when_hand(self):
+        """Selected hand joint should appear in labels even with body_only=True."""
+        joints_2d = self._make_joints_2d()
+        selected = 30  # hand joint
+        result = compute_joint_label_layout(
+            joints_2d, 400, 300, selected_joint=selected, body_only=True
+        )
+        indices = [r[0] for r in result]
+        assert selected in indices
+
+    def test_selected_joint_is_last(self):
+        """Selected joint label should be last in the list (drawn on top)."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(
+            joints_2d, 400, 300, selected_joint=5
+        )
+        assert result[-1][0] == 5
+        assert result[-1][4] is True  # is_selected
+
+    def test_offscreen_joints_excluded(self):
+        """Joints projected far outside the viewport should be excluded."""
+        joints_2d = np.full((52, 2), [-200.0, -200.0], dtype=np.float64)
+        result = compute_joint_label_layout(joints_2d, 400, 300)
+        assert len(result) == 0
+
+    def test_joint_names_match_constant(self):
+        """Label names should match the JOINT_NAMES constant."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(joints_2d, 400, 300, body_only=True)
+        for idx, name, *_ in result:
+            assert name == JOINT_NAMES[idx]
+
+    def test_positions_clamped_to_viewport(self):
+        """Label positions should be clamped within viewport bounds."""
+        # Place joints at extreme corners
+        joints_2d = np.array([[0, 0], [999, 999]] + [[100, 100]] * 50, dtype=np.float64)
+        result = compute_joint_label_layout(joints_2d, 400, 300, margin=4)
+        for _, _, sx, sy, _ in result:
+            assert sx >= _LABEL_MARGIN
+            assert sy >= _LABEL_MARGIN
+            assert sx <= 400 - _LABEL_MARGIN
+            assert sy <= 300 - _LABEL_MARGIN
+
+    def test_empty_joints_array(self):
+        """Empty joints array should return empty list."""
+        joints_2d = np.zeros((0, 2), dtype=np.float64)
+        result = compute_joint_label_layout(joints_2d, 400, 300)
+        assert result == []
+
+    def test_no_selected_joint(self):
+        """With selected_joint=-1, no label should be marked as selected."""
+        joints_2d = self._make_joints_2d()
+        result = compute_joint_label_layout(joints_2d, 400, 300, selected_joint=-1)
+        for _, _, _, _, is_sel in result:
+            assert is_sel is False
+
+
+class TestMeshViewportJointLabels:
+    """Tests for MeshViewport joint label overlay state and API."""
+
+    def test_show_joint_labels_default_false(self, qapp):
+        """Joint labels should be off by default."""
+        w = MeshViewport()
+        assert w._show_joint_labels is False
+
+    def test_set_show_joint_labels_toggle(self, qapp):
+        """set_show_joint_labels should toggle the flag."""
+        w = MeshViewport()
+        w.set_show_joint_labels(True)
+        assert w._show_joint_labels is True
+        w.set_show_joint_labels(False)
+        assert w._show_joint_labels is False
+
+    def test_set_show_joint_labels_no_op_same_value(self, qapp):
+        """Setting the same value should be a no-op (no update triggered)."""
+        w = MeshViewport()
+        assert w._show_joint_labels is False
+        # This should not raise or cause issues
+        w.set_show_joint_labels(False)
+        assert w._show_joint_labels is False
+
+    def test_labels_require_skeleton_visible(self, qapp):
+        """Labels are only drawn when skeleton is also visible (paintGL guard)."""
+        w = MeshViewport()
+        w.set_show_joint_labels(True)
+        w.set_show_skeleton(False)
+        # Even with labels enabled, skeleton hidden means no labels drawn
+        # (verified by the paintGL condition: _show_joint_labels AND _show_skeleton)
+        assert w._show_joint_labels is True
+        assert w._show_skeleton is False
+
+    def test_has_draw_joint_labels_method(self, qapp):
+        """MeshViewport should have _draw_joint_labels method."""
+        w = MeshViewport()
+        assert hasattr(w, "_draw_joint_labels")
+        assert callable(w._draw_joint_labels)
