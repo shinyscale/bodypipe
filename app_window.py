@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, QSettings, Qt, QByteArray
 from PySide6.QtGui import QAction, QPalette, QColor
 
+from models.pipeline_config import PipelineConfig
 from models.session import Session
 from views.single_person_tab import SinglePersonTab
 from views.perf_capture_tab import PerfCaptureTab
@@ -206,6 +207,7 @@ class AppWindow(QMainWindow):
         self._setup_log_panel()
         self._setup_undo_redo()
         self._restore_geometry()
+        self._restore_pipeline_configs()
         self._connect_tab_signals()
 
     def _setup_ui(self):
@@ -346,8 +348,50 @@ class AppWindow(QMainWindow):
         if state and isinstance(state, QByteArray):
             self.restoreState(state)
 
+    # ------------------------------------------------------------------
+    # Pipeline config persistence
+    # ------------------------------------------------------------------
+
+    _TAB_CONFIG_MAP = {
+        "single": "_tab_single",
+        "perf": "_tab_perf",
+        "multi": "_tab_multi",
+    }
+
+    def _save_pipeline_configs(self):
+        """Save each tab's pipeline settings to QSettings."""
+        import json
+
+        for mode, attr in self._TAB_CONFIG_MAP.items():
+            tab = getattr(self, attr, None)
+            if tab and hasattr(tab, "get_config"):
+                config = tab.get_config()
+                self._settings.setValue(
+                    f"pipeline_config/{mode}",
+                    json.dumps(config.to_dict()),
+                )
+
+    def _restore_pipeline_configs(self):
+        """Restore each tab's pipeline settings from QSettings."""
+        import json
+
+        for mode, attr in self._TAB_CONFIG_MAP.items():
+            tab = getattr(self, attr, None)
+            if not tab or not hasattr(tab, "set_config"):
+                continue
+            raw = self._settings.value(f"pipeline_config/{mode}")
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                data = json.loads(raw)
+                config = PipelineConfig.from_dict(data)
+                tab.set_config(config)
+            except Exception:
+                pass  # Ignore corrupt/stale settings
+
     def closeEvent(self, event):
-        """Save window geometry on close."""
+        """Save window geometry and pipeline configs on close."""
+        self._save_pipeline_configs()
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("windowState", self.saveState())
         super().closeEvent(event)

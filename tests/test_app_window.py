@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from app_window import AppWindow, LogPanel
+from models.pipeline_config import PipelineConfig
 from models.session import Session
 
 
@@ -532,3 +533,191 @@ class TestStatusBarWiring:
 
         assert app_window._frame_label.text() == ""
         assert app_window._fps_label.text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Config Persistence
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineConfigPersistence:
+    """Test pipeline settings save/restore across app close/reopen."""
+
+    def test_save_writes_configs_to_settings(self, app_window):
+        """_save_pipeline_configs writes JSON to QSettings for each tab."""
+        # Modify single tab settings
+        app_window._tab_single._static_cam.setChecked(False)
+        app_window._tab_single._focal_mm.setValue(50.0)
+
+        app_window._save_pipeline_configs()
+
+        raw = app_window._settings.value("pipeline_config/single")
+        assert raw is not None
+        data = json.loads(raw)
+        assert data["static_cam"] is False
+        assert data["focal_mm"] == 50.0
+
+    def test_save_writes_perf_config(self, app_window):
+        """Perf capture tab settings are saved including hand/face options."""
+        app_window._tab_perf._use_hands.setChecked(False)
+        app_window._tab_perf._use_face.setChecked(True)
+
+        app_window._save_pipeline_configs()
+
+        raw = app_window._settings.value("pipeline_config/perf")
+        data = json.loads(raw)
+        assert data["use_hands"] is False
+        assert data["use_face"] is True
+
+    def test_save_writes_multi_config(self, app_window):
+        """Multi-person tab settings are saved."""
+        app_window._tab_multi._max_persons.setValue(4)
+        app_window._tab_multi._confidence_threshold.setValue(0.7)
+
+        app_window._save_pipeline_configs()
+
+        raw = app_window._settings.value("pipeline_config/multi")
+        data = json.loads(raw)
+        assert data["max_persons"] == 4
+        assert data["confidence_threshold"] == 0.7
+
+    def test_restore_applies_saved_configs(self, app_window):
+        """_restore_pipeline_configs reads QSettings and applies to tabs."""
+        config = PipelineConfig(static_cam=False, focal_mm=85.0, use_dpvo=True)
+        app_window._settings.setValue(
+            "pipeline_config/single", json.dumps(config.to_dict())
+        )
+
+        app_window._restore_pipeline_configs()
+
+        assert app_window._tab_single._static_cam.isChecked() is False
+        assert app_window._tab_single._focal_mm.value() == 85.0
+        assert app_window._tab_single._use_dpvo.isChecked() is True
+
+    def test_restore_perf_config(self, app_window):
+        """Perf tab config is restored from QSettings."""
+        config = PipelineConfig(
+            use_hands=False, use_face=True, hand_mode="smplestx_only",
+            pitch_adjust=5.0, body_smooth_preset="heavy",
+        )
+        app_window._settings.setValue(
+            "pipeline_config/perf", json.dumps(config.to_dict())
+        )
+
+        app_window._restore_pipeline_configs()
+
+        assert app_window._tab_perf._use_hands.isChecked() is False
+        assert app_window._tab_perf._use_face.isChecked() is True
+        assert app_window._tab_perf._hand_smplestx.isChecked() is True
+        assert app_window._tab_perf._pitch_adjust.value() == 5.0
+
+    def test_restore_multi_config(self, app_window):
+        """Multi-person tab config is restored from QSettings."""
+        config = PipelineConfig(max_persons=3, confidence_threshold=0.8)
+        app_window._settings.setValue(
+            "pipeline_config/multi", json.dumps(config.to_dict())
+        )
+
+        app_window._restore_pipeline_configs()
+
+        assert app_window._tab_multi._max_persons.value() == 3
+        assert app_window._tab_multi._confidence_threshold.value() == 0.8
+
+    def test_round_trip_single_tab(self, app_window):
+        """Save then restore produces same settings on single tab."""
+        app_window._tab_single._static_cam.setChecked(False)
+        app_window._tab_single._use_dpvo.setChecked(True)
+        app_window._tab_single._focal_mm.setValue(35.0)
+
+        app_window._save_pipeline_configs()
+
+        # Reset to defaults
+        app_window._tab_single._static_cam.setChecked(True)
+        app_window._tab_single._use_dpvo.setChecked(False)
+        app_window._tab_single._focal_mm.setValue(24.0)
+
+        app_window._restore_pipeline_configs()
+
+        assert app_window._tab_single._static_cam.isChecked() is False
+        assert app_window._tab_single._use_dpvo.isChecked() is True
+        assert app_window._tab_single._focal_mm.value() == 35.0
+
+    def test_round_trip_perf_tab(self, app_window):
+        """Save then restore produces same settings on perf tab."""
+        app_window._tab_perf._use_hands.setChecked(False)
+        app_window._tab_perf._use_face.setChecked(True)
+        app_window._tab_perf._target_fps.setValue(60.0)
+        app_window._tab_perf._pitch_adjust.setValue(-10.0)
+
+        app_window._save_pipeline_configs()
+
+        # Reset
+        app_window._tab_perf._use_hands.setChecked(True)
+        app_window._tab_perf._use_face.setChecked(False)
+        app_window._tab_perf._target_fps.setValue(30.0)
+        app_window._tab_perf._pitch_adjust.setValue(0.0)
+
+        app_window._restore_pipeline_configs()
+
+        assert app_window._tab_perf._use_hands.isChecked() is False
+        assert app_window._tab_perf._use_face.isChecked() is True
+        assert app_window._tab_perf._target_fps.value() == 60.0
+        assert app_window._tab_perf._pitch_adjust.value() == -10.0
+
+    def test_restore_ignores_missing_settings(self, app_window):
+        """No error when QSettings has no saved configs."""
+        app_window._settings.remove("pipeline_config/single")
+        app_window._settings.remove("pipeline_config/perf")
+        app_window._settings.remove("pipeline_config/multi")
+
+        # Set known state before restore
+        app_window._tab_single._focal_mm.setValue(42.0)
+
+        # Should not raise, and should not change widget state
+        app_window._restore_pipeline_configs()
+
+        # Widgets unchanged — restore is a no-op when settings are missing
+        assert app_window._tab_single._focal_mm.value() == 42.0
+
+    def test_restore_ignores_corrupt_json(self, app_window):
+        """Corrupt JSON in QSettings is silently ignored."""
+        app_window._settings.setValue("pipeline_config/single", "not valid json{{{")
+
+        # Should not raise
+        app_window._restore_pipeline_configs()
+
+        # Defaults intact
+        assert app_window._tab_single._static_cam.isChecked() is True
+
+    def test_close_event_saves_configs(self, app_window):
+        """closeEvent calls _save_pipeline_configs."""
+        app_window._tab_single._focal_mm.setValue(100.0)
+
+        # Simulate close
+        from PySide6.QtGui import QCloseEvent
+        event = QCloseEvent()
+        app_window.closeEvent(event)
+
+        raw = app_window._settings.value("pipeline_config/single")
+        assert raw is not None
+        data = json.loads(raw)
+        assert data["focal_mm"] == 100.0
+
+    def test_configs_restored_on_construction(self, qapp):
+        """New AppWindow instance restores previously saved configs."""
+        # First, save config via an existing window
+        w1 = AppWindow()
+        w1._tab_single._focal_mm.setValue(77.0)
+        w1._tab_single._static_cam.setChecked(False)
+        w1._save_pipeline_configs()
+
+        # Create a new window — should restore
+        w2 = AppWindow()
+
+        assert w2._tab_single._focal_mm.value() == 77.0
+        assert w2._tab_single._static_cam.isChecked() is False
+
+        # Cleanup: remove the saved settings to not pollute other tests
+        w2._settings.remove("pipeline_config/single")
+        w2._settings.remove("pipeline_config/perf")
+        w2._settings.remove("pipeline_config/multi")
