@@ -638,6 +638,13 @@ class PoseCorrectorPanel(QWidget):
     # Dropdown handlers
     # ------------------------------------------------------------------
 
+    def set_joint(self, joint_idx: int):
+        """Public API: select a joint by index (e.g. from external MeshViewport click).
+
+        Syncs the dropdown, which triggers slider update and viewport highlight.
+        """
+        self._on_joint_clicked(joint_idx)
+
     def _on_joint_clicked(self, joint_idx: int):
         """Handle joint click from viewport — sync dropdown."""
         for i in range(self._joint_combo.count()):

@@ -638,6 +638,139 @@ class TestSignalHub:
 
 
 # ---------------------------------------------------------------------------
+# Viewport switching
+# ---------------------------------------------------------------------------
+
+
+class TestViewportSwitching:
+    """Verify the toolbar toggle between Video and 3D Mesh viewports.
+
+    Why: The multi-person spec requires the main viewport to switch between
+    video+bbox overlay and 3D mesh view via toolbar buttons. This is critical
+    for users who need to inspect both 2D tracking and 3D pose simultaneously.
+    """
+
+    def test_has_viewport_stack(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        from PySide6.QtWidgets import QStackedWidget
+        assert isinstance(tab._viewport_stack, QStackedWidget)
+
+    def test_viewport_stack_property(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab.viewport_stack is tab._viewport_stack
+
+    def test_video_mode_is_default(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._viewport_stack.currentIndex() == 0
+        assert tab._video_mode_btn.isChecked()
+        assert not tab._mesh_mode_btn.isChecked()
+
+    def test_has_toolbar_buttons(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._video_mode_btn is not None
+        assert tab._mesh_mode_btn is not None
+        assert tab._video_mode_btn.text() == "Video"
+        assert tab._mesh_mode_btn.text() == "3D Mesh"
+
+    def test_toolbar_buttons_are_checkable(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._video_mode_btn.isCheckable()
+        assert tab._mesh_mode_btn.isCheckable()
+
+    def test_switch_to_mesh(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._switch_to_mesh()
+        assert tab._viewport_stack.currentIndex() == 1
+        assert tab._mesh_mode_btn.isChecked()
+        assert not tab._video_mode_btn.isChecked()
+
+    def test_switch_to_video(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._switch_to_mesh()
+        tab._switch_to_video()
+        assert tab._viewport_stack.currentIndex() == 0
+        assert tab._video_mode_btn.isChecked()
+        assert not tab._mesh_mode_btn.isChecked()
+
+    def test_switch_to_mesh_and_back(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._switch_to_mesh()
+        assert tab._viewport_stack.currentIndex() == 1
+        tab._switch_to_video()
+        assert tab._viewport_stack.currentIndex() == 0
+
+    def test_has_main_mesh_viewport(self, qapp):
+        """Main viewport has its own MeshViewport instance (separate from pose corrector)."""
+        from views.mesh_viewport import MeshViewport
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert isinstance(tab._main_mesh_viewport, MeshViewport)
+        # Must be a separate instance from the pose corrector's viewport
+        assert tab._main_mesh_viewport is not tab._mesh_viewport
+
+    def test_main_mesh_viewport_has_session(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._main_mesh_viewport._session is session
+
+    def test_viewport_stack_contains_both_widgets(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        assert tab._viewport_stack.count() == 2
+        assert tab._viewport_stack.widget(0) is tab._video_player
+        assert tab._viewport_stack.widget(1) is tab._main_mesh_viewport
+
+
+# ---------------------------------------------------------------------------
+# Signal wiring for main mesh viewport
+# ---------------------------------------------------------------------------
+
+
+class TestMeshViewportSignalWiring:
+    """Verify that the main mesh viewport receives frame/person/joint signals.
+
+    Why: The spec requires frame sync, person selection, and joint clicking
+    to propagate through the main viewport's MeshViewport — not just via
+    the PoseCorrectorPanel's embedded viewport.
+    """
+
+    def test_frame_changed_propagates_to_main_mesh(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._on_frame_changed(25)
+        assert tab._main_mesh_viewport._current_frame == 25
+
+    def test_track_clicked_sets_person_on_main_mesh(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._on_track_clicked(3, 10)
+        assert tab._main_mesh_viewport._person_id == 3
+
+    def test_identity_person_changed_sets_person_on_main_mesh(self, qapp):
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        tab._on_identity_person_changed(5)
+        assert tab._main_mesh_viewport._person_id == 5
+
+    def test_joint_clicked_wired_to_pose_corrector(self, qapp):
+        """main mesh viewport joint_clicked → pose_corrector.set_joint."""
+        session = Session()
+        tab = MultiPersonTab(session, Path("/tmp/GVHMR"))
+        # Emit joint_clicked from the main mesh viewport
+        tab._main_mesh_viewport.joint_clicked.emit(7)
+        # The pose corrector should have synced its joint selection
+        assert tab._pose_corrector._current_joint == 7
+
+
+# ---------------------------------------------------------------------------
 # PERSON_COLORS constant
 # ---------------------------------------------------------------------------
 

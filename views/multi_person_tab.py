@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QToolButton,
 )
 from PySide6.QtCore import Signal, Qt
@@ -243,9 +244,46 @@ class MultiPersonTab(QWidget):
         # Vertical splitter: viewport on top, panels on bottom
         self._vert_splitter = QSplitter(Qt.Vertical)
 
-        # Main viewport — VideoPlayer (with bbox overlay in future)
+        # Main viewport — switchable between VideoPlayer and MeshViewport
+        viewport_container = QWidget()
+        viewport_layout = QVBoxLayout(viewport_container)
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        viewport_layout.setSpacing(2)
+
+        # Toolbar row for viewport switching
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setContentsMargins(4, 2, 4, 0)
+
+        self._video_mode_btn = QToolButton()
+        self._video_mode_btn.setText("Video")
+        self._video_mode_btn.setCheckable(True)
+        self._video_mode_btn.setChecked(True)
+        self._video_mode_btn.setToolTip("Show video with bbox overlay")
+        toolbar_row.addWidget(self._video_mode_btn)
+
+        self._mesh_mode_btn = QToolButton()
+        self._mesh_mode_btn.setText("3D Mesh")
+        self._mesh_mode_btn.setCheckable(True)
+        self._mesh_mode_btn.setChecked(False)
+        self._mesh_mode_btn.setToolTip("Show 3D mesh viewport")
+        toolbar_row.addWidget(self._mesh_mode_btn)
+
+        toolbar_row.addStretch()
+        viewport_layout.addLayout(toolbar_row)
+
+        # Stacked widget holding both viewport modes
+        self._viewport_stack = QStackedWidget()
         self._video_player = VideoPlayer()
-        self._vert_splitter.addWidget(self._video_player)
+        self._viewport_stack.addWidget(self._video_player)  # index 0
+
+        self._main_mesh_viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
+        self._main_mesh_viewport.set_session(self._session)
+        self._viewport_stack.addWidget(self._main_mesh_viewport)  # index 1
+
+        self._viewport_stack.setCurrentIndex(0)
+        viewport_layout.addWidget(self._viewport_stack, stretch=1)
+
+        self._vert_splitter.addWidget(viewport_container)
 
         # Bottom horizontal splitter: identity inspector | pose corrector
         self._bottom_splitter = QSplitter(Qt.Horizontal)
@@ -281,17 +319,31 @@ class MultiPersonTab(QWidget):
         """Public access to the tab's VideoPlayer for status bar wiring."""
         return self._video_player
 
+    @property
+    def viewport_stack(self) -> QStackedWidget:
+        """Public access to the viewport stack for testing."""
+        return self._viewport_stack
+
     def _connect_signals(self):
         self._drop_area.file_dropped.connect(self._load_video)
         self._browse_btn.clicked.connect(self._on_browse)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
 
+        # Viewport mode switching
+        self._video_mode_btn.clicked.connect(self._switch_to_video)
+        self._mesh_mode_btn.clicked.connect(self._switch_to_mesh)
+
         # Frame sync: video player → track overview + identity inspector
         self._video_player.frame_changed.connect(self._on_frame_changed)
 
         # Frame click → identity inspector bbox editing
         self._video_player.frame_clicked.connect(self._identity_panel.on_frame_click)
+
+        # Main mesh viewport → pose corrector joint selection
+        self._main_mesh_viewport.joint_clicked.connect(
+            self._pose_corrector.set_joint
+        )
 
         # Track overview → seek + select person
         self._track_overview.person_clicked.connect(self._on_track_clicked)
@@ -307,12 +359,27 @@ class MultiPersonTab(QWidget):
         # Pose corrector → video player seek
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
 
+    def _switch_to_video(self):
+        """Switch main viewport to video + bbox overlay mode."""
+        self._viewport_stack.setCurrentIndex(0)
+        self._video_mode_btn.setChecked(True)
+        self._mesh_mode_btn.setChecked(False)
+        # Refresh video overlay for current frame
+        self._show_frame(self._session.current_frame)
+
+    def _switch_to_mesh(self):
+        """Switch main viewport to 3D mesh mode."""
+        self._viewport_stack.setCurrentIndex(1)
+        self._mesh_mode_btn.setChecked(True)
+        self._video_mode_btn.setChecked(False)
+
     def _on_frame_changed(self, frame_idx: int):
         """Broadcast frame change to all sub-panels."""
         self._session.current_frame = frame_idx
         self._track_overview.set_current_frame(frame_idx)
         self._identity_panel.set_frame(frame_idx)
         self._pose_corrector.on_frame_changed(frame_idx)
+        self._main_mesh_viewport.on_frame_changed(frame_idx)
         self._show_frame(frame_idx)
         self.frame_changed.emit(frame_idx)
 
@@ -321,6 +388,7 @@ class MultiPersonTab(QWidget):
         self._session.selected_person = person_id
         self._identity_panel.set_person(person_id)
         self._pose_corrector.set_person(person_id)
+        self._main_mesh_viewport.set_person(person_id)
         self._video_player.seek(frame_idx)
         self.person_selected.emit(person_id)
         self.status_message.emit(f"Selected Person {person_id} at frame {frame_idx}")
@@ -329,6 +397,7 @@ class MultiPersonTab(QWidget):
         """Handle person change from identity inspector — redraw overlay."""
         self._session.selected_person = person_id
         self._pose_corrector.set_person(person_id)
+        self._main_mesh_viewport.set_person(person_id)
         self.person_selected.emit(person_id)
         self._show_frame(self._session.current_frame)
 
