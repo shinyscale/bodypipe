@@ -2,15 +2,13 @@
 
 ## Completed Phases (summary)
 
-All 7 original phases fully implemented. 1214 tests passing after Commit 1A.
+All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX fully implemented. 1455 tests passing.
 
-- **Phase 1**: Pipeline Tabs — SinglePersonTab, PerfCaptureTab, MultiPersonTab
-- **Phase 2**: Identity Inspector — person selector, confidence, keyframes, bbox overlay, two-click bbox editing, track operations (swap/split/merge), review scanner, reprocess
-- **Phase 3**: 3D Viewport + Pose Corrector — QOpenGLWidget mesh, camera modes (in-camera/orbit), skeleton overlay + joint picking (screen-space + FBO), pose corrector (euler sliders, quick-fix, corrections table, space overrides, BVH/FBX export)
-- **Phase 4**: App Shell Polish — session save/load, undo/redo (50-depth), keyboard shortcuts dialog
-- **Phase 5**: Spec Compliance — VideoPlayer context menu, status bar FPS wiring, viewport switching, splitter persistence, multi-person settings parity, 3D viewport color modes/grid/joint labels/FBO picking, FullPipelineWorker stages 3-6, pose corrector auto-detect
-- **Phase 6**: Gradio Parity — perf capture settings parity, multi-person FBX batch conversion
-- **Phase 7**: Settings Persistence — pipeline config QSettings round-trip, perf capture multi-stage progress, video frame composite, FBO joint picking
+- **Phases 1-7 (original)**: Pipeline tabs, identity inspector, 3D viewport + pose corrector, app shell polish, spec compliance, Gradio parity, settings persistence
+- **Commits 1A-1F**: Tab-to-dock migration — pipeline settings extraction, dock wrappers, AppWindow rewire, workspace presets, tab class removal, shim cleanup
+- **Viewport Phases 2-7**: Joint chain highlighting, skeleton heatmap, quality toggle, DAW-style track timeline, transport overlay + speed chips + adaptive cache
+- **Dock data flow fix**: Startup restore, panel hydration, _refresh_all_panels()
+- **Phase 5 (Pose Correction UX)**: Preview range, smoothing, apply-to-similar, correction propagation — all with undo support
 
 ---
 
@@ -241,7 +239,7 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 - [x] **Track Overview not synced** — Fixed by `_refresh_all_panels()` calling `_populate_tracks()` and `set_current_frame()`. Track click signal hub was already wired correctly.
 - [x] **Pipeline results not loading on startup** — Fixed by `_try_restore_results()` which checks for existing output dirs and loads person tracks from disk via `_load_results_from_output_dir()`, or hydrates existing session tracks via `_hydrate_person_tracks()`.
 - [x] **Workspace presets should show correct panels** — Fixed as a side effect — the panels are now populated before workspace presets are applied.
-- [ ] **Missing stub methods** — `_on_smooth`, `_on_apply_to_similar`, `_on_propagate` in PoseCorrectorPanel were added as stubs (they log "not yet implemented"). These prevent the crash but need real implementations in Phase 5.
+- [x] **Missing stub methods** — `_on_smooth`, `_on_apply_to_similar`, `_on_propagate` in PoseCorrectorPanel were fully implemented in Phase 5 (preview range, smoothing, apply-to-similar, correction propagation).
 
 **Test verification:** After fixes, `python main.py` with a previously-processed video should show: video frames in Video dock with working transport controls, 3D mesh in Mesh dock, populated Identity Inspector, populated Pose Corrector, and synced Track Timeline.
 
@@ -253,12 +251,14 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 - `_refresh_all_panels()` — centralised "populate everything" (replaces ad-hoc calls in _on_multi_pipeline_finished, etc.)
 24 new tests in tests/test_app_window.py. All 1355 tests pass.
 
-### Phase 5: Pose Correction UX Upgrades
+### Phase 5: Pose Correction UX Upgrades *(DONE)*
 
-- [ ] **Preview range slider** — below Euler spinboxes, ±N frames (default ±15). When adjusting a correction, auto-play the range so artist sees temporal impact.
-- [ ] **Smoothing controls** — implement `_on_smooth()`: Gaussian or Moving Average filter on selected joint over configurable frame window (3/5/7/9 frames). Apply to "Current Joint" or "All Body Joints" scope.
-- [ ] **Apply to Similar** — implement `_on_apply_to_similar()`: find all frames matching current joint angle + velocity thresholds, apply same correction. For repeated errors like "all right knees flex past 150°".
-- [ ] **Correction propagation** — implement `_on_propagate()`: modes are "This frame only" (current), "Smooth falloff" (cosine blend over ±K frames), "Until next keyframe".
+- [x] **Preview range slider** — QSpinBox ±N frames (default ±15) with Preview button + auto-play QTimer. "Auto-preview after Apply" checkbox triggers preview after Apply and Quick Fix operations.
+- [x] **Smoothing controls** — `_on_smooth()` implemented: uses `smooth_joint_rotations()` (gaussian/moving average) over frame range. Supports "Current Joint" or "All Body Joints" scope. Undo support via raw body_pose snapshot/restore.
+- [x] **Apply to Similar** — `_on_apply_to_similar()` implemented: uses `find_similar_frames()` with configurable angular threshold. Applies current euler slider correction to all matching frames. Status label shows match count. Undo support.
+- [x] **Correction propagation** — `_on_propagate()` implemented: uses `propagate_corrections()` for SLERP interpolation between start/end frames in the Frame Range. Works for both body joints and global_orient. Undo support.
+
+**Files:** `views/pose_corrector_panel.py` (replaced 3 stub methods with full implementations, added preview range UI), `tests/test_pose_corrector.py` (56 new tests)
 
 ### Phase 10: Keyboard & Interaction Polish
 
@@ -278,7 +278,7 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1399 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1455 tests pass
 2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts with populated panels

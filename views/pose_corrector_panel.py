@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QTimer
 
 from models.session import Session, UndoEntry
 from theme import COLORS
@@ -840,6 +840,39 @@ class PoseCorrectorPanel(QWidget):
 
         ctrl_layout.addWidget(rot_group)
 
+        # Preview range — auto-play ±N frames after correction to see impact
+        preview_group = QGroupBox("Preview Range")
+        preview_layout = QVBoxLayout(preview_group)
+
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(QLabel("±"))
+        self._preview_half_range = QSpinBox()
+        self._preview_half_range.setRange(1, 60)
+        self._preview_half_range.setValue(15)
+        self._preview_half_range.setSuffix(" frames")
+        self._preview_half_range.setToolTip(
+            "Number of frames before and after the current frame to preview"
+        )
+        preview_row.addWidget(self._preview_half_range)
+        self._preview_btn = QPushButton("Preview")
+        self._preview_btn.setToolTip("Play ±N frames around current frame")
+        preview_row.addWidget(self._preview_btn)
+        preview_layout.addLayout(preview_row)
+
+        self._auto_preview_check = QCheckBox("Auto-preview after Apply")
+        self._auto_preview_check.setToolTip(
+            "Automatically play the preview range after applying a correction"
+        )
+        preview_layout.addWidget(self._auto_preview_check)
+
+        ctrl_layout.addWidget(preview_group)
+
+        # Preview playback timer
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(33)  # ~30fps
+        self._preview_frame = 0
+        self._preview_end = 0
+
         # Action buttons
         btn_row = QHBoxLayout()
         self._apply_btn = QPushButton("Apply")
@@ -1153,6 +1186,10 @@ class PoseCorrectorPanel(QWidget):
         self._slider_x.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_x, v))
         self._slider_y.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_y, v))
         self._slider_z.valueChanged.connect(lambda v: self._on_slider_moved(self._euler_z, v))
+
+        # Preview
+        self._preview_btn.clicked.connect(self._on_preview_play)
+        self._preview_timer.timeout.connect(self._on_preview_tick)
 
         # Action buttons
         self._apply_btn.clicked.connect(self._on_apply)
@@ -1541,6 +1578,7 @@ class PoseCorrectorPanel(QWidget):
         log.info("Correction applied: person=%d, %d frames, joint=%d",
                  pid, n, self._current_joint)
         self.correction_applied.emit(pid, frames[0])
+        self._trigger_auto_preview()
 
     def _on_reset_joint(self):
         """Reset current joint to original pose (remove from correction)."""
@@ -1863,6 +1901,7 @@ class PoseCorrectorPanel(QWidget):
 
         log.info("Quick fix %s: person=%d, frame=%d", correction_type, pid, frame)
         self.correction_applied.emit(pid, frame)
+        self._trigger_auto_preview()
 
     # ------------------------------------------------------------------
     # Corrections table
@@ -2142,16 +2181,360 @@ class PoseCorrectorPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_smooth(self):
-        """Apply temporal smoothing to selected joint(s). (Phase 5 — TODO)"""
-        logger.info("Smooth: not yet implemented")
+        """Apply temporal smoothing to selected joint(s) over the frame range.
+
+        Why: GVHMR body pose estimates often exhibit high-frequency jitter,
+        especially in occluded joints. Temporal smoothing reduces this noise
+        while preserving deliberate motion. Uses the Frame Range start/end
+        and Smoothing group controls (window, method, scope). Operates
+        directly on raw body_pose params with undo support.
+        """
+        if self._current_person < 0:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        pid = self._current_person
+        params = track.smplx_params
+        bp = np.asarray(params.get("body_pose", []), dtype=np.float32)
+        if bp.ndim == 2 and bp.shape[-1] != 3:
+            bp = bp.reshape(bp.shape[0], -1, 3)
+        if bp.ndim != 3:
+            return
+
+        f_start = self._range_start.value()
+        f_end = self._range_end.value()
+        if f_end < f_start:
+            f_start, f_end = f_end, f_start
+        f_start = max(0, f_start)
+        f_end = min(f_end, bp.shape[0] - 1)
+        if f_start > f_end:
+            return
+
+        window = self._smooth_window.value()
+        method = "gaussian" if self._smooth_method.currentIndex() == 0 else "moving_average"
+
+        scope = self._smooth_scope.currentIndex()
+        if scope == 0:  # Current Joint
+            if self._current_joint < 1 or self._current_joint > 21:
+                log.info("Smoothing only supports body joints (1-21)")
+                return
+            joint_indices = [self._current_joint - 1]
+        else:  # All Body Joints
+            joint_indices = list(range(min(21, bp.shape[1])))
+
+        # Snapshot for undo
+        old_bp_slice = bp[f_start : f_end + 1].copy()
+
+        # Compute smoothed pose
+        smoothed = smooth_joint_rotations(
+            bp, f_start, f_end,
+            joint_indices=joint_indices,
+            window=window,
+            method=method,
+        )
+
+        # Apply smoothed values to raw params
+        bp[f_start : f_end + 1] = smoothed[f_start : f_end + 1]
+        params["body_pose"] = bp
+
+        # Invalidate viewport cache
+        for f in range(f_start, f_end + 1):
+            self._viewport.invalidate_cache(pid, f)
+
+        new_bp_slice = bp[f_start : f_end + 1].copy()
+
+        def undo(p=pid, fs=f_start, fe=f_end, old=old_bp_slice):
+            t = self._session.person_tracks.get(p)
+            if t and t.smplx_params:
+                bpp = np.asarray(t.smplx_params["body_pose"], dtype=np.float32)
+                if bpp.ndim == 2 and bpp.shape[-1] != 3:
+                    bpp = bpp.reshape(bpp.shape[0], -1, 3)
+                bpp[fs : fe + 1] = old
+                t.smplx_params["body_pose"] = bpp
+                for f in range(fs, fe + 1):
+                    self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        def redo(p=pid, fs=f_start, fe=f_end, new=new_bp_slice):
+            t = self._session.person_tracks.get(p)
+            if t and t.smplx_params:
+                bpp = np.asarray(t.smplx_params["body_pose"], dtype=np.float32)
+                if bpp.ndim == 2 and bpp.shape[-1] != 3:
+                    bpp = bpp.reshape(bpp.shape[0], -1, 3)
+                bpp[fs : fe + 1] = new
+                t.smplx_params["body_pose"] = bpp
+                for f in range(fs, fe + 1):
+                    self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        n_frames = f_end - f_start + 1
+        n_joints = len(joint_indices)
+        self._session.undo_stack.push(
+            UndoEntry(f"Smooth {n_joints} joint(s), {n_frames} frames", undo, redo),
+        )
+
+        self._viewport.set_pose_override(None)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+
+        log.info(
+            "Smoothing applied: person=%d, frames=%d-%d, %d joints, %s, window=%d",
+            pid, f_start, f_end, n_joints, method, window,
+        )
+        self.correction_applied.emit(pid, self._current_frame)
 
     def _on_apply_to_similar(self):
-        """Find and correct frames with similar pose errors. (Phase 5 — TODO)"""
-        logger.info("Apply to Similar: not yet implemented")
+        """Find frames with similar joint rotation and apply the same correction.
+
+        Why: GVHMR produces the same bad pose estimate repeatedly (e.g.,
+        a flipped arm in every other frame). Finding similar poses lets
+        the user apply one correction to all matching frames at once,
+        saving tedious frame-by-frame editing. Uses the current euler
+        slider values as the target correction and the threshold spinbox
+        to control match sensitivity.
+        """
+        if self._current_person < 0 or self._current_joint < 1 or self._current_joint > 21:
+            self._sim_status.setText("Select a body joint first (1-21).")
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        _, euler_to_aa, _ = _safe_import_pose_correction()
+        if euler_to_aa is None:
+            euler_to_aa = euler_deg_to_axis_angle_fallback
+
+        pid = self._current_person
+        params = track.smplx_params
+        bp = np.asarray(params.get("body_pose", []), dtype=np.float32)
+        if bp.ndim == 2 and bp.shape[-1] != 3:
+            bp = bp.reshape(bp.shape[0], -1, 3)
+        if bp.ndim != 3:
+            return
+
+        joint_idx = self._current_joint
+        bp_idx = joint_idx - 1
+        frame_idx = self._current_frame
+        threshold = self._sim_threshold.value()
+
+        # Find similar frames
+        matches = find_similar_frames(bp, frame_idx, bp_idx, threshold)
+        if not matches:
+            self._sim_status.setText("No similar frames found.")
+            return
+
+        # Get the correction to apply (current euler slider values)
+        euler = np.array([
+            self._euler_x.value(),
+            self._euler_y.value(),
+            self._euler_z.value(),
+        ], dtype=np.float32)
+        new_aa = euler_to_aa(euler)
+
+        # Snapshot for undo
+        old_values = {}
+        for f in matches:
+            if f < bp.shape[0] and bp_idx < bp.shape[1]:
+                old_values[f] = bp[f, bp_idx].copy()
+
+        # Apply correction to all matching frames
+        for f in matches:
+            if f < bp.shape[0] and bp_idx < bp.shape[1]:
+                bp[f, bp_idx] = new_aa
+                self._viewport.invalidate_cache(pid, f)
+        params["body_pose"] = bp
+
+        saved_aa = new_aa.copy()
+
+        def undo(p=pid, ji=bp_idx, old=old_values):
+            t = self._session.person_tracks.get(p)
+            if t and t.smplx_params:
+                bpp = np.asarray(t.smplx_params["body_pose"], dtype=np.float32)
+                if bpp.ndim == 2 and bpp.shape[-1] != 3:
+                    bpp = bpp.reshape(bpp.shape[0], -1, 3)
+                for f, old_val in old.items():
+                    if f < bpp.shape[0] and ji < bpp.shape[1]:
+                        bpp[f, ji] = old_val
+                        self._viewport.invalidate_cache(p, f)
+                t.smplx_params["body_pose"] = bpp
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        def redo(p=pid, ji=bp_idx, frames=matches, aa=saved_aa):
+            t = self._session.person_tracks.get(p)
+            if t and t.smplx_params:
+                bpp = np.asarray(t.smplx_params["body_pose"], dtype=np.float32)
+                if bpp.ndim == 2 and bpp.shape[-1] != 3:
+                    bpp = bpp.reshape(bpp.shape[0], -1, 3)
+                for f in frames:
+                    if f < bpp.shape[0] and ji < bpp.shape[1]:
+                        bpp[f, ji] = aa
+                        self._viewport.invalidate_cache(p, f)
+                t.smplx_params["body_pose"] = bpp
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        n = len(matches)
+        self._session.undo_stack.push(
+            UndoEntry(f"Apply to {n} similar frames", undo, redo),
+        )
+
+        self._viewport.set_pose_override(None)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+
+        self._sim_status.setText(
+            f"Applied to {n} similar frame{'s' if n != 1 else ''} "
+            f"(threshold {threshold:.0f}\u00b0)."
+        )
+        log.info(
+            "Apply to similar: person=%d, joint=%d, %d frames (threshold=%.1f\u00b0)",
+            pid, joint_idx, n, threshold,
+        )
+        self.correction_applied.emit(pid, self._current_frame)
 
     def _on_propagate(self):
-        """Propagate correction with falloff to neighboring frames. (Phase 5 — TODO)"""
-        logger.info("Propagate: not yet implemented")
+        """Interpolate the current joint correction across the frame range using SLERP.
+
+        Why: When the user corrects poses at the start and end of a range,
+        the correction should transition smoothly between them. SLERP on the
+        rotation produces natural interpolation through rotation space,
+        avoiding gimbal-lock artifacts of linear euler interpolation.
+        Uses the Frame Range start/end as the two keyframes.
+        """
+        if self._current_person < 0 or self._current_joint < 0:
+            self._prop_status.setText("Select a person and joint first.")
+            return
+
+        if self._current_joint > 21:
+            self._prop_status.setText("Propagation only supports body joints (0-21).")
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+
+        pid = self._current_person
+        joint_idx = self._current_joint
+
+        f_start = self._range_start.value()
+        f_end = self._range_end.value()
+        if f_end < f_start:
+            f_start, f_end = f_end, f_start
+        if f_end == f_start:
+            self._prop_status.setText("Start and end frames must differ.")
+            return
+
+        # Get axis-angle at start and end frames
+        start_aa = _get_joint_axis_angle(self._session, pid, f_start, joint_idx)
+        end_aa = _get_joint_axis_angle(self._session, pid, f_end, joint_idx)
+
+        # Compute SLERP interpolation
+        interp = propagate_corrections(f_start, f_end, start_aa, end_aa)
+        if not interp:
+            return
+
+        params = track.smplx_params
+
+        # Snapshot for undo
+        old_values = {}
+        if joint_idx == 0:
+            go = np.asarray(params.get("global_orient", []), dtype=np.float32)
+            for f in interp:
+                if go.ndim >= 2 and f < go.shape[0]:
+                    old_values[f] = go[f].copy()
+        else:
+            bp = np.asarray(params.get("body_pose", []), dtype=np.float32)
+            if bp.ndim == 2 and bp.shape[-1] != 3:
+                bp = bp.reshape(bp.shape[0], -1, 3)
+            bp_idx = joint_idx - 1
+            for f in interp:
+                if bp.ndim >= 3 and f < bp.shape[0] and bp_idx < bp.shape[1]:
+                    old_values[f] = bp[f, bp_idx].copy()
+
+        # Apply interpolated values
+        for f, aa in interp.items():
+            self._apply_to_raw_params(joint_idx, aa, f)
+            self._viewport.invalidate_cache(pid, f)
+
+        new_values = {f: aa.copy() for f, aa in interp.items()}
+
+        def undo(p=pid, ji=joint_idx, old=old_values):
+            self._current_person = p
+            for f, old_val in old.items():
+                self._apply_to_raw_params(ji, old_val, f)
+                self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        def redo(p=pid, ji=joint_idx, new=new_values):
+            self._current_person = p
+            for f, new_val in new.items():
+                self._apply_to_raw_params(ji, new_val, f)
+                self._viewport.invalidate_cache(p, f)
+            self._viewport._refresh_mesh()
+            self._update_sliders()
+
+        n = len(interp)
+        self._session.undo_stack.push(
+            UndoEntry(f"Propagate correction ({n} frames)", undo, redo),
+        )
+
+        self._viewport.set_pose_override(None)
+        self._viewport._refresh_mesh()
+        self._update_sliders()
+
+        self._prop_status.setText(
+            f"Propagated across {n} frames ({f_start}\u2013{f_end})."
+        )
+        log.info(
+            "Propagation applied: person=%d, joint=%d, frames=%d-%d",
+            pid, joint_idx, f_start, f_end,
+        )
+        self.correction_applied.emit(pid, self._current_frame)
+
+    # ------------------------------------------------------------------
+    # Preview range playback
+    # ------------------------------------------------------------------
+
+    def _on_preview_play(self):
+        """Play ±N frames around the current frame to preview correction impact.
+
+        Why: After applying a correction, artists need to see how it looks
+        in temporal context — does the motion flow smoothly into and out of
+        the corrected frame? This auto-plays the surrounding frames at ~30fps,
+        emitting frame_requested signals to drive the video player and all
+        other synced panels.
+        """
+        half = self._preview_half_range.value()
+        center = self._current_frame
+        self._preview_frame = max(0, center - half)
+        self._preview_end = min(
+            max(0, self._session.num_frames - 1), center + half,
+        )
+        if self._preview_frame >= self._preview_end:
+            return
+        self._preview_btn.setText("Stop")
+        self._preview_timer.start()
+
+    def _on_preview_tick(self):
+        """Advance one frame in the preview playback."""
+        self.frame_requested.emit(self._preview_frame)
+        self._preview_frame += 1
+        if self._preview_frame > self._preview_end:
+            self._preview_timer.stop()
+            self._preview_btn.setText("Preview")
+
+    def _trigger_auto_preview(self):
+        """Start preview playback if auto-preview is enabled."""
+        if self._auto_preview_check.isChecked():
+            self._on_preview_play()
 
     # ------------------------------------------------------------------
     # BVH/FBX export

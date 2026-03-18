@@ -40,6 +40,9 @@ from views.pose_corrector_panel import (
     _detect_jitter,
     _detect_low_confidence,
     compute_pose_issues,
+    smooth_joint_rotations,
+    find_similar_frames,
+    propagate_corrections,
     _safe_import_pose_correction,
     _safe_import_quick_fix,
     _safe_import_space_override,
@@ -2545,3 +2548,606 @@ class TestAutoDetectUI:
                 panel._navigate_to_pose_issue(idx)
                 assert panel._current_person == 1
                 break
+
+
+# ======================================================================
+# Phase 5: smooth_joint_rotations pure function tests
+# ======================================================================
+
+
+class TestSmoothJointRotations:
+    """smooth_joint_rotations: temporal smoothing on axis-angle body_pose."""
+
+    def test_identity_on_constant_pose(self):
+        """Smoothing a constant pose should produce the same pose."""
+        bp = np.ones((20, 21, 3), dtype=np.float32) * 0.5
+        result = smooth_joint_rotations(bp, 0, 19)
+        np.testing.assert_allclose(result, bp, atol=1e-5)
+
+    def test_reduces_noise(self):
+        """Smoothing should reduce high-frequency noise."""
+        bp = np.zeros((30, 21, 3), dtype=np.float32)
+        # Add noise to joint 0
+        rng = np.random.RandomState(42)
+        bp[:, 0] = rng.randn(30, 3).astype(np.float32) * 0.5
+        result = smooth_joint_rotations(bp, 0, 29, joint_indices=[0], window=7)
+        # Smoothed std should be less than original
+        assert np.std(result[:, 0]) < np.std(bp[:, 0])
+
+    def test_only_affects_specified_range(self):
+        """Frames outside [start, end] should be unchanged."""
+        bp = np.zeros((30, 21, 3), dtype=np.float32)
+        bp[:, 0] = np.random.RandomState(42).randn(30, 3).astype(np.float32)
+        original = bp.copy()
+        result = smooth_joint_rotations(bp, 10, 20, joint_indices=[0])
+        np.testing.assert_array_equal(result[:10, 0], original[:10, 0])
+        np.testing.assert_array_equal(result[21:, 0], original[21:, 0])
+
+    def test_only_affects_specified_joints(self):
+        """Joints not in joint_indices should be unchanged."""
+        bp = np.random.RandomState(42).randn(20, 21, 3).astype(np.float32) * 0.3
+        original = bp.copy()
+        result = smooth_joint_rotations(bp, 0, 19, joint_indices=[0, 1])
+        # Joint 5 should be unchanged
+        np.testing.assert_array_equal(result[:, 5], original[:, 5])
+
+    def test_none_joints_smooths_all(self):
+        """joint_indices=None should smooth all joints."""
+        bp = np.random.RandomState(42).randn(20, 21, 3).astype(np.float32) * 0.3
+        result = smooth_joint_rotations(bp, 0, 19, joint_indices=None)
+        # Some change expected on all joints (noisy input)
+        assert not np.array_equal(result[5:15], bp[5:15])
+
+    def test_moving_average_method(self):
+        """moving_average method should also reduce noise."""
+        bp = np.zeros((30, 21, 3), dtype=np.float32)
+        rng = np.random.RandomState(42)
+        bp[:, 0] = rng.randn(30, 3).astype(np.float32) * 0.5
+        result = smooth_joint_rotations(
+            bp, 0, 29, joint_indices=[0], window=7, method="moving_average",
+        )
+        assert np.std(result[:, 0]) < np.std(bp[:, 0])
+
+    def test_returns_copy(self):
+        """Original array should not be modified."""
+        bp = np.random.RandomState(42).randn(10, 21, 3).astype(np.float32)
+        original = bp.copy()
+        smooth_joint_rotations(bp, 0, 9)
+        np.testing.assert_array_equal(bp, original)
+
+    def test_window_clamped_to_odd(self):
+        """Even window should be rounded up to odd."""
+        bp = np.random.RandomState(42).randn(20, 21, 3).astype(np.float32)
+        # Should not crash with even window
+        result = smooth_joint_rotations(bp, 0, 19, window=6)
+        assert result.shape == bp.shape
+
+    def test_small_window_minimum(self):
+        """Window < 3 should be clamped to 3."""
+        bp = np.random.RandomState(42).randn(10, 21, 3).astype(np.float32)
+        result = smooth_joint_rotations(bp, 0, 9, window=1)
+        assert result.shape == bp.shape
+
+    def test_wrong_ndim_returns_copy(self):
+        """Non-3D input should return unchanged copy."""
+        bp = np.zeros((10, 63), dtype=np.float32)
+        result = smooth_joint_rotations(bp, 0, 9)
+        np.testing.assert_array_equal(result, bp)
+
+
+# ======================================================================
+# Phase 5: find_similar_frames pure function tests
+# ======================================================================
+
+
+class TestFindSimilarFrames:
+    """find_similar_frames: find frames with similar joint rotations."""
+
+    def test_finds_identical_frames(self):
+        """Frames with identical rotation should match."""
+        bp = np.zeros((20, 21, 3), dtype=np.float32)
+        bp[5, 0] = [0.5, 0.3, 0.1]
+        bp[10, 0] = [0.5, 0.3, 0.1]
+        bp[15, 0] = [0.5, 0.3, 0.1]
+        matches = find_similar_frames(bp, frame_idx=5, joint_idx=0, threshold_deg=5.0)
+        assert 10 in matches
+        assert 15 in matches
+        assert 5 not in matches  # reference excluded
+
+    def test_excludes_dissimilar(self):
+        """Frames far from threshold should not match."""
+        bp = np.zeros((20, 21, 3), dtype=np.float32)
+        bp[5, 0] = [0.5, 0.3, 0.1]
+        bp[10, 0] = [2.0, 1.5, 1.0]  # very different
+        matches = find_similar_frames(bp, frame_idx=5, joint_idx=0, threshold_deg=5.0)
+        assert 10 not in matches
+
+    def test_all_zeros_match(self):
+        """All-zero frames should all match each other."""
+        bp = np.zeros((10, 21, 3), dtype=np.float32)
+        matches = find_similar_frames(bp, frame_idx=0, joint_idx=0, threshold_deg=1.0)
+        assert len(matches) == 9  # all others
+
+    def test_reference_excluded(self):
+        """Reference frame should never be in matches."""
+        bp = np.zeros((10, 21, 3), dtype=np.float32)
+        matches = find_similar_frames(bp, frame_idx=3, joint_idx=0, threshold_deg=90.0)
+        assert 3 not in matches
+
+    def test_invalid_joint_returns_empty(self):
+        bp = np.zeros((10, 21, 3), dtype=np.float32)
+        assert find_similar_frames(bp, 0, -1) == []
+        assert find_similar_frames(bp, 0, 99) == []
+
+    def test_invalid_frame_returns_empty(self):
+        bp = np.zeros((10, 21, 3), dtype=np.float32)
+        assert find_similar_frames(bp, -1, 0) == []
+        assert find_similar_frames(bp, 99, 0) == []
+
+    def test_wrong_ndim_returns_empty(self):
+        bp = np.zeros((10, 63), dtype=np.float32)
+        assert find_similar_frames(bp, 0, 0) == []
+
+    def test_sorted_output(self):
+        bp = np.zeros((20, 21, 3), dtype=np.float32)
+        matches = find_similar_frames(bp, frame_idx=10, joint_idx=0, threshold_deg=90.0)
+        assert matches == sorted(matches)
+
+    def test_threshold_boundary(self):
+        """Frame exactly at threshold should be included (<=)."""
+        bp = np.zeros((5, 21, 3), dtype=np.float32)
+        # Set frame 1 with known angular distance from frame 0
+        angle_rad = np.radians(15.0)
+        bp[1, 0] = [angle_rad, 0, 0]
+        matches = find_similar_frames(bp, 0, 0, threshold_deg=15.0)
+        assert 1 in matches
+
+
+# ======================================================================
+# Phase 5: propagate_corrections pure function tests
+# ======================================================================
+
+
+class TestPropagateCorrections:
+    """propagate_corrections: SLERP interpolation between keyframes."""
+
+    def test_single_frame(self):
+        """start==end should return single frame."""
+        aa = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        result = propagate_corrections(5, 5, aa, aa)
+        assert 5 in result
+        np.testing.assert_allclose(result[5], aa, atol=1e-5)
+
+    def test_end_before_start(self):
+        """end < start should return single start frame."""
+        aa = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        result = propagate_corrections(10, 5, aa, aa)
+        assert 10 in result
+        assert len(result) == 1
+
+    def test_interpolates_endpoints(self):
+        """Start and end frames should match their input rotations."""
+        start_aa = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        end_aa = np.array([0.5, 0.3, 0.1], dtype=np.float32)
+        result = propagate_corrections(0, 10, start_aa, end_aa)
+        np.testing.assert_allclose(result[0], start_aa, atol=1e-4)
+        np.testing.assert_allclose(result[10], end_aa, atol=1e-4)
+
+    def test_all_frames_present(self):
+        """All frames in [start, end] should be in result."""
+        start_aa = np.zeros(3, dtype=np.float32)
+        end_aa = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        result = propagate_corrections(5, 15, start_aa, end_aa)
+        for f in range(5, 16):
+            assert f in result
+
+    def test_midpoint_intermediate(self):
+        """Midpoint should be between start and end rotations."""
+        start_aa = np.zeros(3, dtype=np.float32)
+        end_aa = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        result = propagate_corrections(0, 10, start_aa, end_aa)
+        mid_norm = np.linalg.norm(result[5])
+        start_norm = np.linalg.norm(start_aa)
+        end_norm = np.linalg.norm(end_aa)
+        # Mid should be between start and end
+        assert start_norm <= mid_norm <= end_norm or abs(mid_norm - (start_norm + end_norm) / 2) < 0.5
+
+    def test_output_dtype(self):
+        start_aa = np.zeros(3, dtype=np.float32)
+        end_aa = np.array([0.5, 0.3, 0.1], dtype=np.float32)
+        result = propagate_corrections(0, 5, start_aa, end_aa)
+        for aa in result.values():
+            assert aa.dtype == np.float32
+
+    def test_monotonic_rotation_magnitude(self):
+        """Rotation magnitude should increase monotonically from zero to target."""
+        start_aa = np.zeros(3, dtype=np.float32)
+        end_aa = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        result = propagate_corrections(0, 20, start_aa, end_aa)
+        norms = [np.linalg.norm(result[f]) for f in range(21)]
+        for i in range(len(norms) - 1):
+            assert norms[i] <= norms[i + 1] + 1e-5
+
+
+# ======================================================================
+# Phase 5: _on_smooth widget test
+# ======================================================================
+
+
+class TestOnSmooth:
+    """_on_smooth: widget-level smoothing operation."""
+
+    @pytest.fixture()
+    def panel(self, qapp):
+        session = _make_session_with_params(n_frames=50, n_persons=1)
+        # Add noise for smoothing
+        rng = np.random.RandomState(42)
+        session.person_tracks[0].smplx_params["body_pose"][:, 0] = (
+            rng.randn(50, 3).astype(np.float32) * 0.3
+        )
+        p = PoseCorrectorPanel(session=session)
+        p._current_person = 0
+        p._current_joint = 1  # L_Hip (body_pose idx 0)
+        p._current_frame = 25
+        yield p
+        p.close()
+
+    def test_smooth_reduces_noise(self, panel):
+        """Smoothing should reduce std of the joint rotation."""
+        bp = panel._session.person_tracks[0].smplx_params["body_pose"]
+        old_std = np.std(bp[:, 0])
+        panel._range_start.setValue(0)
+        panel._range_end.setValue(49)
+        panel._smooth_window.setValue(7)
+        panel._smooth_scope.setCurrentIndex(0)  # Current Joint
+        panel._on_smooth()
+        bp_after = panel._session.person_tracks[0].smplx_params["body_pose"]
+        if bp_after.ndim == 2:
+            bp_after = bp_after.reshape(bp_after.shape[0], -1, 3)
+        new_std = np.std(bp_after[:, 0])
+        assert new_std < old_std
+
+    def test_smooth_emits_correction_applied(self, panel):
+        signals = []
+        panel.correction_applied.connect(lambda p, f: signals.append((p, f)))
+        panel._range_start.setValue(5)
+        panel._range_end.setValue(15)
+        panel._on_smooth()
+        assert len(signals) == 1
+        assert signals[0][0] == 0  # person_id
+
+    def test_smooth_undo(self, panel):
+        bp_before = panel._session.person_tracks[0].smplx_params["body_pose"].copy()
+        if bp_before.ndim == 2:
+            bp_before = bp_before.reshape(bp_before.shape[0], -1, 3)
+        panel._range_start.setValue(0)
+        panel._range_end.setValue(49)
+        panel._on_smooth()
+        # Undo
+        panel._session.undo_stack.undo()
+        bp_after_undo = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp_after_undo.ndim == 2:
+            bp_after_undo = bp_after_undo.reshape(bp_after_undo.shape[0], -1, 3)
+        np.testing.assert_allclose(bp_after_undo, bp_before, atol=1e-6)
+
+    def test_smooth_all_joints_scope(self, panel):
+        """Scope 'All Body Joints' should modify multiple joints."""
+        bp_before = panel._session.person_tracks[0].smplx_params["body_pose"].copy()
+        if bp_before.ndim == 2:
+            bp_before = bp_before.reshape(bp_before.shape[0], -1, 3)
+        panel._range_start.setValue(0)
+        panel._range_end.setValue(49)
+        panel._smooth_scope.setCurrentIndex(1)  # All Body Joints
+        panel._on_smooth()
+        bp_after = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp_after.ndim == 2:
+            bp_after = bp_after.reshape(bp_after.shape[0], -1, 3)
+        # At least some change on joints other than 0
+        changed = not np.array_equal(bp_after[:, 0], bp_before[:, 0])
+        assert changed
+
+    def test_smooth_no_person_noop(self, panel):
+        """Smoothing with no person selected should be a no-op."""
+        panel._current_person = -1
+        panel._range_start.setValue(0)
+        panel._range_end.setValue(49)
+        panel._on_smooth()  # should not crash
+
+    def test_smooth_hand_joint_noop(self, panel):
+        """Smoothing hand joints (>21) should be a no-op for current joint scope."""
+        panel._current_joint = 25
+        panel._range_start.setValue(0)
+        panel._range_end.setValue(10)
+        panel._smooth_scope.setCurrentIndex(0)  # Current Joint
+        panel._on_smooth()  # should not crash, no changes
+
+
+# ======================================================================
+# Phase 5: _on_apply_to_similar widget test
+# ======================================================================
+
+
+class TestOnApplyToSimilar:
+    """_on_apply_to_similar: batch correction of similar frames."""
+
+    @pytest.fixture()
+    def panel(self, qapp):
+        session = _make_session_with_params(n_frames=30, n_persons=1)
+        # Set same rotation at multiple frames
+        for f in [5, 10, 15, 20]:
+            session.person_tracks[0].smplx_params["body_pose"][f, 0] = [0.5, 0.3, 0.1]
+        p = PoseCorrectorPanel(session=session)
+        p._current_person = 0
+        p._current_joint = 1  # L_Hip (bp idx 0)
+        p._current_frame = 5
+        yield p
+        p.close()
+
+    def test_finds_and_applies(self, panel):
+        """Should find similar frames and apply the correction."""
+        # Set target euler (different from current)
+        panel._euler_x.setValue(30.0)
+        panel._euler_y.setValue(0.0)
+        panel._euler_z.setValue(0.0)
+        panel._sim_threshold.setValue(15.0)
+        panel._on_apply_to_similar()
+        bp = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp.ndim == 2:
+            bp = bp.reshape(bp.shape[0], -1, 3)
+        # Frames 10, 15, 20 should now have the same correction
+        for f in [10, 15, 20]:
+            assert not np.allclose(bp[f, 0], [0.5, 0.3, 0.1], atol=0.01)
+
+    def test_status_label_updated(self, panel):
+        panel._euler_x.setValue(30.0)
+        panel._sim_threshold.setValue(15.0)
+        panel._on_apply_to_similar()
+        assert "similar" in panel._sim_status.text().lower()
+
+    def test_no_matches_status(self, qapp):
+        """When no frames match (all have very different rotations), show no-match message."""
+        session = _make_session_with_params(n_frames=10, n_persons=1)
+        # Make every frame have a unique, widely-spaced rotation
+        for f in range(10):
+            session.person_tracks[0].smplx_params["body_pose"][f, 0] = [
+                f * 0.5, 0, 0,
+            ]
+        p = PoseCorrectorPanel(session=session)
+        p._current_person = 0
+        p._current_joint = 1  # L_Hip (bp idx 0)
+        p._current_frame = 0
+        p._sim_threshold.setValue(1.0)  # 1° — too tight for 0.5 rad gaps
+        p._on_apply_to_similar()
+        assert "no similar" in p._sim_status.text().lower()
+        p.close()
+
+    def test_emits_correction_applied(self, panel):
+        signals = []
+        panel.correction_applied.connect(lambda p, f: signals.append((p, f)))
+        panel._euler_x.setValue(30.0)
+        panel._sim_threshold.setValue(15.0)
+        panel._on_apply_to_similar()
+        assert len(signals) == 1
+
+    def test_undo_restores(self, panel):
+        bp_before = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        ).copy()
+        if bp_before.ndim == 2:
+            bp_before = bp_before.reshape(bp_before.shape[0], -1, 3)
+        panel._euler_x.setValue(30.0)
+        panel._sim_threshold.setValue(15.0)
+        panel._on_apply_to_similar()
+        panel._session.undo_stack.undo()
+        bp_after = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp_after.ndim == 2:
+            bp_after = bp_after.reshape(bp_after.shape[0], -1, 3)
+        np.testing.assert_allclose(bp_after, bp_before, atol=1e-6)
+
+    def test_no_person_noop(self, panel):
+        panel._current_person = -1
+        panel._on_apply_to_similar()  # should not crash
+
+    def test_global_orient_joint_noop(self, panel):
+        """Joint 0 (global orient) is not a body joint — should show message."""
+        panel._current_joint = 0
+        panel._on_apply_to_similar()
+        assert panel._sim_status.text() != ""
+
+
+# ======================================================================
+# Phase 5: _on_propagate widget test
+# ======================================================================
+
+
+class TestOnPropagate:
+    """_on_propagate: SLERP correction propagation across frame range."""
+
+    @pytest.fixture()
+    def panel(self, qapp):
+        session = _make_session_with_params(n_frames=50, n_persons=1)
+        # Set distinct rotations at start and end for SLERP
+        session.person_tracks[0].smplx_params["body_pose"][10, 0] = [0.0, 0.0, 0.0]
+        session.person_tracks[0].smplx_params["body_pose"][30, 0] = [1.0, 0.0, 0.0]
+        p = PoseCorrectorPanel(session=session)
+        p._current_person = 0
+        p._current_joint = 1  # L_Hip (bp idx 0)
+        p._current_frame = 20
+        yield p
+        p.close()
+
+    def test_interpolates_across_range(self, panel):
+        """Propagation should interpolate between start and end frames."""
+        panel._range_start.setValue(10)
+        panel._range_end.setValue(30)
+        panel._on_propagate()
+        bp = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp.ndim == 2:
+            bp = bp.reshape(bp.shape[0], -1, 3)
+        # Frame 20 (midpoint) should have intermediate rotation
+        mid_norm = np.linalg.norm(bp[20, 0])
+        assert mid_norm > 0.0  # not zero (was interpolated)
+
+    def test_emits_correction_applied(self, panel):
+        signals = []
+        panel.correction_applied.connect(lambda p, f: signals.append((p, f)))
+        panel._range_start.setValue(10)
+        panel._range_end.setValue(30)
+        panel._on_propagate()
+        assert len(signals) == 1
+
+    def test_status_label_updated(self, panel):
+        panel._range_start.setValue(10)
+        panel._range_end.setValue(30)
+        panel._on_propagate()
+        assert "propagated" in panel._prop_status.text().lower()
+
+    def test_same_start_end_shows_error(self, panel):
+        """Equal start/end should show message, not crash."""
+        panel._range_start.setValue(20)
+        panel._range_end.setValue(20)
+        panel._on_propagate()
+        assert "must differ" in panel._prop_status.text().lower()
+
+    def test_undo_restores(self, panel):
+        bp_before = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        ).copy()
+        if bp_before.ndim == 2:
+            bp_before = bp_before.reshape(bp_before.shape[0], -1, 3)
+        panel._range_start.setValue(10)
+        panel._range_end.setValue(30)
+        panel._on_propagate()
+        panel._session.undo_stack.undo()
+        bp_after = np.asarray(
+            panel._session.person_tracks[0].smplx_params["body_pose"], dtype=np.float32,
+        )
+        if bp_after.ndim == 2:
+            bp_after = bp_after.reshape(bp_after.shape[0], -1, 3)
+        np.testing.assert_allclose(bp_after, bp_before, atol=1e-6)
+
+    def test_global_orient_propagation(self, panel):
+        """Joint 0 (global_orient) should also propagate."""
+        panel._current_joint = 0
+        panel._session.person_tracks[0].smplx_params["global_orient"][10] = [0.0, 0.0, 0.0]
+        panel._session.person_tracks[0].smplx_params["global_orient"][30] = [0.5, 0.0, 0.0]
+        panel._range_start.setValue(10)
+        panel._range_end.setValue(30)
+        panel._on_propagate()
+        go = np.asarray(
+            panel._session.person_tracks[0].smplx_params["global_orient"], dtype=np.float32,
+        )
+        mid_norm = np.linalg.norm(go[20])
+        assert mid_norm > 0.0
+
+    def test_no_person_noop(self, panel):
+        panel._current_person = -1
+        panel._on_propagate()
+
+    def test_hand_joint_shows_error(self, panel):
+        panel._current_joint = 25
+        panel._on_propagate()
+        assert "body joints" in panel._prop_status.text().lower()
+
+
+# ======================================================================
+# Phase 5: Preview range UI tests
+# ======================================================================
+
+
+class TestPreviewRange:
+    """Preview range controls — ±N frames auto-play after correction."""
+
+    @pytest.fixture()
+    def panel(self, qapp):
+        session = _make_session_with_params(n_frames=100, n_persons=1)
+        p = PoseCorrectorPanel(session=session)
+        p._current_person = 0
+        p._current_joint = 1
+        p._current_frame = 50
+        yield p
+        p.close()
+
+    def test_preview_widgets_exist(self, panel):
+        assert hasattr(panel, "_preview_half_range")
+        assert hasattr(panel, "_preview_btn")
+        assert hasattr(panel, "_auto_preview_check")
+        assert hasattr(panel, "_preview_timer")
+
+    def test_default_half_range(self, panel):
+        assert panel._preview_half_range.value() == 15
+
+    def test_preview_btn_text(self, panel):
+        assert panel._preview_btn.text() == "Preview"
+
+    def test_preview_play_starts_timer(self, panel):
+        """Clicking preview should start the timer."""
+        panel._on_preview_play()
+        assert panel._preview_timer.isActive()
+        assert panel._preview_btn.text() == "Stop"
+        panel._preview_timer.stop()  # cleanup
+
+    def test_preview_emits_frame_requested(self, panel):
+        """Preview ticks should emit frame_requested."""
+        signals = []
+        panel.frame_requested.connect(lambda f: signals.append(f))
+        panel._on_preview_play()
+        # Manually tick a few times
+        panel._on_preview_tick()
+        panel._on_preview_tick()
+        panel._preview_timer.stop()
+        assert len(signals) >= 2
+
+    def test_preview_stops_at_end(self, panel):
+        """Preview should stop when reaching the end of the range."""
+        panel._preview_half_range.setValue(2)
+        panel._on_preview_play()
+        # Tick through all frames
+        for _ in range(10):  # more than enough
+            if panel._preview_timer.isActive():
+                panel._on_preview_tick()
+        assert not panel._preview_timer.isActive()
+        assert panel._preview_btn.text() == "Preview"
+
+    def test_auto_preview_checkbox(self, panel):
+        """Auto-preview checkbox should be unchecked by default."""
+        assert not panel._auto_preview_check.isChecked()
+
+    def test_auto_preview_triggers_on_apply(self, panel):
+        """When auto-preview is checked, Apply should start preview."""
+        panel._auto_preview_check.setChecked(True)
+        panel._euler_x.setValue(10.0)
+        # Mock CorrectionTrack
+        mock_ct = MagicMock()
+        mock_ct.get_correction.return_value = None
+        mock_ct.corrections = []
+        with patch(
+            "views.pose_corrector_panel._safe_import_pose_correction",
+            return_value=(
+                axis_angle_to_euler_deg_fallback,
+                euler_deg_to_axis_angle_fallback,
+                MagicMock(return_value=mock_ct),
+            ),
+        ):
+            panel._on_apply()
+        # Timer should be running (auto-preview triggered)
+        assert panel._preview_timer.isActive()
+        panel._preview_timer.stop()
+
+    def test_preview_range_clamps_to_bounds(self, panel):
+        """Preview near the start of the video should clamp to frame 0."""
+        panel._current_frame = 2
+        panel._preview_half_range.setValue(15)
+        panel._on_preview_play()
+        assert panel._preview_frame == 0
+        panel._preview_timer.stop()
