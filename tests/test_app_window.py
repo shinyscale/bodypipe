@@ -1714,3 +1714,48 @@ class TestGoToFrameDialog:
         with patch("app_window.QInputDialog.getInt", return_value=(0, False)):
             app_window._go_to_frame_dialog()
         assert app_window._video_player._current_frame == 50
+
+
+# ---------------------------------------------------------------------------
+# Data loading: _load_motion_params
+# ---------------------------------------------------------------------------
+
+
+class TestLoadMotionParams:
+    """Verify _load_motion_params auto-detects SOMA vs SMPL-X."""
+
+    def test_soma_detection(self, app_window, tmp_path):
+        """Returns SOMA params when soma_results.npz exists."""
+        import numpy as np
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        np.savez(
+            person_dir / "soma_results.npz",
+            poses=np.zeros((10, 77, 3), dtype=np.float32),
+            transl=np.zeros((10, 3), dtype=np.float32),
+        )
+        smplx, soma, bmt = app_window._load_motion_params(person_dir)
+        assert smplx is None
+        assert soma is not None
+        assert bmt == "soma"
+        assert soma["poses"].shape == (10, 77, 3)
+
+    def test_smplx_fallback(self, app_window, tmp_path):
+        """Falls back to SMPL-X when no soma_results.npz exists."""
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        # No soma_results.npz, and no hmr4d_results.pt either
+        smplx, soma, bmt = app_window._load_motion_params(person_dir)
+        assert smplx is None
+        assert soma is None
+        assert bmt == "smplx"
+
+    def test_both_missing_returns_smplx_default(self, app_window, tmp_path):
+        """Returns ('smplx', None, None) when both SOMA and SMPL-X are absent."""
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        smplx, soma, bmt = app_window._load_motion_params(person_dir)
+        assert smplx is None
+        assert soma is None
+        assert bmt == "smplx"

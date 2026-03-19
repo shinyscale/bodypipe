@@ -33,6 +33,7 @@ class PipelineConfig:
     # Body model and estimation backend (SOMA migration)
     body_model: str = "smplx"            # "smplx" | "soma"
     estimation_backend: str = "gvhmr"    # "gvhmr" | "gemx"
+    kimodo_model: str = "kimodo-soma-rp"  # Kimodo model for AI correction
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +56,7 @@ class PipelineConfig:
             "use_vitpose_face_crops": self.use_vitpose_face_crops,
             "body_model": self.body_model,
             "estimation_backend": self.estimation_backend,
+            "kimodo_model": self.kimodo_model,
         }
 
     @classmethod

@@ -7,6 +7,7 @@ from workers.smplestx_worker import SMPLestXWorker
 from workers.pipeline_orchestrator import FullPipelineWorker, MultiPersonWorker
 from workers.reprocess_worker import ReprocessWorker
 from workers.render_worker import RenderWorker
+from workers.kimodo_worker import KimodoWorker
 
 __all__ = [
     "SubprocessWorkerBase",
@@ -17,4 +18,5 @@ __all__ = [
     "MultiPersonWorker",
     "ReprocessWorker",
     "RenderWorker",
+    "KimodoWorker",
 ]

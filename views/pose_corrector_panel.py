@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QFileDialog,
+    QLineEdit,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QFont
@@ -54,6 +55,12 @@ from models.session import Session, UndoEntry
 from theme import COLORS
 from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
 from models.skeleton import SMPLX_SKELETON as _SKEL
+
+try:
+    from workers.kimodo_worker import KimodoWorker, KimodoRequest, KimodoResult
+    _HAS_KIMODO_WORKER = True
+except ImportError:
+    _HAS_KIMODO_WORKER = False
 
 log = logging.getLogger(__name__)
 
@@ -1171,6 +1178,49 @@ class PoseCorrectorPanel(QWidget):
         adl.addWidget(self._issues_table)
         lay.addWidget(ad_section)
 
+        # AI Correction (Kimodo)
+        if _HAS_KIMODO_WORKER:
+            self._ai_section = _CollapsibleSection("AI Correction", collapsed=True)
+            ai_layout = self._ai_section.content_layout
+
+            # Text prompt
+            prompt_row = QHBoxLayout()
+            prompt_row.addWidget(QLabel("Prompt:"))
+            self._ai_prompt = QLineEdit()
+            self._ai_prompt.setPlaceholderText("e.g., person walks forward naturally")
+            prompt_row.addWidget(self._ai_prompt)
+            ai_layout.addLayout(prompt_row)
+
+            # Frame range
+            range_row = QHBoxLayout()
+            range_row.addWidget(QLabel("Start:"))
+            self._ai_start_frame = QSpinBox()
+            self._ai_start_frame.setRange(0, 999999)
+            range_row.addWidget(self._ai_start_frame)
+            range_row.addWidget(QLabel("End:"))
+            self._ai_end_frame = QSpinBox()
+            self._ai_end_frame.setRange(0, 999999)
+            range_row.addWidget(self._ai_end_frame)
+            ai_layout.addLayout(range_row)
+
+            # Buttons
+            btn_row = QHBoxLayout()
+            self._ai_generate_btn = QPushButton("Generate")
+            self._ai_accept_btn = QPushButton("Accept")
+            self._ai_reject_btn = QPushButton("Reject")
+            self._ai_accept_btn.setEnabled(False)
+            self._ai_reject_btn.setEnabled(False)
+            btn_row.addWidget(self._ai_generate_btn)
+            btn_row.addWidget(self._ai_accept_btn)
+            btn_row.addWidget(self._ai_reject_btn)
+            ai_layout.addLayout(btn_row)
+
+            # Status label
+            self._ai_status = QLabel("")
+            ai_layout.addWidget(self._ai_status)
+
+            lay.addWidget(self._ai_section)
+
         lay.addStretch()
         scroll.setWidget(container)
         return scroll
@@ -1393,6 +1443,12 @@ class PoseCorrectorPanel(QWidget):
         self._issues_table.cellDoubleClicked.connect(
             self._on_pose_issue_double_clicked
         )
+
+        # AI Correction (Kimodo)
+        if _HAS_KIMODO_WORKER and hasattr(self, '_ai_generate_btn'):
+            self._ai_generate_btn.clicked.connect(self._on_ai_generate)
+            self._ai_accept_btn.clicked.connect(self._on_ai_accept)
+            self._ai_reject_btn.clicked.connect(self._on_ai_reject)
 
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
@@ -3011,6 +3067,10 @@ class PoseCorrectorPanel(QWidget):
         self.frame_requested.emit(issue.frame)
         # Highlight row in table
         self._issues_table.selectRow(idx)
+        # Auto-fill AI correction frame range when navigating to an issue
+        if _HAS_KIMODO_WORKER and hasattr(self, '_ai_start_frame'):
+            self._ai_start_frame.setValue(issue.span[0])
+            self._ai_end_frame.setValue(issue.span[1])
 
     def _on_pose_issue_double_clicked(self, row: int, _col: int):
         """Navigate to an issue when double-clicking its table row."""
@@ -3038,3 +3098,95 @@ class PoseCorrectorPanel(QWidget):
 
             desc_item = QTableWidgetItem(issue.description)
             self._issues_table.setItem(row, 3, desc_item)
+
+    # ------------------------------------------------------------------
+    # AI Correction (Kimodo)
+    # ------------------------------------------------------------------
+
+    def _on_ai_generate(self):
+        """Start Kimodo generation for the selected frame range."""
+        if not _HAS_KIMODO_WORKER:
+            return
+
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.soma_params is None:
+            self._ai_status.setText("No SOMA params — AI correction requires SOMA body model")
+            return
+
+        prompt = self._ai_prompt.text().strip()
+        if not prompt:
+            self._ai_status.setText("Enter a text prompt describing the desired motion")
+            return
+
+        request = KimodoRequest(
+            soma_params=track.soma_params,
+            start_frame=self._ai_start_frame.value(),
+            end_frame=self._ai_end_frame.value(),
+            text_prompt=prompt,
+        )
+
+        self._ai_worker = KimodoWorker(request)
+        self._ai_worker.progress.connect(
+            lambda frac, msg: self._ai_status.setText(msg)
+        )
+        self._ai_worker.finished.connect(self._on_ai_finished)
+        self._ai_worker.error.connect(
+            lambda err: self._ai_status.setText(f"Error: {err}")
+        )
+        self._ai_generate_btn.setEnabled(False)
+        self._ai_status.setText("Generating...")
+        self._ai_worker.start()
+
+    def _on_ai_finished(self, result):
+        """Kimodo generation complete — show preview, enable accept/reject."""
+        self._ai_result = result
+        self._ai_generate_btn.setEnabled(True)
+        self._ai_accept_btn.setEnabled(True)
+        self._ai_reject_btn.setEnabled(True)
+        n = result.end_frame - result.start_frame + 1
+        self._ai_status.setText(
+            f"Generated {n} frames. Preview in viewport, then Accept or Reject."
+        )
+
+    def _on_ai_accept(self):
+        """Commit the Kimodo-generated poses to the session."""
+        if not hasattr(self, "_ai_result") or self._ai_result is None:
+            return
+
+        result = self._ai_result
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.soma_params is None:
+            return
+
+        # Apply blended poses to the session
+        poses = np.asarray(track.soma_params["poses"])
+        old_region = poses[result.blend_start:result.blend_end + 1].copy()
+
+        poses[result.blend_start:result.blend_end + 1] = result.blended_poses
+
+        # Push undo
+        blend_start = result.blend_start
+        blend_end = result.blend_end
+
+        self._session.undo_stack.push(UndoEntry(
+            description=f"AI correction frames {result.start_frame}-{result.end_frame}",
+            undo_fn=lambda: poses.__setitem__(
+                slice(blend_start, blend_end + 1), old_region
+            ),
+            redo_fn=lambda: poses.__setitem__(
+                slice(blend_start, blend_end + 1), result.blended_poses
+            ),
+        ))
+
+        self._ai_accept_btn.setEnabled(False)
+        self._ai_reject_btn.setEnabled(False)
+        self._ai_status.setText("Correction applied.")
+        self._ai_result = None
+        self.correction_applied.emit(self._current_person, result.start_frame)
+
+    def _on_ai_reject(self):
+        """Discard the Kimodo-generated poses."""
+        self._ai_result = None
+        self._ai_accept_btn.setEnabled(False)
+        self._ai_reject_btn.setEnabled(False)
+        self._ai_status.setText("Correction rejected.")
