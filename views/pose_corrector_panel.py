@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QGroupBox,
+    QGridLayout,
     QLabel,
     QCheckBox,
     QComboBox,
@@ -37,6 +37,9 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QTabWidget,
+    QScrollArea,
+    QToolButton,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -45,6 +48,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
+from PySide6.QtGui import QFont
 
 from models.session import Session, UndoEntry
 from theme import COLORS
@@ -698,6 +702,62 @@ def propagate_corrections(
         return result
 
 
+# ------------------------------------------------------------------
+# Layout constants — consistent grid, monospace fields, uniform sizing
+# ------------------------------------------------------------------
+
+_LABEL_MIN_WIDTH = 120
+_SPINBOX_FIXED_WIDTH = 80
+_SLIDER_FIXED_HEIGHT = 22
+_MONO_FONT_FAMILY = "Consolas, Courier New, monospace"
+
+
+class _CollapsibleSection(QWidget):
+    """Collapsible section with arrow toggle for property panel organization.
+
+    Why: The pose corrector has many control groups that overwhelm the interface
+    when all visible at once. Collapsible sections let users hide groups they
+    are not actively using while keeping them one click away. Uses QToolButton
+    with arrow type indicator for a clean, consistent toggle mechanism.
+    """
+
+    def __init__(self, title: str, parent=None, collapsed=False):
+        super().__init__(parent)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 2)
+        main_layout.setSpacing(0)
+
+        self._header = QToolButton()
+        self._header.setArrowType(Qt.RightArrow if collapsed else Qt.DownArrow)
+        self._header.setText(title)
+        self._header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._header.setCheckable(True)
+        self._header.setChecked(not collapsed)
+        self._header.setStyleSheet(
+            f"QToolButton {{ border: none; font-weight: bold; "
+            f"color: {COLORS['text_primary']}; padding: 4px 2px; }}"
+            f"QToolButton:hover {{ color: {COLORS['accent']}; }}"
+        )
+        main_layout.addWidget(self._header)
+
+        self._content = QWidget()
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(8, 2, 2, 2)
+        self._content.setVisible(not collapsed)
+        main_layout.addWidget(self._content)
+
+        self._header.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, checked: bool):
+        self._content.setVisible(checked)
+        self._header.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    @property
+    def content_layout(self) -> QVBoxLayout:
+        """Layout to add child widgets into."""
+        return self._content_layout
+
+
 class PoseCorrectorPanel(QWidget):
     """Pose correction panel with embedded 3D viewport and joint controls.
 
@@ -769,81 +829,141 @@ class PoseCorrectorPanel(QWidget):
         mode_row.addStretch()
         vp_layout.addLayout(mode_row)
 
-        # Corrections table
-        corr_group = QGroupBox("Corrections")
-        corr_layout = QVBoxLayout(corr_group)
-        self._corrections_table = QTableWidget(0, 5)
-        self._corrections_table.setHorizontalHeaderLabels(
-            ["Frame", "Type", "Joint", "Go", "Del"]
-        )
-        self._corrections_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents
-        )
-        self._corrections_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._corrections_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._corrections_table.setMaximumHeight(160)
-        corr_layout.addWidget(self._corrections_table)
-        vp_layout.addWidget(corr_group)
-
-        # Export group
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
-        export_row = QHBoxLayout()
-        self._reexport_bvh_btn = QPushButton("Re-export BVH")
-        self._reexport_bvh_btn.setToolTip("Apply corrections + space overrides and export to BVH")
-        export_row.addWidget(self._reexport_bvh_btn)
-        self._reexport_fbx_btn = QPushButton("Re-export FBX")
-        self._reexport_fbx_btn.setToolTip("Export BVH then convert to FBX via Blender")
-        export_row.addWidget(self._reexport_fbx_btn)
-        export_layout.addLayout(export_row)
-        self._export_status = QLabel("")
-        self._export_status.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
-        self._export_status.setWordWrap(True)
-        export_layout.addWidget(self._export_status)
-        vp_layout.addWidget(export_group)
-
         splitter.addWidget(viewport_widget)
 
-        # ---- Right: Joint controls ----
-        controls = QWidget()
-        ctrl_layout = QVBoxLayout(controls)
-        ctrl_layout.setContentsMargins(8, 8, 8, 8)
+        # ---- Right: Tabbed property panel ----
+        self._controls_tabs = QTabWidget()
+        self._controls_tabs.setDocumentMode(True)
+        self._controls_tabs.addTab(self._build_pose_tab(), "Pose")
+        self._controls_tabs.addTab(self._build_corrections_tab(), "Corrections")
+        self._controls_tabs.addTab(self._build_export_tab(), "Export")
+        self._controls_tabs.addTab(self._build_space_tab(), "Space")
 
-        # Person selector
-        person_group = QHBoxLayout()
-        person_group.addWidget(QLabel("Person:"))
+        splitter.addWidget(self._controls_tabs)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        layout.addWidget(splitter)
+
+        # Preview playback timer (not a visual widget)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(33)  # ~30fps
+        self._preview_frame = 0
+        self._preview_end = 0
+
+    # ------------------------------------------------------------------
+    # Tab builders
+    # ------------------------------------------------------------------
+
+    def _build_pose_tab(self) -> QWidget:
+        """Build the Pose tab: person/joint selectors, euler sliders, actions."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        # Person / Joint selectors — grid with 120px label column
+        grid = QGridLayout()
+        grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("Person:"), 0, 0)
         self._person_combo = QComboBox()
-        person_group.addWidget(self._person_combo, stretch=1)
-        ctrl_layout.addLayout(person_group)
+        grid.addWidget(self._person_combo, 0, 1)
 
-        # Joint selector
-        joint_group = QHBoxLayout()
-        joint_group.addWidget(QLabel("Joint:"))
+        grid.addWidget(QLabel("Joint:"), 1, 0)
         self._joint_combo = QComboBox()
         self._populate_joint_dropdown()
-        joint_group.addWidget(self._joint_combo, stretch=1)
-        ctrl_layout.addLayout(joint_group)
+        grid.addWidget(self._joint_combo, 1, 1)
 
-        # Joint info label
+        lay.addLayout(grid)
+
+        # Joint info
         self._joint_info = QLabel("")
-        self._joint_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        self._joint_info.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
         self._joint_info.setWordWrap(True)
-        ctrl_layout.addWidget(self._joint_info)
+        lay.addWidget(self._joint_info)
 
-        # Euler rotation group
-        rot_group = QGroupBox("Rotation (degrees)")
-        rot_layout = QVBoxLayout(rot_group)
+        # Rotation section (collapsible)
+        rot_section = _CollapsibleSection("Rotation (degrees)")
+        self._euler_x, self._slider_x = self._make_euler_row(
+            "X:", rot_section.content_layout,
+        )
+        self._euler_y, self._slider_y = self._make_euler_row(
+            "Y:", rot_section.content_layout,
+        )
+        self._euler_z, self._slider_z = self._make_euler_row(
+            "Z:", rot_section.content_layout,
+        )
+        lay.addWidget(rot_section)
 
-        self._euler_x, self._slider_x = self._make_euler_row("X:", rot_layout)
-        self._euler_y, self._slider_y = self._make_euler_row("Y:", rot_layout)
-        self._euler_z, self._slider_z = self._make_euler_row("Z:", rot_layout)
+        # Apply / Reset buttons
+        btn_row = QHBoxLayout()
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setToolTip("Commit correction as keyframe")
+        btn_row.addWidget(self._apply_btn)
+        self._reset_joint_btn = QPushButton("Reset Joint")
+        self._reset_joint_btn.setToolTip("Reset selected joint to original pose")
+        btn_row.addWidget(self._reset_joint_btn)
+        self._reset_all_btn = QPushButton("Reset All")
+        self._reset_all_btn.setToolTip("Remove all corrections at this frame")
+        btn_row.addWidget(self._reset_all_btn)
+        lay.addLayout(btn_row)
 
-        ctrl_layout.addWidget(rot_group)
+        # Frame Range section (collapsible) — shared by Apply-to-range,
+        # Smoothing, and Propagation
+        range_section = _CollapsibleSection("Frame Range")
+        rl = range_section.content_layout
+        range_grid = QGridLayout()
+        range_grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        range_grid.setColumnStretch(1, 1)
+        range_grid.addWidget(QLabel("Start:"), 0, 0)
+        self._range_start = QSpinBox()
+        self._range_start.setRange(0, 999999)
+        self._style_spinbox(self._range_start)
+        range_grid.addWidget(self._range_start, 0, 1)
+        range_grid.addWidget(QLabel("End:"), 1, 0)
+        self._range_end = QSpinBox()
+        self._range_end.setRange(0, 999999)
+        self._style_spinbox(self._range_end)
+        range_grid.addWidget(self._range_end, 1, 1)
+        rl.addLayout(range_grid)
+        self._apply_range_check = QCheckBox("Apply to range")
+        self._apply_range_check.setToolTip(
+            "When checked, Apply commits the correction to all frames in range"
+        )
+        rl.addWidget(self._apply_range_check)
+        lay.addWidget(range_section)
 
-        # Preview range — auto-play ±N frames after correction to see impact
-        preview_group = QGroupBox("Preview Range")
-        preview_layout = QVBoxLayout(preview_group)
+        # Quick Fix section (collapsible)
+        qf_section = _CollapsibleSection("Quick Fix")
+        ql = qf_section.content_layout
+        qf_row1 = QHBoxLayout()
+        self._flip_btn = QPushButton("Flip Body")
+        self._flip_btn.setToolTip("180° rotation on selected axis (yaw/pitch/roll)")
+        qf_row1.addWidget(self._flip_btn)
+        self._invert_btn = QPushButton("Invert")
+        self._invert_btn.setToolTip("Flip upside-down pose (180° pitch)")
+        qf_row1.addWidget(self._invert_btn)
+        ql.addLayout(qf_row1)
+        qf_row2 = QHBoxLayout()
+        self._mirror_btn = QPushButton("Mirror L/R")
+        self._mirror_btn.setToolTip("Swap left/right joint pairs")
+        qf_row2.addWidget(self._mirror_btn)
+        self._copy_from_btn = QPushButton("Copy From")
+        self._copy_from_btn.setToolTip("Copy pose from another frame")
+        qf_row2.addWidget(self._copy_from_btn)
+        ql.addLayout(qf_row2)
+        lay.addWidget(qf_section)
 
+        # Preview Range section (collapsible)
+        preview_section = _CollapsibleSection("Preview Range")
+        pl = preview_section.content_layout
         preview_row = QHBoxLayout()
         preview_row.addWidget(QLabel("±"))
         self._preview_half_range = QSpinBox()
@@ -857,171 +977,121 @@ class PoseCorrectorPanel(QWidget):
         self._preview_btn = QPushButton("Preview")
         self._preview_btn.setToolTip("Play ±N frames around current frame")
         preview_row.addWidget(self._preview_btn)
-        preview_layout.addLayout(preview_row)
-
+        pl.addLayout(preview_row)
         self._auto_preview_check = QCheckBox("Auto-preview after Apply")
         self._auto_preview_check.setToolTip(
             "Automatically play the preview range after applying a correction"
         )
-        preview_layout.addWidget(self._auto_preview_check)
+        pl.addWidget(self._auto_preview_check)
+        lay.addWidget(preview_section)
 
-        ctrl_layout.addWidget(preview_group)
+        lay.addStretch()
+        scroll.setWidget(container)
+        return scroll
 
-        # Preview playback timer
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setInterval(33)  # ~30fps
-        self._preview_frame = 0
-        self._preview_end = 0
+    def _build_corrections_tab(self) -> QWidget:
+        """Build the Corrections tab: table, smoothing, similar, propagation, auto-detect."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
 
-        # Action buttons
-        btn_row = QHBoxLayout()
-        self._apply_btn = QPushButton("Apply")
-        self._apply_btn.setToolTip("Commit correction as keyframe")
-        btn_row.addWidget(self._apply_btn)
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
 
-        self._reset_joint_btn = QPushButton("Reset Joint")
-        self._reset_joint_btn.setToolTip("Reset selected joint to original pose")
-        btn_row.addWidget(self._reset_joint_btn)
-
-        self._reset_all_btn = QPushButton("Reset All")
-        self._reset_all_btn.setToolTip("Remove all corrections at this frame")
-        btn_row.addWidget(self._reset_all_btn)
-
-        ctrl_layout.addLayout(btn_row)
-
-        # Frame Range group — preview and apply corrections across frames
-        range_group = QGroupBox("Frame Range")
-        range_layout = QVBoxLayout(range_group)
-
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("Start:"))
-        self._range_start = QSpinBox()
-        self._range_start.setRange(0, 999999)
-        range_row.addWidget(self._range_start)
-        range_row.addWidget(QLabel("End:"))
-        self._range_end = QSpinBox()
-        self._range_end.setRange(0, 999999)
-        range_row.addWidget(self._range_end)
-        range_layout.addLayout(range_row)
-
-        self._apply_range_check = QCheckBox("Apply to range")
-        self._apply_range_check.setToolTip(
-            "When checked, Apply commits the correction to all frames in range"
+        # Corrections table (always visible — primary content)
+        self._corrections_table = QTableWidget(0, 5)
+        self._corrections_table.setHorizontalHeaderLabels(
+            ["Frame", "Type", "Joint", "Go", "Del"]
         )
-        range_layout.addWidget(self._apply_range_check)
+        self._corrections_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self._corrections_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._corrections_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._corrections_table.setMaximumHeight(160)
+        lay.addWidget(self._corrections_table)
 
-        ctrl_layout.addWidget(range_group)
-
-        # Quick Fix group
-        qf_group = QGroupBox("Quick Fix")
-        qf_layout = QVBoxLayout(qf_group)
-
-        qf_row1 = QHBoxLayout()
-        self._flip_btn = QPushButton("Flip Body")
-        self._flip_btn.setToolTip("180° rotation on selected axis (yaw/pitch/roll)")
-        qf_row1.addWidget(self._flip_btn)
-        self._invert_btn = QPushButton("Invert")
-        self._invert_btn.setToolTip("Flip upside-down pose (180° pitch)")
-        qf_row1.addWidget(self._invert_btn)
-        qf_layout.addLayout(qf_row1)
-
-        qf_row2 = QHBoxLayout()
-        self._mirror_btn = QPushButton("Mirror L/R")
-        self._mirror_btn.setToolTip("Swap left/right joint pairs")
-        qf_row2.addWidget(self._mirror_btn)
-        self._copy_from_btn = QPushButton("Copy From")
-        self._copy_from_btn.setToolTip("Copy pose from another frame")
-        qf_row2.addWidget(self._copy_from_btn)
-        qf_layout.addLayout(qf_row2)
-
-        ctrl_layout.addWidget(qf_group)
-
-        # Smoothing group — temporal smoothing to reduce jitter
-        smooth_group = QGroupBox("Smoothing")
-        smooth_layout = QVBoxLayout(smooth_group)
-
-        smooth_row1 = QHBoxLayout()
-        smooth_row1.addWidget(QLabel("Window:"))
+        # Smoothing section (collapsible)
+        smooth_section = _CollapsibleSection("Smoothing")
+        sl = smooth_section.content_layout
+        smooth_grid = QGridLayout()
+        smooth_grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        smooth_grid.setColumnStretch(1, 1)
+        smooth_grid.addWidget(QLabel("Window:"), 0, 0)
         self._smooth_window = QSpinBox()
         self._smooth_window.setRange(3, 31)
         self._smooth_window.setSingleStep(2)
         self._smooth_window.setValue(7)
         self._smooth_window.setToolTip("Kernel size (odd, 3-31 frames)")
-        smooth_row1.addWidget(self._smooth_window)
-        smooth_row1.addWidget(QLabel("Method:"))
+        self._style_spinbox(self._smooth_window)
+        smooth_grid.addWidget(self._smooth_window, 0, 1)
+        smooth_grid.addWidget(QLabel("Method:"), 1, 0)
         self._smooth_method = QComboBox()
         self._smooth_method.addItems(["Gaussian", "Moving Average"])
-        smooth_row1.addWidget(self._smooth_method)
-        smooth_layout.addLayout(smooth_row1)
-
-        smooth_row2 = QHBoxLayout()
-        smooth_row2.addWidget(QLabel("Scope:"))
+        smooth_grid.addWidget(self._smooth_method, 1, 1)
+        smooth_grid.addWidget(QLabel("Scope:"), 2, 0)
         self._smooth_scope = QComboBox()
         self._smooth_scope.addItems(["Current Joint", "All Body Joints"])
-        smooth_row2.addWidget(self._smooth_scope)
+        smooth_grid.addWidget(self._smooth_scope, 2, 1)
+        sl.addLayout(smooth_grid)
         self._smooth_btn = QPushButton("Smooth")
         self._smooth_btn.setToolTip(
             "Apply temporal smoothing to the selected joint(s) over the frame range"
         )
-        smooth_row2.addWidget(self._smooth_btn)
-        smooth_layout.addLayout(smooth_row2)
+        sl.addWidget(self._smooth_btn)
+        lay.addWidget(smooth_section)
 
-        ctrl_layout.addWidget(smooth_group)
-
-        # Apply-to-Similar group — find and correct similar poses
-        sim_group = QGroupBox("Apply to Similar")
-        sim_layout = QVBoxLayout(sim_group)
-
-        sim_row = QHBoxLayout()
-        sim_row.addWidget(QLabel("Threshold:"))
+        # Apply to Similar section (collapsible)
+        sim_section = _CollapsibleSection("Apply to Similar")
+        siml = sim_section.content_layout
+        sim_grid = QGridLayout()
+        sim_grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        sim_grid.setColumnStretch(1, 1)
+        sim_grid.addWidget(QLabel("Threshold:"), 0, 0)
         self._sim_threshold = QDoubleSpinBox()
         self._sim_threshold.setRange(1.0, 90.0)
         self._sim_threshold.setValue(15.0)
         self._sim_threshold.setSingleStep(1.0)
         self._sim_threshold.setSuffix("°")
         self._sim_threshold.setToolTip("Maximum angular distance for a match")
-        sim_row.addWidget(self._sim_threshold)
+        self._style_spinbox(self._sim_threshold)
+        sim_grid.addWidget(self._sim_threshold, 0, 1)
+        siml.addLayout(sim_grid)
         self._sim_apply_btn = QPushButton("Apply to Similar")
         self._sim_apply_btn.setToolTip(
             "Find frames with similar joint rotation and apply the same correction"
         )
-        sim_row.addWidget(self._sim_apply_btn)
-        sim_layout.addLayout(sim_row)
-
+        siml.addWidget(self._sim_apply_btn)
         self._sim_status = QLabel("")
         self._sim_status.setStyleSheet(
             f"color: {COLORS['text_secondary']}; font-size: 11px;"
         )
         self._sim_status.setWordWrap(True)
-        sim_layout.addWidget(self._sim_status)
+        siml.addWidget(self._sim_status)
+        lay.addWidget(sim_section)
 
-        ctrl_layout.addWidget(sim_group)
-
-        # Propagation group — interpolate corrections between keyframes
-        prop_group = QGroupBox("Correction Propagation")
-        prop_layout = QVBoxLayout(prop_group)
-
+        # Propagation section (collapsible)
+        prop_section = _CollapsibleSection("Correction Propagation")
+        propl = prop_section.content_layout
         self._propagate_btn = QPushButton("Propagate (SLERP)")
         self._propagate_btn.setToolTip(
             "Interpolate the current joint correction across the frame range "
             "using spherical linear interpolation (SLERP). Set start/end "
-            "frames in the Frame Range group above."
+            "frames in the Frame Range group on the Pose tab."
         )
-        prop_layout.addWidget(self._propagate_btn)
-
+        propl.addWidget(self._propagate_btn)
         self._prop_status = QLabel("")
         self._prop_status.setStyleSheet(
             f"color: {COLORS['text_secondary']}; font-size: 11px;"
         )
         self._prop_status.setWordWrap(True)
-        prop_layout.addWidget(self._prop_status)
+        propl.addWidget(self._prop_status)
+        lay.addWidget(prop_section)
 
-        ctrl_layout.addWidget(prop_group)
-
-        # Auto-Detect group
-        ad_group = QGroupBox("Auto-Detect")
-        ad_layout = QVBoxLayout(ad_group)
-
+        # Auto-Detect section (collapsible)
+        ad_section = _CollapsibleSection("Auto-Detect")
+        adl = ad_section.content_layout
         ad_btn_row = QHBoxLayout()
         self._detect_btn = QPushButton("Detect Bad Spans")
         self._detect_btn.setToolTip(
@@ -1036,12 +1106,10 @@ class PoseCorrectorPanel(QWidget):
         self._next_issue_btn.setToolTip("Navigate to next issue")
         self._next_issue_btn.setEnabled(False)
         ad_btn_row.addWidget(self._next_issue_btn)
-        ad_layout.addLayout(ad_btn_row)
-
+        adl.addLayout(ad_btn_row)
         self._issues_label = QLabel("No scan performed")
         self._issues_label.setStyleSheet("font-style: italic;")
-        ad_layout.addWidget(self._issues_label)
-
+        adl.addWidget(self._issues_label)
         self._issues_table = QTableWidget(0, 4)
         self._issues_table.setHorizontalHeaderLabels(
             ["Frame", "Person", "Type", "Description"]
@@ -1053,53 +1121,99 @@ class PoseCorrectorPanel(QWidget):
         self._issues_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._issues_table.verticalHeader().hide()
         self._issues_table.setMaximumHeight(120)
-        ad_layout.addWidget(self._issues_table)
+        adl.addWidget(self._issues_table)
+        lay.addWidget(ad_section)
 
-        ctrl_layout.addWidget(ad_group)
+        lay.addStretch()
+        scroll.setWidget(container)
+        return scroll
 
-        # Space Overrides group
-        so_group = QGroupBox("Space Overrides")
-        so_layout = QVBoxLayout(so_group)
+    def _build_export_tab(self) -> QWidget:
+        """Build the Export tab: BVH/FBX re-export buttons and status."""
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
 
-        so_row1 = QHBoxLayout()
-        so_row1.addWidget(QLabel("Space:"))
+        export_row = QHBoxLayout()
+        self._reexport_bvh_btn = QPushButton("Re-export BVH")
+        self._reexport_bvh_btn.setToolTip(
+            "Apply corrections + space overrides and export to BVH"
+        )
+        export_row.addWidget(self._reexport_bvh_btn)
+        self._reexport_fbx_btn = QPushButton("Re-export FBX")
+        self._reexport_fbx_btn.setToolTip(
+            "Export BVH then convert to FBX via Blender"
+        )
+        export_row.addWidget(self._reexport_fbx_btn)
+        lay.addLayout(export_row)
+
+        self._export_status = QLabel("")
+        self._export_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._export_status.setWordWrap(True)
+        lay.addWidget(self._export_status)
+
+        lay.addStretch()
+        return container
+
+    def _build_space_tab(self) -> QWidget:
+        """Build the Space tab: coordinate space overrides for multi-person."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        # Space override controls — grid with 120px label column
+        grid = QGridLayout()
+        grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("Space:"), 0, 0)
         self._space_combo = QComboBox()
         self._space_combo.addItems(["World", "Camera", "Carried"])
-        so_row1.addWidget(self._space_combo)
-        so_layout.addLayout(so_row1)
+        grid.addWidget(self._space_combo, 0, 1)
 
-        so_row2 = QHBoxLayout()
-        so_row2.addWidget(QLabel("Start:"))
+        grid.addWidget(QLabel("Start:"), 1, 0)
         self._space_start = QSpinBox()
         self._space_start.setRange(0, 999999)
-        so_row2.addWidget(self._space_start)
-        so_row2.addWidget(QLabel("End:"))
+        self._style_spinbox(self._space_start)
+        grid.addWidget(self._space_start, 1, 1)
+
+        grid.addWidget(QLabel("End:"), 2, 0)
         self._space_end = QSpinBox()
         self._space_end.setRange(0, 999999)
-        so_row2.addWidget(self._space_end)
-        so_layout.addLayout(so_row2)
+        self._style_spinbox(self._space_end)
+        grid.addWidget(self._space_end, 2, 1)
 
-        so_row3 = QHBoxLayout()
-        so_row3.addWidget(QLabel("Ref Person:"))
+        grid.addWidget(QLabel("Ref Person:"), 3, 0)
         self._space_ref_combo = QComboBox()
         self._space_ref_combo.addItem("—", userData=None)
-        so_row3.addWidget(self._space_ref_combo)
-        so_row3.addWidget(QLabel("Y offset:"))
+        grid.addWidget(self._space_ref_combo, 3, 1)
+
+        grid.addWidget(QLabel("Y offset:"), 4, 0)
         self._space_y_offset = QDoubleSpinBox()
         self._space_y_offset.setRange(0.0, 5.0)
         self._space_y_offset.setValue(0.4)
         self._space_y_offset.setDecimals(2)
         self._space_y_offset.setSuffix(" m")
-        so_row3.addWidget(self._space_y_offset)
-        so_layout.addLayout(so_row3)
+        self._style_spinbox(self._space_y_offset)
+        grid.addWidget(self._space_y_offset, 4, 1)
 
-        so_btn_row = QHBoxLayout()
+        lay.addLayout(grid)
+
+        # Add / Delete buttons
+        btn_row = QHBoxLayout()
         self._add_override_btn = QPushButton("Add Override")
-        so_btn_row.addWidget(self._add_override_btn)
+        btn_row.addWidget(self._add_override_btn)
         self._del_override_btn = QPushButton("Delete Selected")
-        so_btn_row.addWidget(self._del_override_btn)
-        so_layout.addLayout(so_btn_row)
+        btn_row.addWidget(self._del_override_btn)
+        lay.addLayout(btn_row)
 
+        # Space overrides table
         self._space_table = QTableWidget(0, 5)
         self._space_table.setHorizontalHeaderLabels(
             ["Start", "End", "Space", "Ref Person", "Y Offset"]
@@ -1110,17 +1224,22 @@ class PoseCorrectorPanel(QWidget):
         self._space_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._space_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._space_table.setMaximumHeight(120)
-        so_layout.addWidget(self._space_table)
+        lay.addWidget(self._space_table)
 
-        ctrl_layout.addWidget(so_group)
+        lay.addStretch()
+        scroll.setWidget(container)
+        return scroll
 
-        ctrl_layout.addStretch()
+    # ------------------------------------------------------------------
+    # Layout helpers
+    # ------------------------------------------------------------------
 
-        splitter.addWidget(controls)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        layout.addWidget(splitter)
+    def _style_spinbox(self, spinbox):
+        """Apply monospace font and consistent width to a numeric spinbox."""
+        font = QFont(_MONO_FONT_FAMILY)
+        font.setPointSize(spinbox.font().pointSize())
+        spinbox.setFont(font)
+        spinbox.setFixedWidth(_SPINBOX_FIXED_WIDTH)
 
     def _make_euler_row(self, label: str, parent_layout: QVBoxLayout):
         """Create a slider + spinbox row for one euler angle.
@@ -1134,6 +1253,7 @@ class PoseCorrectorPanel(QWidget):
         slider.setRange(-180, 180)
         slider.setValue(0)
         slider.setSingleStep(1)
+        slider.setFixedHeight(_SLIDER_FIXED_HEIGHT)
         row.addWidget(slider, stretch=1)
 
         spinbox = QDoubleSpinBox()
@@ -1142,7 +1262,7 @@ class PoseCorrectorPanel(QWidget):
         spinbox.setSingleStep(0.1)
         spinbox.setDecimals(1)
         spinbox.setSuffix("°")
-        spinbox.setFixedWidth(80)
+        self._style_spinbox(spinbox)
         row.addWidget(spinbox)
 
         parent_layout.addLayout(row)

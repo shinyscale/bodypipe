@@ -54,6 +54,11 @@ from views.pose_corrector_panel import (
     mirror_lr_pose_fallback,
     _N_BODY_JOINTS,
     _LR_SWAP_PAIRS,
+    _CollapsibleSection,
+    _LABEL_MIN_WIDTH,
+    _SPINBOX_FIXED_WIDTH,
+    _SLIDER_FIXED_HEIGHT,
+    _MONO_FONT_FAMILY,
 )
 
 
@@ -3151,3 +3156,176 @@ class TestPreviewRange:
         panel._on_preview_play()
         assert panel._preview_frame == 0
         panel._preview_timer.stop()
+
+
+# ======================================================================
+# Phase 8: Property Panel Refinement — collapsible/tabbed structure tests
+# ======================================================================
+
+
+class TestCollapsibleSection:
+    """_CollapsibleSection: toggle visibility of content area."""
+
+    def test_construction_expanded(self, qapp):
+        section = _CollapsibleSection("Test Section")
+        assert section._header.isChecked()
+        assert not section._content.isHidden()
+
+    def test_construction_collapsed(self, qapp):
+        section = _CollapsibleSection("Test", collapsed=True)
+        assert not section._header.isChecked()
+        assert section._content.isHidden()
+
+    def test_toggle_collapses_content(self, qapp):
+        section = _CollapsibleSection("Test")
+        assert not section._content.isHidden()
+        section._header.setChecked(False)
+        assert section._content.isHidden()
+
+    def test_toggle_expands_content(self, qapp):
+        section = _CollapsibleSection("Test", collapsed=True)
+        assert section._content.isHidden()
+        section._header.setChecked(True)
+        assert not section._content.isHidden()
+
+    def test_arrow_type_expanded(self, qapp):
+        from PySide6.QtCore import Qt
+        section = _CollapsibleSection("Test")
+        assert section._header.arrowType() == Qt.DownArrow
+
+    def test_arrow_type_collapsed(self, qapp):
+        from PySide6.QtCore import Qt
+        section = _CollapsibleSection("Test", collapsed=True)
+        assert section._header.arrowType() == Qt.RightArrow
+
+    def test_content_layout_accessible(self, qapp):
+        from PySide6.QtWidgets import QVBoxLayout
+        section = _CollapsibleSection("Test")
+        assert isinstance(section.content_layout, QVBoxLayout)
+
+    def test_add_widget_to_content(self, qapp):
+        from PySide6.QtWidgets import QLabel
+        section = _CollapsibleSection("Test")
+        label = QLabel("child")
+        section.content_layout.addWidget(label)
+        assert section.content_layout.count() == 1
+
+
+class TestTabbedPropertyPanel:
+    """Phase 8: PoseCorrectorPanel tabbed layout with 4 tabs."""
+
+    def test_has_controls_tabs(self, qapp):
+        """Panel should have a QTabWidget for property sections."""
+        from PySide6.QtWidgets import QTabWidget
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert hasattr(panel, "_controls_tabs")
+        assert isinstance(panel._controls_tabs, QTabWidget)
+
+    def test_four_tabs(self, qapp):
+        """Controls tabs should have exactly 4 tabs."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._controls_tabs.count() == 4
+
+    def test_tab_names(self, qapp):
+        """Tabs should be Pose, Corrections, Export, Space."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        names = [panel._controls_tabs.tabText(i) for i in range(4)]
+        assert names == ["Pose", "Corrections", "Export", "Space"]
+
+    def test_pose_tab_has_person_combo(self, qapp):
+        """Person combo should exist and be accessible."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._person_combo is not None
+
+    def test_pose_tab_has_euler_sliders(self, qapp):
+        """Euler sliders should exist in the Pose tab."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._euler_x is not None
+        assert panel._slider_x is not None
+
+    def test_corrections_tab_has_table(self, qapp):
+        """Corrections table should exist in the Corrections tab."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._corrections_table is not None
+        assert panel._corrections_table.columnCount() == 5
+
+    def test_export_tab_has_buttons(self, qapp):
+        """Export tab should have BVH and FBX buttons."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._reexport_bvh_btn is not None
+        assert panel._reexport_fbx_btn is not None
+
+    def test_space_tab_has_controls(self, qapp):
+        """Space tab should have override controls."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._space_combo is not None
+        assert panel._space_table is not None
+        assert panel._space_table.columnCount() == 5
+
+    def test_viewport_not_in_tabs(self, qapp):
+        """Viewport should be on the left side, not in tabs."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert isinstance(panel._viewport, MeshViewport)
+        # Viewport should not be a child of the tab widget
+        vp_parent = panel._viewport.parent()
+        while vp_parent is not None:
+            assert not isinstance(vp_parent, type(panel._controls_tabs))
+            if vp_parent == panel:
+                break
+            vp_parent = vp_parent.parent()
+
+
+class TestConsistentGridLayout:
+    """Phase 8: consistent 120px labels, monospace spinboxes, uniform sliders."""
+
+    def test_euler_spinbox_monospace_font(self, qapp):
+        """Euler spinboxes should have monospace font."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        font_family = panel._euler_x.font().family()
+        assert "consolas" in font_family.lower() or "courier" in font_family.lower() or "mono" in font_family.lower()
+
+    def test_euler_spinbox_fixed_width(self, qapp):
+        """Euler spinboxes should have consistent fixed width."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._euler_x.maximumWidth() == _SPINBOX_FIXED_WIDTH
+        assert panel._euler_y.maximumWidth() == _SPINBOX_FIXED_WIDTH
+        assert panel._euler_z.maximumWidth() == _SPINBOX_FIXED_WIDTH
+
+    def test_slider_fixed_height(self, qapp):
+        """Euler sliders should have consistent fixed height."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        assert panel._slider_x.maximumHeight() == _SLIDER_FIXED_HEIGHT
+        assert panel._slider_y.maximumHeight() == _SLIDER_FIXED_HEIGHT
+        assert panel._slider_z.maximumHeight() == _SLIDER_FIXED_HEIGHT
+
+    def test_range_spinbox_monospace(self, qapp):
+        """Frame range spinboxes should have monospace font."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        font_family = panel._range_start.font().family()
+        assert "consolas" in font_family.lower() or "courier" in font_family.lower() or "mono" in font_family.lower()
+
+    def test_smooth_window_monospace(self, qapp):
+        """Smooth window spinbox should have monospace font."""
+        session = _make_session_with_params()
+        panel = PoseCorrectorPanel(session=session)
+        font_family = panel._smooth_window.font().family()
+        assert "consolas" in font_family.lower() or "courier" in font_family.lower() or "mono" in font_family.lower()
+
+    def test_constants_defined(self, qapp):
+        """Layout constants should be defined with expected values."""
+        assert _LABEL_MIN_WIDTH == 120
+        assert _SPINBOX_FIXED_WIDTH == 80
+        assert _SLIDER_FIXED_HEIGHT == 22

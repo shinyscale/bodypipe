@@ -2,7 +2,7 @@
 
 ## Completed Phases (summary)
 
-All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX + Phase 10 Keyboard & Interaction Polish fully implemented. 1508 tests passing.
+All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX + Phase 10 Keyboard & Interaction Polish + Phase 8 Property Panel Refinement fully implemented. 1531 tests passing.
 
 - **Phases 1-7 (original)**: Pipeline tabs, identity inspector, 3D viewport + pose corrector, app shell polish, spec compliance, Gradio parity, settings persistence
 - **Commits 1A-1F**: Tab-to-dock migration — pipeline settings extraction, dock wrappers, AppWindow rewire, workspace presets, tab class removal, shim cleanup
@@ -10,6 +10,7 @@ All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Pha
 - **Dock data flow fix**: Startup restore, panel hydration, _refresh_all_panels()
 - **Phase 5 (Pose Correction UX)**: Preview range, smoothing, apply-to-similar, correction propagation — all with undo support
 - **Phase 10 (Keyboard & Interaction Polish)**: InteractionMode enum (Navigate/Select/Correct/Track), context-aware shortcuts, mode indicator, viewport HUD overlay
+- **Phase 8 (Property Panel Refinement)**: PoseCorrectorPanel reorganized into collapsible/tabbed sections (Pose, Corrections, Export, Space), consistent grid layout with 120px label columns
 
 ---
 
@@ -225,7 +226,7 @@ Full spec: `spec/ux-overhaul.md`
 
 ## Execution Order
 
-1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3 → Phase 5 → Phase 10
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3 → Phase 5 → Phase 10 → Phase 8
 
 ## Current Task Queue
 
@@ -279,10 +280,24 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 **Files:** `app_window.py` (InteractionMode enum, mode manager, keyboard routing, mode indicator, HUD toggle), `views/mesh_viewport.py` (_ViewportHUD overlay, HUD API methods, mouse tracking), `views/keyboard_shortcuts_dialog.py` (mode-specific shortcuts), `views/pose_corrector_panel.py` (reset_current_joint), `views/identity_inspector.py` (go_to_next_unreviewed), `tests/test_app_window.py`, `tests/test_mesh_viewport.py`
 
-### Phase 8: Property Panel Refinement
+### Phase 8: Property Panel Refinement *(DONE)*
 
-- [ ] Reorganize PoseCorrectorPanel into collapsible/tabbed sections: Pose, Corrections, Export, Space.
-- [ ] Consistent grid layout: labels 120px column, same-width spinboxes, same-height sliders, monospace numeric fields.
+- [x] Reorganized PoseCorrectorPanel into collapsible/tabbed sections: Pose, Corrections, Export, Space.
+  - QTabWidget with 4 tabs replaces the single scrolling right-side controls panel
+  - Left side: viewport + camera/color mode only (corrections table and export moved to tabs)
+  - Pose tab: Person/Joint selectors (grid: 120px label column), Euler rotation sliders, Apply/Reset buttons, Frame Range, Quick Fix, Preview Range — all in _CollapsibleSection widgets
+  - Corrections tab: Corrections table, Smoothing, Apply to Similar, Propagation, Auto-Detect — all in _CollapsibleSection widgets
+  - Export tab: BVH/FBX re-export buttons + status
+  - Space tab: Space override controls (grid: 120px label column) + overrides table
+- [x] Consistent grid layout: labels 120px column, same-width spinboxes (80px, monospace font), same-height sliders (22px), monospace numeric fields.
+  - New _CollapsibleSection(QWidget) class with QToolButton header + arrow toggle
+  - Layout constants: _LABEL_MIN_WIDTH=120, _SPINBOX_FIXED_WIDTH=80, _SLIDER_FIXED_HEIGHT=22, _MONO_FONT_FAMILY
+  - _style_spinbox() helper applies QFont monospace + fixed width to all numeric spinboxes
+  - QGridLayout with setColumnMinimumWidth(0, 120) for all form sections
+- [x] 23 new tests: TestCollapsibleSection (8), TestTabbedPropertyPanel (10), TestConsistentGridLayout (5)
+- [x] All 1531 tests pass (1508 original + 23 new)
+
+**Files:** `views/pose_corrector_panel.py` (refactored _setup_ui into _build_pose_tab, _build_corrections_tab, _build_export_tab, _build_space_tab; added _CollapsibleSection, _style_spinbox, layout constants), `tests/test_pose_corrector.py` (23 new tests)
 
 ### Phase 9: Session Library
 
@@ -291,7 +306,7 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1508 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1531 tests pass
 2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts with populated panels
@@ -300,3 +315,4 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 7. Track timeline: zoom (scroll wheel), pan (middle-drag), click to select person + seek, collapsible lanes, marker overlays
 8. Transport overlay: auto-hide after 2s, speed chips sync between video player and track timeline, adaptive read-ahead during playback
 9. Keyboard interaction: mode switching (1-4), context-aware shortcuts per mode, status bar mode indicator, viewport HUD overlay (Ctrl+H toggle)
+10. Property panel: PoseCorrectorPanel has 4 tabs (Pose/Corrections/Export/Space), collapsible sections within tabs, consistent 120px label grid, monospace spinboxes (80px), uniform slider height (22px)
