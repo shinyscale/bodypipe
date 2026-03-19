@@ -35,7 +35,14 @@ from PySide6.QtGui import QPixmap, QImage, QDragEnterEvent, QDropEvent
 from models.pipeline_config import PipelineConfig
 from models.session import Session
 from workers.gvhmr_worker import GVHMRWorker
+from workers.gemx_worker import GEMXWorker
 from workers.pipeline_orchestrator import FullPipelineWorker, MultiPersonWorker
+
+# Estimation backend display names → config values
+_BACKEND_OPTIONS = [
+    ("GVHMR (SMPL-X)", "gvhmr", "smplx"),
+    ("GEM-X (SOMA)", "gemx", "soma"),
+]
 
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
@@ -135,9 +142,21 @@ class SinglePipelineSettings(QWidget):
 
         left_layout.addWidget(input_group)
 
-        # Settings
-        settings_group = QGroupBox("Settings")
+        # Pipeline Settings
+        settings_group = QGroupBox("Pipeline Settings")
         settings_layout = QVBoxLayout(settings_group)
+
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("Backend:"))
+        self._backend_combo = QComboBox()
+        for label, _be, _bm in _BACKEND_OPTIONS:
+            self._backend_combo.addItem(label)
+        self._backend_combo.setToolTip(
+            "GVHMR: multi-stage SMPL-X body capture (body, hands, face separate)\n"
+            "GEM-X: single-pass SOMA-77 capture (body + hands + face unified)"
+        )
+        backend_row.addWidget(self._backend_combo)
+        settings_layout.addLayout(backend_row)
 
         self._static_cam = QCheckBox("Static camera")
         self._static_cam.setChecked(True)
@@ -191,12 +210,24 @@ class SinglePipelineSettings(QWidget):
 
         left_layout.addStretch()
 
+    def _selected_backend(self) -> tuple[str, str]:
+        """Return (estimation_backend, body_model) from combo selection."""
+        _, be, bm = _BACKEND_OPTIONS[self._backend_combo.currentIndex()]
+        return be, bm
+
     def _connect_signals(self):
         self._drop_area.file_dropped.connect(self._load_video)
         self._browse_btn.clicked.connect(self._on_browse)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._static_cam.toggled.connect(self._on_static_cam_toggled)
+        self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+
+    def _on_backend_changed(self, _index: int):
+        """Update run button label when backend changes."""
+        label, _be, _bm = _BACKEND_OPTIONS[self._backend_combo.currentIndex()]
+        backend_name = label.split(" ")[0]  # "GVHMR" or "GEM-X"
+        self._run_btn.setText(f"Run {backend_name}")
 
     def _on_static_cam_toggled(self, checked: bool):
         """Disable and uncheck DPVO when static camera is enabled."""
@@ -307,11 +338,14 @@ class SinglePipelineSettings(QWidget):
         if not self._video_path:
             return
 
+        be, bm = self._selected_backend()
         config = PipelineConfig(
             mode="single",
             static_cam=self._static_cam.isChecked(),
             use_dpvo=self._use_dpvo.isChecked(),
             focal_mm=self._focal_mm.value(),
+            estimation_backend=be,
+            body_model=bm,
         )
 
         # Save config to output directory for session restore
@@ -319,15 +353,28 @@ class SinglePipelineSettings(QWidget):
         output_dir.mkdir(parents=True, exist_ok=True)
         config.save(output_dir / "solve_config.json")
 
-        self._worker = GVHMRWorker(self._video_path, config, self._gvhmr_root)
+        if be == "gemx":
+            gemx_root = self._gvhmr_root.parent / "GEM-X"
+            self._worker = GEMXWorker(
+                video_path=self._video_path,
+                config=config,
+                gemx_root=gemx_root,
+                output_dir=output_dir,
+                fps=config.target_fps,
+            )
+            backend_label = "GEM-X"
+        else:
+            self._worker = GVHMRWorker(self._video_path, config, self._gvhmr_root)
+            backend_label = "GVHMR"
+
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._on_log_line)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
         self._set_running(True)
-        self.status_message.emit("Running GVHMR pipeline...")
-        self.log_message.emit("Starting GVHMR pipeline...", "info")
+        self.status_message.emit(f"Running {backend_label} pipeline...")
+        self.log_message.emit(f"Starting {backend_label} pipeline...", "info")
 
     def _on_cancel(self):
         if self._worker:
@@ -345,6 +392,7 @@ class SinglePipelineSettings(QWidget):
         self._progress_bar.setVisible(running)
         self._progress_label.setVisible(running)
         self._browse_btn.setEnabled(not running)
+        self._backend_combo.setEnabled(not running)
         self._static_cam.setEnabled(not running)
         # DPVO is only enabled when not running AND static_cam is unchecked
         self._use_dpvo.setEnabled(not running and not self._static_cam.isChecked())
@@ -385,11 +433,14 @@ class SinglePipelineSettings(QWidget):
 
     def get_config(self) -> PipelineConfig:
         """Return current settings as PipelineConfig."""
+        be, bm = self._selected_backend()
         return PipelineConfig(
             mode="single",
             static_cam=self._static_cam.isChecked(),
             use_dpvo=self._use_dpvo.isChecked(),
             focal_mm=self._focal_mm.value(),
+            estimation_backend=be,
+            body_model=bm,
         )
 
     def set_config(self, config: PipelineConfig):
@@ -397,6 +448,11 @@ class SinglePipelineSettings(QWidget):
         self._static_cam.setChecked(config.static_cam)
         self._use_dpvo.setChecked(config.use_dpvo)
         self._focal_mm.setValue(config.focal_mm)
+        # Restore backend selection
+        for i, (_, be, _bm) in enumerate(_BACKEND_OPTIONS):
+            if be == config.estimation_backend:
+                self._backend_combo.setCurrentIndex(i)
+                break
 
 
 # =========================================================================
@@ -598,6 +654,12 @@ class PerfPipelineSettings(SinglePipelineSettings):
         # Update run button text
         self._run_btn.setText("Run Pipeline")
 
+    def _on_backend_changed(self, _index: int):
+        """Update run button label when backend changes."""
+        label, _be, _bm = _BACKEND_OPTIONS[self._backend_combo.currentIndex()]
+        backend_name = label.split(" ")[0]
+        self._run_btn.setText(f"Run Pipeline ({backend_name})")
+
     # ------------------------------------------------------------------
     # Output directory mapping (override for perfcap subdirectory)
     # ------------------------------------------------------------------
@@ -614,27 +676,41 @@ class PerfPipelineSettings(SinglePipelineSettings):
             return
 
         config = self.get_config()
+        be, _bm = self._selected_backend()
         output_dir = self._gvhmr_root / "outputs" / "perfcap" / self._video_path.stem
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Save config to output directory for session restore
         config.save(output_dir / "solve_config.json")
 
-        self._worker = FullPipelineWorker(
-            video_path=self._video_path,
-            config=config,
-            gvhmr_root=self._gvhmr_root,
-            output_dir=output_dir,
-            fps=config.target_fps,
-        )
+        if be == "gemx":
+            gemx_root = self._gvhmr_root.parent / "GEM-X"
+            self._worker = GEMXWorker(
+                video_path=self._video_path,
+                config=config,
+                gemx_root=gemx_root,
+                output_dir=output_dir,
+                fps=config.target_fps,
+            )
+            backend_label = "GEM-X"
+        else:
+            self._worker = FullPipelineWorker(
+                video_path=self._video_path,
+                config=config,
+                gvhmr_root=self._gvhmr_root,
+                output_dir=output_dir,
+                fps=config.target_fps,
+            )
+            backend_label = "GVHMR"
+
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._on_log_line)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
         self._set_running(True)
-        self.status_message.emit("Running performance capture pipeline...")
-        self.log_message.emit("Starting full performance capture pipeline...", "info")
+        self.status_message.emit(f"Running {backend_label} performance capture pipeline...")
+        self.log_message.emit(f"Starting {backend_label} performance capture pipeline...", "info")
 
     # ------------------------------------------------------------------
     # Multi-stage progress display
@@ -699,6 +775,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         else:
             smooth_key = "moderate"
 
+        be, bm = self._selected_backend()
         return PipelineConfig(
             mode="perf",
             static_cam=self._static_cam.isChecked(),
@@ -713,6 +790,8 @@ class PerfPipelineSettings(SinglePipelineSettings):
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
             body_smooth_preset=smooth_key,
             use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
+            estimation_backend=be,
+            body_model=bm,
         )
 
     def set_config(self, config: PipelineConfig):
@@ -802,6 +881,18 @@ class MultiPipelineSettings(QWidget):
         # Pipeline settings
         settings_group = QGroupBox("Pipeline Settings")
         settings_layout = QVBoxLayout(settings_group)
+
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("Backend:"))
+        self._backend_combo = QComboBox()
+        for label, _be, _bm in _BACKEND_OPTIONS:
+            self._backend_combo.addItem(label)
+        self._backend_combo.setToolTip(
+            "GVHMR: multi-stage SMPL-X body capture\n"
+            "GEM-X: single-pass SOMA-77 capture (body + hands + face)"
+        )
+        backend_row.addWidget(self._backend_combo)
+        settings_layout.addLayout(backend_row)
 
         self._static_cam = QCheckBox("Static camera")
         self._static_cam.setChecked(True)
@@ -901,12 +992,24 @@ class MultiPipelineSettings(QWidget):
         self._progress_label.hide()
         layout.addWidget(self._progress_label)
 
+    def _selected_backend(self) -> tuple[str, str]:
+        """Return (estimation_backend, body_model) from combo selection."""
+        _, be, bm = _BACKEND_OPTIONS[self._backend_combo.currentIndex()]
+        return be, bm
+
     def _connect_signals(self):
         self._drop_area.file_dropped.connect(self._load_video)
         self._browse_btn.clicked.connect(self._on_browse)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._static_cam.toggled.connect(self._on_static_cam_toggled)
+        self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+
+    def _on_backend_changed(self, _index: int):
+        """Update run button label when backend changes."""
+        label, _be, _bm = _BACKEND_OPTIONS[self._backend_combo.currentIndex()]
+        backend_name = label.split(" ")[0]
+        self._run_btn.setText(f"Run Multi-Person ({backend_name})")
 
     def _on_static_cam_toggled(self, checked: bool):
         """Disable and uncheck DPVO when static camera is enabled."""
@@ -1009,6 +1112,16 @@ class MultiPipelineSettings(QWidget):
         # Save config to output directory for session restore
         config.save(output_dir / "solve_config.json")
 
+        be, _bm = self._selected_backend()
+        if be == "gemx":
+            backend_label = "GEM-X"
+            self.log_message.emit(
+                "NOTE: GEM-X multi-person uses GVHMR tracking + GEM-X per-person estimation",
+                "info",
+            )
+        else:
+            backend_label = "GVHMR"
+
         self._worker = MultiPersonWorker(
             video_path=self._video_path,
             config=config,
@@ -1021,8 +1134,8 @@ class MultiPipelineSettings(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.start()
         self._set_running(True)
-        self.status_message.emit("Running multi-person pipeline...")
-        self.log_message.emit("Starting multi-person pipeline...", "info")
+        self.status_message.emit(f"Running multi-person pipeline ({backend_label})...")
+        self.log_message.emit(f"Starting multi-person pipeline ({backend_label})...", "info")
 
     def _on_cancel(self):
         if self._worker:
@@ -1040,6 +1153,7 @@ class MultiPipelineSettings(QWidget):
         self._progress_bar.setVisible(running)
         self._progress_label.setVisible(running)
         self._browse_btn.setEnabled(not running)
+        self._backend_combo.setEnabled(not running)
         self._static_cam.setEnabled(not running)
         # DPVO is only enabled when not running AND static_cam is unchecked
         self._use_dpvo.setEnabled(not running and not self._static_cam.isChecked())
@@ -1085,6 +1199,7 @@ class MultiPipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def get_config(self) -> PipelineConfig:
+        be, bm = self._selected_backend()
         return PipelineConfig(
             mode="multi",
             static_cam=self._static_cam.isChecked(),
@@ -1096,6 +1211,8 @@ class MultiPipelineSettings(QWidget):
             fbx_naming=self._fbx_naming.currentText(),
             render_overlays=self._render_overlays.isChecked(),
             use_inpainting=self._use_inpainting.isChecked(),
+            estimation_backend=be,
+            body_model=bm,
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1110,3 +1227,7 @@ class MultiPipelineSettings(QWidget):
             self._fbx_naming.setCurrentIndex(idx)
         self._render_overlays.setChecked(config.render_overlays)
         self._use_inpainting.setChecked(config.use_inpainting)
+        for i, (_, be, _bm) in enumerate(_BACKEND_OPTIONS):
+            if be == config.estimation_backend:
+                self._backend_combo.setCurrentIndex(i)
+                break
