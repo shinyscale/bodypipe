@@ -25,6 +25,14 @@ _FULL_STAGES: list[tuple[float, float, str]] = [
     (0.85, 1.00, "Rendering"),
 ]
 
+# Stage fraction ranges for GEM-X pipeline (single-pass, fewer stages).
+_GEMX_STAGES: list[tuple[float, float, str]] = [
+    (0.00, 0.05, "Preprocessing"),
+    (0.05, 0.80, "GEM-X estimation"),
+    (0.80, 0.90, "BVH/FBX conversion"),
+    (0.90, 1.00, "Rendering"),
+]
+
 
 def find_smplestx_result(output_dir: Path) -> Path | None:
     """Return the most recently modified .pt or .npz in *output_dir*."""
@@ -434,7 +442,16 @@ class FullPipelineWorker(SubprocessWorkerBase):
     def _run_bvh_fbx(
         self, results: dict, world_params: dict | None, is_hybrid: bool
     ) -> None:
-        """Convert SMPL-X params to BVH, then BVH to FBX via Blender."""
+        """Convert body params to BVH, then BVH to FBX via Blender.
+
+        Dispatches to SOMA BVH exporter when body_model is 'soma',
+        otherwise uses the existing SMPL-X smplx_to_bvh path.
+        """
+        # SOMA path — use soma_bvh_export when params contain SOMA data
+        if world_params is not None and "poses" in world_params:
+            self._run_soma_bvh_fbx(results, world_params)
+            return
+
         stem = self._video_path.stem
         bvh_path = str(self._output_dir / f"{stem}_body_hands.bvh")
 
@@ -493,6 +510,40 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 self.log_line.emit(f"FBX written: {fbx_path}")
             else:
                 self.log_line.emit("WARNING: FBX conversion reported errors.")
+        except ImportError:
+            self.log_line.emit("WARNING: bvh_to_fbx not available, skipping FBX.")
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: FBX conversion failed: {exc}")
+
+    def _run_soma_bvh_fbx(self, results: dict, soma_params: dict) -> None:
+        """Convert SOMA params to BVH, then BVH to FBX."""
+        stem = self._video_path.stem
+        bvh_path = str(self._output_dir / f"{stem}_soma.bvh")
+
+        try:
+            from workers.soma_bvh_export import convert_soma_to_bvh
+
+            convert_soma_to_bvh(soma_params, bvh_path, fps=self._fps)
+            results["bvh"] = bvh_path
+            self.log_line.emit(f"SOMA BVH written: {bvh_path}")
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: SOMA BVH conversion failed: {exc}")
+            return
+
+        if self._cancelled:
+            return
+
+        # FBX via Blender bridge
+        fbx_path = str(self._output_dir / f"{stem}_soma.fbx")
+        try:
+            from bvh_to_fbx import convert_bvh_to_fbx
+
+            naming_key = "ue5" if "ue5" in self._config.fbx_naming.lower() else "mixamo"
+            fbx_log = convert_bvh_to_fbx(bvh_path, fbx_path, fps=self._fps, naming=naming_key)
+            self.log_line.emit(fbx_log)
+            if "ERROR" not in fbx_log:
+                results["fbx"] = fbx_path
+                self.log_line.emit(f"FBX written: {fbx_path}")
         except ImportError:
             self.log_line.emit("WARNING: bvh_to_fbx not available, skipping FBX.")
         except Exception as exc:
