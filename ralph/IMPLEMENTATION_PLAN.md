@@ -2,7 +2,7 @@
 
 ## Completed Phases (summary)
 
-All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX + Phase 10 Keyboard & Interaction Polish + Phase 8 Property Panel Refinement fully implemented. 1531 tests passing.
+All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX + Phase 10 Keyboard & Interaction Polish + Phase 8 Property Panel Refinement + Phase 9 Session Library fully implemented. 1574 tests passing.
 
 - **Phases 1-7 (original)**: Pipeline tabs, identity inspector, 3D viewport + pose corrector, app shell polish, spec compliance, Gradio parity, settings persistence
 - **Commits 1A-1F**: Tab-to-dock migration — pipeline settings extraction, dock wrappers, AppWindow rewire, workspace presets, tab class removal, shim cleanup
@@ -11,6 +11,7 @@ All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Pha
 - **Phase 5 (Pose Correction UX)**: Preview range, smoothing, apply-to-similar, correction propagation — all with undo support
 - **Phase 10 (Keyboard & Interaction Polish)**: InteractionMode enum (Navigate/Select/Correct/Track), context-aware shortcuts, mode indicator, viewport HUD overlay
 - **Phase 8 (Property Panel Refinement)**: PoseCorrectorPanel reorganized into collapsible/tabbed sections (Pose, Corrections, Export, Space), consistent grid layout with 120px label columns
+- **Phase 9 (Session Library)**: Media-pool-style dock with thumbnails, metadata cards, search/filter, double-click-to-load, notes/tags editing
 
 ---
 
@@ -226,7 +227,7 @@ Full spec: `spec/ux-overhaul.md`
 
 ## Execution Order
 
-1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3 → Phase 5 → Phase 10 → Phase 8
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3 → Phase 5 → Phase 10 → Phase 8 → Phase 9
 
 ## Current Task Queue
 
@@ -299,14 +300,41 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 **Files:** `views/pose_corrector_panel.py` (refactored _setup_ui into _build_pose_tab, _build_corrections_tab, _build_export_tab, _build_space_tab; added _CollapsibleSection, _style_spinbox, layout constants), `tests/test_pose_corrector.py` (23 new tests)
 
-### Phase 9: Session Library
+### Phase 9: Session Library *(DONE)*
 
-- [ ] New dock widget: media-pool-style panel. Thumbnail per session (first frame, 80px), metadata (video name, duration, person count, correction count, date), user-assignable tags, version indicator, double-click to load.
-- [ ] Session annotations: free-text notes stored in session JSON, displayed in tooltip.
+- [x] Extended Session model with `notes: str`, `tags: list[str]`, `version: int` fields — serialized in to_dict/from_dict, cleared in reset()
+- [x] Created `views/session_library.py` with:
+  - `SessionEntry` dataclass: path, video_name, duration, person_count, correction_count, date, tags, notes, version, thumbnail
+  - `_generate_thumbnail()`: extracts first frame via cv2, caches as `.bodypipe_thumb.png` next to session JSON
+  - `_load_session_entry()`: lightweight JSON parsing for library cards (no heavy data loading)
+  - `_format_duration()`: MM:SS display helper
+  - `_SessionCard` (QWidget): 80px thumbnail + metadata (name, version badge, duration|persons|keyframes, date, tag chips), tooltip shows notes
+  - `SessionLibrary` (QWidget): QListWidget with search/filter bar, refresh button, count label, double-click → session_load_requested signal, right-click context menu (Open, Edit Notes, Edit Tags)
+  - `_update_session_json()`: partial JSON update for notes/tags without full Session load
+- [x] Created `SessionLibraryDock` in `views/dock_widgets.py` — thin QDockWidget wrapper with stable objectName
+- [x] Integrated into AppWindow:
+  - Session library dock tabified with Pipeline Settings in left area
+  - session_load_requested → _load_session (double-click to load)
+  - session_saved → _refresh_session_library (auto-refresh after save)
+  - _refresh_session_library() passes recent sessions as extra scan paths
+  - Added to _ALL_CONTENT_DOCKS, View menu toggle, Pipeline workspace preset
+  - Initial scan on startup after _restore_last_video()
+- [x] 43 new tests in `tests/test_session_library.py`:
+  - TestSessionMetadataFields (6): notes/tags/version serialization round-trip
+  - TestFormatDuration (5): duration formatting
+  - TestLoadSessionEntry (5): JSON parsing, person counting, missing file handling
+  - TestUpdateSessionJson (4): partial JSON updates, field preservation
+  - TestSessionCard (4): card creation, tooltips, tags, version badge
+  - TestSessionLibrary (11): scan, filter, dedup, sort, signals, count label
+  - TestSessionLibraryDock (2): dock wrapper
+  - TestAppWindowSessionLibrary (6): dock existence, view menu, signal wiring
+- [x] All 1574 tests pass (1531 original + 43 new)
+
+**Files:** `models/session.py` (notes/tags/version fields), new `views/session_library.py`, `views/dock_widgets.py` (SessionLibraryDock), `app_window.py` (dock integration + signal wiring), new `tests/test_session_library.py`
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1531 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1574 tests pass
 2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts with populated panels
@@ -316,3 +344,4 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 8. Transport overlay: auto-hide after 2s, speed chips sync between video player and track timeline, adaptive read-ahead during playback
 9. Keyboard interaction: mode switching (1-4), context-aware shortcuts per mode, status bar mode indicator, viewport HUD overlay (Ctrl+H toggle)
 10. Property panel: PoseCorrectorPanel has 4 tabs (Pose/Corrections/Export/Space), collapsible sections within tabs, consistent 120px label grid, monospace spinboxes (80px), uniform slider height (22px)
+11. Session library: dock shows session cards with thumbnails, search/filter works, double-click loads session, right-click context menu for notes/tags editing, auto-refreshes after session save

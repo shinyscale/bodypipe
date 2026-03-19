@@ -176,6 +176,11 @@ class Session:
     # Camera intrinsics
     camera_K: np.ndarray | None = None
 
+    # Session metadata (serialized)
+    notes: str = ""
+    tags: list[str] = field(default_factory=list)
+    version: int = 1
+
     # UI state (transient, not serialized)
     current_frame: int = 0
     selected_person: int = -1
@@ -207,6 +212,9 @@ class Session:
         }
         if self.camera_K is not None:
             d["camera_K"] = self.camera_K.tolist()
+        d["notes"] = self.notes
+        d["tags"] = list(self.tags)
+        d["version"] = self.version
         return d
 
     @classmethod
@@ -233,6 +241,9 @@ class Session:
                 else {}
             ),
         )
+        session.notes = data.get("notes", "")
+        session.tags = list(data.get("tags", []))
+        session.version = data.get("version", 1)
         for k, v in data.get("person_tracks", {}).items():
             session.person_tracks[int(k)] = PersonTrack.from_dict(v)
         if data.get("camera_K"):
@@ -276,6 +287,9 @@ class Session:
         self.crossing_spans.clear()
         self.correction_tracks.clear()
         self.camera_K = None
+        self.notes = ""
+        self.tags.clear()
+        self.version = 1
         self.current_frame = 0
         self.selected_person = -1
         self.dirty_persons.clear()

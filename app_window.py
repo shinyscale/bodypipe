@@ -57,6 +57,7 @@ from views.pipeline_settings import (
     PerfPipelineSettings,
     MultiPipelineSettings,
 )
+from views.session_library import SessionLibrary
 from views.dock_widgets import (
     VideoDock,
     MeshViewportDock,
@@ -64,6 +65,7 @@ from views.dock_widgets import (
     PoseCorrectorDock,
     TrackOverviewDock,
     PipelineSettingsDock,
+    SessionLibraryDock,
 )
 from views.bbox_overlay import render_bbox_overlay, render_edit_preview
 from views.keyboard_shortcuts_dialog import KeyboardShortcutsDialog
@@ -288,6 +290,7 @@ class AppWindow(QMainWindow):
     _ALL_CONTENT_DOCKS = (
         "_pipeline_dock", "_video_dock", "_mesh_dock",
         "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
+        "_session_library_dock",
     )
 
     # Built-in workspace presets: name → (description, set of visible dock attrs)
@@ -308,8 +311,8 @@ class AppWindow(QMainWindow):
              "_track_overview_dock"},
         ),
         "Pipeline": (
-            "Video + Settings + Log",
-            {"_pipeline_dock", "_video_dock"},
+            "Video + Settings + Library + Log",
+            {"_pipeline_dock", "_video_dock", "_session_library_dock"},
         ),
     }
 
@@ -343,6 +346,7 @@ class AppWindow(QMainWindow):
         self._restore_geometry()
         self._restore_pipeline_configs()
         self._restore_last_video()
+        self._refresh_session_library()
 
     # ------------------------------------------------------------------
     # UI Setup
@@ -371,6 +375,7 @@ class AppWindow(QMainWindow):
             session=self._session, gvhmr_root=self._gvhmr_root,
         )
         self._track_overview = TrackOverview()
+        self._session_library = SessionLibrary(gvhmr_root=self._gvhmr_root)
 
         # ---- Create settings widgets ----
         self._single_settings = SinglePipelineSettings(self._session, self._gvhmr_root)
@@ -386,10 +391,14 @@ class AppWindow(QMainWindow):
         self._pipeline_dock = PipelineSettingsDock(
             self._single_settings, self._perf_settings, self._multi_settings, self,
         )
+        self._session_library_dock = SessionLibraryDock(self._session_library, self)
 
         # ---- Arrange docks ----
-        # Pipeline settings on the left
+        # Pipeline settings on the left, session library tabbed below
         self.addDockWidget(Qt.LeftDockWidgetArea, self._pipeline_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._session_library_dock)
+        self.tabifyDockWidget(self._pipeline_dock, self._session_library_dock)
+        self._pipeline_dock.raise_()
 
         # Video + 3D Mesh in center (right area, tabbed)
         self.addDockWidget(Qt.RightDockWidgetArea, self._video_dock)
@@ -499,7 +508,7 @@ class AppWindow(QMainWindow):
         for dock in (
             self._pipeline_dock, self._video_dock, self._mesh_dock,
             self._identity_dock, self._pose_corrector_dock,
-            self._track_overview_dock,
+            self._track_overview_dock, self._session_library_dock,
         ):
             self._view_menu.addAction(dock.toggleViewAction())
 
@@ -773,6 +782,13 @@ class AppWindow(QMainWindow):
         # Speed sync between video player and track timeline
         self._video_player.speed_changed.connect(self._track_overview.set_speed)
         self._track_overview.speed_changed.connect(self._video_player.set_playback_speed)
+
+        # Session library → load session on double-click
+        self._session_library.session_load_requested.connect(
+            lambda path: self._load_session(Path(path))
+        )
+        # Refresh library when a session is saved
+        self.session_saved.connect(lambda _: self._refresh_session_library())
 
         # Mode selector
         self._pipeline_dock.mode_changed.connect(self._on_mode_changed)
@@ -1649,6 +1665,18 @@ class AppWindow(QMainWindow):
 
         self.set_status(f"Session loaded from {session_path.name}")
         self.session_loaded.emit(self._session)
+
+    # --- Session Library ---
+
+    def _refresh_session_library(self):
+        """Scan for sessions and refresh the library panel.
+
+        Passes recent session paths as extra scan targets so sessions saved
+        outside the standard GVHMR output directories still appear.
+        """
+        recent = self._get_recent()
+        extra_paths = [Path(p) for p in recent]
+        self._session_library.scan(extra_paths=extra_paths)
 
     # --- Recent Sessions ---
 

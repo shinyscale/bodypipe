@@ -24,6 +24,7 @@ from PySide6.QtCore import Signal
 if TYPE_CHECKING:
     from views.identity_inspector import IdentityInspector
     from views.mesh_viewport import MeshViewport
+    from views.session_library import SessionLibrary
     from views.track_overview import TrackOverview
     from views.pipeline_settings import (
         MultiPipelineSettings,
@@ -106,6 +107,20 @@ class TrackOverviewDock(QDockWidget):
     @property
     def track_overview(self) -> TrackOverview:
         return self._track_overview
+
+
+class SessionLibraryDock(QDockWidget):
+    """Dock wrapping a SessionLibrary widget."""
+
+    def __init__(self, session_library: SessionLibrary, parent: QWidget | None = None):
+        super().__init__("Session Library", parent)
+        self.setObjectName("SessionLibraryDock")
+        self._session_library = session_library
+        self.setWidget(session_library)
+
+    @property
+    def session_library(self) -> SessionLibrary:
+        return self._session_library
 
 
 class PipelineSettingsDock(QDockWidget):
