@@ -211,6 +211,57 @@ def compute_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return (vertex_normals / lengths).astype(np.float32)
 
 
+def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
+    """Compute 3D joint positions for SOMA's unified poses tensor.
+
+    Parameters
+    ----------
+    params : dict with keys poses (N, 77, 3), transl (N, 3)
+    frame_idx : which frame to compute
+
+    Returns
+    -------
+    positions : (77, 3) float64 — joint positions in camera space
+    """
+    from scipy.spatial.transform import Rotation
+    from models.skeleton import SOMA_SKELETON
+
+    n_joints = SOMA_SKELETON.n_joints
+    positions = np.zeros((n_joints, 3))
+    accumulated_R = np.zeros((n_joints, 3, 3))
+
+    offsets = np.zeros((n_joints, 3))
+    for i, name in enumerate(SOMA_SKELETON.joint_names):
+        offsets[i] = SOMA_SKELETON.default_offsets.get(name, [0, 0, 0])
+
+    poses = np.asarray(params["poses"])
+    tr = params.get("transl")
+    if tr is not None:
+        tr = np.asarray(tr)
+
+    # Root (joint 0 = global orient)
+    root_aa = poses[frame_idx, 0] if poses.ndim == 3 else poses[0]
+    accumulated_R[0] = Rotation.from_rotvec(np.asarray(root_aa).ravel()[:3]).as_matrix()
+    if tr is not None and tr.ndim >= 2 and frame_idx < tr.shape[0]:
+        positions[0] = tr[frame_idx]
+    elif tr is not None and tr.ndim == 1:
+        positions[0] = tr
+
+    parents = SOMA_SKELETON.joint_parents
+    for j in range(1, n_joints):
+        parent = parents[j]
+        if poses.ndim == 3 and frame_idx < poses.shape[0] and j < poses.shape[1]:
+            rot_aa = poses[frame_idx, j]
+        else:
+            rot_aa = np.zeros(3)
+
+        R_local = Rotation.from_rotvec(np.asarray(rot_aa).ravel()[:3]).as_matrix()
+        accumulated_R[j] = accumulated_R[parent] @ R_local
+        positions[j] = positions[parent] + accumulated_R[parent] @ offsets[j]
+
+    return positions
+
+
 def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     """Compute 3D joint positions in camera space for one frame.
 
@@ -227,6 +278,10 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     -------
     positions : (52, 3) float64 — joint positions in camera space
     """
+    # SOMA path: unified poses tensor (N, J, 3)
+    if "poses" in params and "body_pose" not in params:
+        return _forward_kinematics_soma(params, frame_idx)
+
     from scipy.spatial.transform import Rotation
 
     n_joints = len(JOINT_NAMES)

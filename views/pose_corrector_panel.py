@@ -188,6 +188,30 @@ def mirror_lr_pose_fallback(params: dict, frame: int) -> dict[int, np.ndarray]:
     return mirrored
 
 
+def mirror_lr_pose_soma_fallback(soma_params: dict, frame: int) -> dict[int, np.ndarray]:
+    """Fallback L/R mirror for SOMA's unified poses tensor.
+
+    Iterates SOMA_SKELETON.lr_swap_pairs (includes face pairs) and returns
+    a dict mapping joint indices → swapped axis-angle values.
+    """
+    from models.skeleton import SOMA_SKELETON
+
+    poses = soma_params.get("poses")
+    if poses is None:
+        return {}
+    poses = np.asarray(poses, dtype=np.float32)
+    if poses.ndim != 3 or frame >= poses.shape[0]:
+        return {}
+    poses_frame = poses[frame].copy()
+
+    mirrored: dict[int, np.ndarray] = {}
+    for l_idx, r_idx in SOMA_SKELETON.lr_swap_pairs:
+        if l_idx < poses_frame.shape[0] and r_idx < poses_frame.shape[0]:
+            mirrored[l_idx] = poses_frame[r_idx].copy()
+            mirrored[r_idx] = poses_frame[l_idx].copy()
+    return mirrored
+
+
 def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
     """Get current XYZ euler angles (degrees) for a joint.
 
@@ -202,18 +226,27 @@ def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx:
     return aa_to_euler(aa)
 
 
+def _get_soma_joint_axis_angle(soma_params: dict, frame_idx: int, joint_idx: int) -> np.ndarray:
+    """Get axis-angle (3,) for a SOMA joint from unified poses tensor."""
+    try:
+        poses = np.asarray(soma_params["poses"], dtype=np.float32)
+        if poses.ndim == 3 and frame_idx < poses.shape[0] and joint_idx < poses.shape[1]:
+            return poses[frame_idx, joint_idx].ravel()[:3]
+    except Exception:
+        pass
+    return np.zeros(3, dtype=np.float32)
+
+
 def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
     """Get current axis-angle (3,) for a joint, including committed corrections."""
     if session is None or person_id < 0:
         return np.zeros(3, dtype=np.float32)
 
     track = session.person_tracks.get(person_id)
-    if track is None or track.smplx_params is None:
+    if track is None:
         return np.zeros(3, dtype=np.float32)
 
-    params = track.smplx_params
-
-    # Check for existing committed correction first
+    # Check for existing committed correction first (applies to both body model types)
     ct = session.correction_tracks.get(person_id)
     if ct is not None:
         corr = ct.get_correction(frame_idx)
@@ -224,6 +257,15 @@ def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, join
                 bp_idx = joint_idx - 1
                 if bp_idx in corr.body_pose:
                     return np.asarray(corr.body_pose[bp_idx], dtype=np.float32).ravel()[:3]
+
+    # SOMA path: unified poses tensor
+    if track.body_model_type == "soma" and track.soma_params is not None:
+        return _get_soma_joint_axis_angle(track.soma_params, frame_idx, joint_idx)
+
+    # SMPL-X path (existing logic)
+    params = track.smplx_params
+    if params is None:
+        return np.zeros(3, dtype=np.float32)
 
     # Fall back to raw params
     try:
@@ -331,20 +373,35 @@ def compute_pose_issues(
         if pid in session.inactive_tracks:
             continue
 
-        params = track.smplx_params
-        if params is not None:
-            bp = params.get("body_pose")
-            if bp is not None:
-                bp = np.asarray(bp, dtype=np.float32)
-                if bp.ndim == 2 and bp.shape[-1] != 3:
-                    bp = bp.reshape(bp.shape[0], -1, 3)
-                if bp.ndim == 3 and bp.shape[0] > 1:
+        # SOMA path: unified poses tensor
+        if track.body_model_type == "soma" and track.soma_params is not None:
+            sp = track.soma_params.get("poses")
+            if sp is not None:
+                sp = np.asarray(sp, dtype=np.float32)
+                if sp.ndim == 3 and sp.shape[0] > 1:
+                    body_poses = sp[:, 1:]  # skip global_orient
                     issues.extend(
-                        _detect_angular_jumps(bp, pid, jump_threshold_deg)
+                        _detect_angular_jumps(body_poses, pid, jump_threshold_deg)
                     )
                     issues.extend(
-                        _detect_jitter(bp, pid, jitter_window, jitter_threshold_deg)
+                        _detect_jitter(body_poses, pid, jitter_window, jitter_threshold_deg)
                     )
+        else:
+            # SMPL-X path
+            params = track.smplx_params
+            if params is not None:
+                bp = params.get("body_pose")
+                if bp is not None:
+                    bp = np.asarray(bp, dtype=np.float32)
+                    if bp.ndim == 2 and bp.shape[-1] != 3:
+                        bp = bp.reshape(bp.shape[0], -1, 3)
+                    if bp.ndim == 3 and bp.shape[0] > 1:
+                        issues.extend(
+                            _detect_angular_jumps(bp, pid, jump_threshold_deg)
+                        )
+                        issues.extend(
+                            _detect_jitter(bp, pid, jitter_window, jitter_threshold_deg)
+                        )
 
         confs = track.confidences
         if confs and len(confs) > 0:
