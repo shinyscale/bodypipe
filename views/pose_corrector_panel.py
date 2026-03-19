@@ -53,23 +53,13 @@ from PySide6.QtGui import QFont
 from models.session import Session, UndoEntry
 from theme import COLORS
 from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
+from models.skeleton import SMPLX_SKELETON as _SKEL
 
 log = logging.getLogger(__name__)
 
-# Number of body joints (0-21); hand joints are 22-51
-_N_BODY_JOINTS = 22
-
-# Left/Right body joint swap pairs for mirroring (joint indices, not body_pose indices)
-_LR_SWAP_PAIRS = [
-    (1, 2),    # L_Hip <-> R_Hip
-    (4, 5),    # L_Knee <-> R_Knee
-    (7, 8),    # L_Ankle <-> R_Ankle
-    (10, 11),  # L_Foot <-> R_Foot
-    (13, 14),  # L_Collar <-> R_Collar
-    (16, 17),  # L_Shoulder <-> R_Shoulder
-    (18, 19),  # L_Elbow <-> R_Elbow
-    (20, 21),  # L_Wrist <-> R_Wrist
-]
+# Skeleton constants — sourced from models/skeleton.py
+_N_BODY_JOINTS = _SKEL.n_body_joints
+_LR_SWAP_PAIRS = _SKEL.lr_swap_pairs
 
 
 def _safe_import_pose_correction():
