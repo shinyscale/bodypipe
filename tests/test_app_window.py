@@ -1352,3 +1352,365 @@ class TestSessionLoadRefreshesData:
         mock_load.assert_called_once()
         # Session path should be set
         assert app_window._session_path == session_path
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: Interaction modes, HUD, keyboard shortcuts
+# ---------------------------------------------------------------------------
+
+
+class TestInteractionModeEnum:
+    """Verify InteractionMode enum structure."""
+
+    def test_four_modes(self):
+        from app_window import InteractionMode
+        assert len(InteractionMode) == 4
+
+    def test_mode_values(self):
+        from app_window import InteractionMode
+        assert InteractionMode.NAVIGATE.value == "Navigate"
+        assert InteractionMode.SELECT.value == "Select"
+        assert InteractionMode.CORRECT.value == "Correct"
+        assert InteractionMode.TRACK.value == "Track"
+
+
+class TestInteractionModeManager:
+    """Verify mode switching and signal emission."""
+
+    def test_default_mode_is_navigate(self, app_window):
+        from app_window import InteractionMode
+        assert app_window._interaction_mode == InteractionMode.NAVIGATE
+
+    def test_set_mode_changes_state(self, app_window):
+        from app_window import InteractionMode
+        app_window.set_interaction_mode(InteractionMode.SELECT)
+        assert app_window._interaction_mode == InteractionMode.SELECT
+
+    def test_set_mode_emits_signal(self, app_window):
+        from app_window import InteractionMode
+        received = []
+        app_window.interaction_mode_changed.connect(received.append)
+        app_window.set_interaction_mode(InteractionMode.CORRECT)
+        assert received == ["Correct"]
+
+    def test_set_same_mode_no_signal(self, app_window):
+        from app_window import InteractionMode
+        received = []
+        app_window.interaction_mode_changed.connect(received.append)
+        # Already in NAVIGATE, setting again should not emit
+        app_window.set_interaction_mode(InteractionMode.NAVIGATE)
+        assert received == []
+
+    def test_mode_label_exists(self, app_window):
+        assert hasattr(app_window, "_mode_label")
+        assert app_window._mode_label.text() != ""
+
+    def test_mode_label_updates_on_switch(self, app_window):
+        from app_window import InteractionMode
+        app_window.set_interaction_mode(InteractionMode.TRACK)
+        assert "Track" in app_window._mode_label.text()
+
+    def test_mode_label_contains_number(self, app_window):
+        """Mode pill shows the mode number for quick reference."""
+        from app_window import InteractionMode
+        app_window.set_interaction_mode(InteractionMode.CORRECT)
+        # Correct is mode #3
+        assert "#3" in app_window._mode_label.text()
+
+
+class TestModeKeyboardShortcuts:
+    """Verify mode switching via 1-4 number keys."""
+
+    def test_key_1_navigate(self, app_window):
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        # Start in a different mode
+        app_window.set_interaction_mode(InteractionMode.SELECT)
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_1, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._interaction_mode == InteractionMode.NAVIGATE
+
+    def test_key_2_select(self, app_window):
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_2, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._interaction_mode == InteractionMode.SELECT
+
+    def test_key_3_correct(self, app_window):
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_3, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._interaction_mode == InteractionMode.CORRECT
+
+    def test_key_4_track(self, app_window):
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_4, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._interaction_mode == InteractionMode.TRACK
+
+
+class TestNavigateModeKeys:
+    """Verify Navigate mode keyboard shortcuts."""
+
+    def test_wasd_switches_to_orbit(self, app_window):
+        """WASD keys switch viewport to orbit mode if not already."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.NAVIGATE)
+        app_window._mesh_viewport._camera_mode = "incam"
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_W, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._mesh_viewport._camera_mode == "orbit"
+
+    def test_g_key_navigate_mode(self, app_window):
+        """G key in navigate mode should open go-to-frame dialog."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.NAVIGATE)
+        # Set up video player so seek works
+        app_window._video_player._num_frames = 200
+
+        with patch("app_window.QInputDialog.getInt", return_value=(42, True)):
+            event = QKeyEvent(QEvent.KeyPress, Qt.Key_G, Qt.NoModifier)
+            app_window.keyPressEvent(event)
+        # Should have sought to frame 42
+        assert app_window._video_player._current_frame == 42
+
+
+class TestCorrectModeKeys:
+    """Verify Correct mode keyboard shortcuts."""
+
+    def test_g_key_shows_pose_corrector(self, app_window):
+        """G key in correct mode calls setVisible(True) and raise_() on the dock."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.CORRECT)
+
+        with patch.object(app_window._pose_corrector_dock, "setVisible") as mock_vis, \
+             patch.object(app_window._pose_corrector_dock, "raise_") as mock_raise:
+            event = QKeyEvent(QEvent.KeyPress, Qt.Key_G, Qt.NoModifier)
+            app_window.keyPressEvent(event)
+        mock_vis.assert_called_once_with(True)
+        mock_raise.assert_called_once()
+
+    def test_r_key_resets_joint(self, app_window):
+        """R key in correct mode calls reset_current_joint."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.CORRECT)
+
+        with patch.object(app_window._pose_corrector, "reset_current_joint") as mock_reset:
+            event = QKeyEvent(QEvent.KeyPress, Qt.Key_R, Qt.NoModifier)
+            app_window.keyPressEvent(event)
+        mock_reset.assert_called_once()
+
+
+class TestTrackModeKeys:
+    """Verify Track mode keyboard shortcuts."""
+
+    def test_g_key_next_unreviewed(self, app_window):
+        """G key in track mode calls go_to_next_unreviewed."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.TRACK)
+
+        with patch.object(
+            app_window._identity_inspector, "go_to_next_unreviewed"
+        ) as mock_go:
+            event = QKeyEvent(QEvent.KeyPress, Qt.Key_G, Qt.NoModifier)
+            app_window.keyPressEvent(event)
+        mock_go.assert_called_once()
+
+    def test_tab_cycles_person(self, app_window):
+        """Tab key in track mode cycles to next person."""
+        from app_window import InteractionMode
+        from models.session import PersonTrack
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.TRACK)
+
+        # Set up two person tracks
+        app_window._session.person_tracks[0] = PersonTrack(person_id=0)
+        app_window._session.person_tracks[1] = PersonTrack(person_id=1)
+        app_window._session.selected_person = 0
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        assert app_window._session.selected_person == 1
+
+    def test_shift_tab_cycles_person_backwards(self, app_window):
+        """Shift+Tab in track mode cycles to previous person."""
+        from app_window import InteractionMode
+        from models.session import PersonTrack
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.TRACK)
+
+        app_window._session.person_tracks[0] = PersonTrack(person_id=0)
+        app_window._session.person_tracks[1] = PersonTrack(person_id=1)
+        app_window._session.selected_person = 0
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.ShiftModifier)
+        app_window.keyPressEvent(event)
+        # Should wrap to last person
+        assert app_window._session.selected_person == 1
+
+    def test_cycle_person_no_tracks(self, app_window):
+        """Cycling persons with empty tracks is a no-op."""
+        from app_window import InteractionMode
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        app_window.set_interaction_mode(InteractionMode.TRACK)
+        app_window._session.person_tracks.clear()
+        app_window._session.selected_person = -1
+
+        event = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.NoModifier)
+        app_window.keyPressEvent(event)
+        # Should not crash
+        assert app_window._session.selected_person == -1
+
+
+class TestViewportHUD:
+    """Verify HUD overlay on mesh viewport."""
+
+    def test_hud_exists(self, app_window):
+        assert hasattr(app_window._mesh_viewport, "_hud")
+
+    def test_hud_enabled_by_default(self, app_window):
+        assert app_window._mesh_viewport._hud_enabled is True
+
+    def test_set_hud_visible_enables(self, app_window):
+        app_window._mesh_viewport.set_hud_visible(True)
+        assert app_window._mesh_viewport._hud_enabled is True
+
+    def test_set_hud_visible_false_disables(self, app_window):
+        app_window._mesh_viewport.set_hud_visible(True)
+        app_window._mesh_viewport.set_hud_visible(False)
+        assert app_window._mesh_viewport._hud_enabled is False
+
+    def test_set_hud_mode_updates_text(self, app_window):
+        app_window._mesh_viewport.set_hud_mode("Correct")
+        assert app_window._mesh_viewport._hud._mode_text == "Correct"
+
+    def test_update_hud_frame(self, app_window):
+        app_window._mesh_viewport.update_hud(frame=42, total_frames=100)
+        assert "42" in app_window._mesh_viewport._hud._frame_text
+        assert "100" in app_window._mesh_viewport._hud._frame_text
+
+    def test_update_hud_speed(self, app_window):
+        app_window._mesh_viewport.update_hud(speed=2.0)
+        assert "2x" in app_window._mesh_viewport._hud._speed_text
+
+    def test_update_hud_person(self, app_window):
+        app_window._mesh_viewport.update_hud(person=3)
+        assert "3" in app_window._mesh_viewport._hud._person_text
+
+    def test_hud_toggle_in_view_menu(self, app_window):
+        """View menu has Toggle HUD Overlay action."""
+        assert hasattr(app_window, "_toggle_hud_action")
+        assert app_window._toggle_hud_action.isCheckable()
+
+    def test_hud_toggle_disables_hud(self, app_window):
+        """Unchecking HUD toggle disables the HUD overlay."""
+        app_window._toggle_hud_action.setChecked(False)
+        assert app_window._mesh_viewport._hud_enabled is False
+
+    def test_hud_toggle_enables_hud(self, app_window):
+        """Checking HUD toggle enables the HUD overlay."""
+        app_window._toggle_hud_action.setChecked(False)
+        app_window._toggle_hud_action.setChecked(True)
+        assert app_window._mesh_viewport._hud_enabled is True
+
+
+class TestKeyboardShortcutsDialog:
+    """Verify the shortcuts dialog includes Phase 10 entries."""
+
+    def test_mode_shortcuts_present(self):
+        from views.keyboard_shortcuts_dialog import SHORTCUTS
+        categories = {s[0] for s in SHORTCUTS}
+        assert "Mode" in categories
+        assert "Navigate" in categories
+        assert "Select" in categories
+        assert "Correct" in categories
+        assert "Track" in categories
+
+    def test_hud_toggle_shortcut(self):
+        from views.keyboard_shortcuts_dialog import SHORTCUTS
+        hud = [s for s in SHORTCUTS if "HUD" in s[2]]
+        assert len(hud) == 1
+        assert hud[0][1] == "Ctrl+H"
+
+    def test_mode_switch_keys_listed(self):
+        from views.keyboard_shortcuts_dialog import SHORTCUTS
+        mode_entries = [s for s in SHORTCUTS if s[0] == "Mode"]
+        keys = {s[1] for s in mode_entries}
+        assert keys == {"1", "2", "3", "4"}
+
+    def test_navigate_wasd_listed(self):
+        from views.keyboard_shortcuts_dialog import SHORTCUTS
+        nav_entries = [s for s in SHORTCUTS if s[0] == "Navigate"]
+        keys = {s[1] for s in nav_entries}
+        assert {"W", "A", "S", "D", "G"} <= keys
+
+    def test_track_tab_listed(self):
+        from views.keyboard_shortcuts_dialog import SHORTCUTS
+        track_entries = [s for s in SHORTCUTS if s[0] == "Track"]
+        keys = {s[1] for s in track_entries}
+        assert "Tab" in keys
+        assert "Shift+Tab" in keys
+
+
+class TestGoToFrameDialog:
+    """Verify go-to-frame dialog integration."""
+
+    def test_go_to_frame_seeks(self, app_window):
+        """Go to frame dialog seeks when user enters a frame number."""
+        app_window._video_player._num_frames = 200
+        with patch("app_window.QInputDialog.getInt", return_value=(99, True)):
+            app_window._go_to_frame_dialog()
+        assert app_window._video_player._current_frame == 99
+
+    def test_go_to_frame_cancelled(self, app_window):
+        """Go to frame dialog does nothing when cancelled."""
+        app_window._video_player._num_frames = 200
+        app_window._video_player._current_frame = 50
+        with patch("app_window.QInputDialog.getInt", return_value=(0, False)):
+            app_window._go_to_frame_dialog()
+        assert app_window._video_player._current_frame == 50

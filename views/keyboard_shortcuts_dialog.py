@@ -23,6 +23,7 @@ SHORTCUTS = [
     ("Edit", "Ctrl+Shift+Z", "Redo"),
     # View menu
     ("View", "Ctrl+L", "Toggle Log Panel"),
+    ("View", "Ctrl+H", "Toggle HUD Overlay"),
     # Video playback
     ("Video", "Space", "Play / Pause"),
     ("Video", "Left", "Back 1 frame"),
@@ -31,6 +32,30 @@ SHORTCUTS = [
     ("Video", "Ctrl+Right", "Forward 10 frames"),
     ("Video", "Home", "First frame"),
     ("Video", "End", "Last frame"),
+    # Interaction modes
+    ("Mode", "1", "Navigate mode"),
+    ("Mode", "2", "Select mode"),
+    ("Mode", "3", "Correct mode"),
+    ("Mode", "4", "Track mode"),
+    # Navigate mode shortcuts
+    ("Navigate", "W", "Orbit camera up"),
+    ("Navigate", "A", "Orbit camera left"),
+    ("Navigate", "S", "Orbit camera down"),
+    ("Navigate", "D", "Orbit camera right"),
+    ("Navigate", "G", "Go to frame"),
+    # Select mode shortcuts
+    ("Select", "Click", "Pick joint"),
+    ("Select", "Shift+Click", "Add joint to selection"),
+    ("Select", "G", "Go to frame"),
+    ("Select", "Escape", "Deselect joint"),
+    # Correct mode shortcuts
+    ("Correct", "G", "Focus Pose Corrector"),
+    ("Correct", "R", "Reset current joint"),
+    ("Correct", "Escape", "Deselect joint"),
+    # Track mode shortcuts
+    ("Track", "G", "Next unreviewed keyframe"),
+    ("Track", "Tab", "Next person"),
+    ("Track", "Shift+Tab", "Previous person"),
 ]
 
 

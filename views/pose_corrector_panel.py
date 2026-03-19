@@ -1683,6 +1683,10 @@ class PoseCorrectorPanel(QWidget):
         self._update_sliders()
         self._refresh_corrections_table()
 
+    def reset_current_joint(self):
+        """Public API: reset the currently selected joint (keyboard shortcut)."""
+        self._on_reset_joint()
+
     # ------------------------------------------------------------------
     # Quick-fix handlers
     # ------------------------------------------------------------------

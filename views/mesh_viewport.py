@@ -963,6 +963,116 @@ def compute_grid_lines(
 
 
 # ---------------------------------------------------------------------------
+# HUD overlay — semi-transparent info display on viewport (Phase 10)
+# ---------------------------------------------------------------------------
+
+_HUD_HIDE_DELAY_MS = 2000
+
+
+class _ViewportHUD(QWidget):
+    """Semi-transparent HUD overlay showing frame, speed, mode, person, FPS.
+
+    Why overlay on viewport: Mocha/Nuke pattern — at-a-glance status without
+    taking dock space.  Auto-hides after 2s of mouse inactivity; permanently
+    visible while the mouse hovers over it.  Toggle via View > Toggle HUD.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setMouseTracking(True)
+
+        from PySide6.QtCore import QTimer
+
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(_HUD_HIDE_DELAY_MS)
+        self._hide_timer.timeout.connect(self.hide)
+
+        self._frame_text = ""
+        self._speed_text = "1x"
+        self._mode_text = "Navigate"
+        self._person_text = ""
+        self._fps_text = ""
+
+        self.setFixedSize(180, 90)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        # Semi-transparent dark background
+        p.setBrush(QColor(0, 0, 0, 160))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(self.rect(), 6, 6)
+
+        # Draw text lines
+        p.setPen(QColor(220, 220, 220))
+        font = QFont("monospace", 9)
+        p.setFont(font)
+        fm = QFontMetrics(font)
+        line_height = fm.height() + 2
+        x = 8
+        y = 4 + fm.ascent()
+
+        lines = []
+        if self._frame_text:
+            lines.append(self._frame_text)
+        if self._speed_text:
+            lines.append(f"Speed: {self._speed_text}")
+        if self._mode_text:
+            lines.append(f"Mode: {self._mode_text}")
+        if self._person_text:
+            lines.append(self._person_text)
+        if self._fps_text:
+            lines.append(self._fps_text)
+
+        for line in lines:
+            p.drawText(x, y, line)
+            y += line_height
+
+        p.end()
+
+    def update_info(
+        self,
+        frame: int | None = None,
+        total_frames: int | None = None,
+        speed: float | None = None,
+        mode: str | None = None,
+        person: int | None = None,
+        fps: float | None = None,
+    ):
+        """Update HUD fields and repaint. Only non-None args are changed."""
+        if frame is not None and total_frames is not None:
+            self._frame_text = f"Frame: {frame} / {total_frames}"
+        elif frame is not None:
+            self._frame_text = f"Frame: {frame}"
+        if speed is not None:
+            label = f"{int(speed)}x" if speed == int(speed) else f"{speed}x"
+            self._speed_text = label
+        if mode is not None:
+            self._mode_text = mode
+        if person is not None:
+            self._person_text = f"Person: {person}" if person >= 0 else ""
+        if fps is not None:
+            self._fps_text = f"FPS: {fps:.1f}"
+        self.update()
+
+    def show_with_timer(self):
+        """Show the HUD and (re)start the auto-hide timer."""
+        self.show()
+        self.raise_()
+        self._hide_timer.start()
+
+    def enterEvent(self, event):
+        self._hide_timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hide_timer.start()
+        super().leaveEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Widget
 # ---------------------------------------------------------------------------
 _BaseWidget = _QOpenGLWidget if _HAS_GL else QWidget
@@ -1092,6 +1202,12 @@ class MeshViewport(_BaseWidget):
             self._status_msg = "OpenGL not available"
             self._setup_fallback()
 
+        # HUD overlay (Phase 10) — positioned bottom-right
+        self._hud = _ViewportHUD(self)
+        self._hud.hide()
+        self._hud_enabled = True  # toggleable via View menu
+        self.setMouseTracking(True)  # enable mouseMoveEvent without button held
+
     def _setup_fallback(self):
         """Show a label when GL is not available."""
         layout = QVBoxLayout(self)
@@ -1100,6 +1216,52 @@ class MeshViewport(_BaseWidget):
         self._fallback_label.setAlignment(Qt.AlignCenter)
         self._fallback_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 14px;")
         layout.addWidget(self._fallback_label)
+
+    def resizeEvent(self, event):
+        """Reposition HUD overlay on resize."""
+        super().resizeEvent(event)
+        self._position_hud()
+
+    def _position_hud(self):
+        """Place HUD in bottom-right corner with margin."""
+        margin = 10
+        hud_w = self._hud.width()
+        hud_h = self._hud.height()
+        self._hud.move(self.width() - hud_w - margin, self.height() - hud_h - margin)
+
+    # ------------------------------------------------------------------
+    # HUD overlay API (Phase 10)
+    # ------------------------------------------------------------------
+
+    def set_hud_visible(self, visible: bool):
+        """Enable or disable the HUD overlay (View menu toggle)."""
+        self._hud_enabled = visible
+        if visible:
+            self._hud.show_with_timer()
+        else:
+            self._hud.hide()
+
+    def set_hud_mode(self, mode_name: str):
+        """Update the mode display on the HUD."""
+        self._hud.update_info(mode=mode_name)
+        if self._hud_enabled:
+            self._hud.show_with_timer()
+
+    def update_hud(
+        self,
+        frame: int | None = None,
+        total_frames: int | None = None,
+        speed: float | None = None,
+        person: int | None = None,
+        fps: float | None = None,
+    ):
+        """Update HUD fields and briefly show if enabled."""
+        self._hud.update_info(
+            frame=frame, total_frames=total_frames,
+            speed=speed, person=person, fps=fps,
+        )
+        if self._hud_enabled:
+            self._hud.show_with_timer()
 
     # ------------------------------------------------------------------
     # Public API
@@ -1412,7 +1574,10 @@ class MeshViewport(_BaseWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Update orbit/pan during drag."""
+        """Update orbit/pan during drag; show HUD on movement."""
+        # Show HUD on any mouse activity over the viewport
+        if self._hud_enabled:
+            self._hud.show_with_timer()
         if self._camera_mode != "orbit" or self._mouse_last_pos is None:
             super().mouseMoveEvent(event)
             return

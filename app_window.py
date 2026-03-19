@@ -7,6 +7,7 @@ multi-person-only docks (Identity Inspector, Pose Corrector, Track Overview).
 QMainWindow.saveState()/restoreState() persists the layout across sessions.
 """
 
+import enum
 import logging
 from pathlib import Path
 
@@ -28,6 +29,21 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, QSettings, Qt, QByteArray
 from PySide6.QtGui import QAction, QPalette, QColor
+
+
+class InteractionMode(enum.Enum):
+    """Context-aware interaction modes that change keyboard shortcuts.
+
+    Why modes: A professional motion capture tool needs different keyboard
+    bindings depending on the current task.  Navigate mode uses WASD for
+    orbit camera control; Select mode makes click pick a joint; Correct mode
+    opens euler sliders; Track mode navigates between persons and unreviewed
+    keyframes.  The active mode is shown in the status bar and HUD overlay.
+    """
+    NAVIGATE = "Navigate"
+    SELECT = "Select"
+    CORRECT = "Correct"
+    TRACK = "Track"
 
 from models.pipeline_config import PipelineConfig
 from models.session import Session
@@ -259,6 +275,7 @@ class AppWindow(QMainWindow):
     session_saved = Signal(Path)
     tab_changed = Signal(int)   # backward compat — emitted on mode change
     mode_changed = Signal(str)  # "single", "perf", "multi"
+    interaction_mode_changed = Signal(str)  # emitted with InteractionMode.value
 
     MAX_RECENT = 5
     _DOCK_VERSION = 1  # increment when dock layout structure changes
@@ -305,6 +322,7 @@ class AppWindow(QMainWindow):
         self._reprocess_worker: ReprocessWorker | None = None
         self._show_all_tracks = False
         self._edit_preview: dict | None = None
+        self._interaction_mode: InteractionMode = InteractionMode.NAVIGATE
 
         self.setWindowTitle("bodypipe \u2014 Motion Capture Studio")
         self.setMinimumSize(1200, 700)
@@ -318,6 +336,7 @@ class AppWindow(QMainWindow):
         self._setup_log_panel()
         self._setup_undo_redo()
         self._setup_signal_hub()
+        self._setup_interaction_modes()
         self._add_dock_view_toggles()
         # Capture default dock layout before restoring user's saved state
         self._default_state = self.saveState(self._DOCK_VERSION)
@@ -449,6 +468,13 @@ class AppWindow(QMainWindow):
         self._toggle_log_action.setChecked(True)
         self._view_menu.addAction(self._toggle_log_action)
 
+        self._toggle_hud_action = QAction("Toggle &HUD Overlay", self)
+        self._toggle_hud_action.setShortcut("Ctrl+H")
+        self._toggle_hud_action.setCheckable(True)
+        self._toggle_hud_action.setChecked(True)
+        self._toggle_hud_action.toggled.connect(self._on_toggle_hud)
+        self._view_menu.addAction(self._toggle_hud_action)
+
         self._view_menu.addSeparator()
         self._workspace_menu = QMenu("&Workspace", self)
         self._view_menu.addMenu(self._workspace_menu)
@@ -478,15 +504,22 @@ class AppWindow(QMainWindow):
             self._view_menu.addAction(dock.toggleViewAction())
 
     def _setup_status_bar(self):
-        """Create status bar with operation status, frame counter, FPS."""
+        """Create status bar with operation status, mode indicator, frame counter, FPS."""
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
 
         self._status_label = QLabel("Ready")
+        self._mode_label = QLabel("")
+        self._mode_label.setStyleSheet(
+            f"QLabel {{ background: {COLORS['accent']}; color: #ffffff; "
+            f"padding: 1px 8px; border-radius: 3px; font-weight: bold; "
+            f"font-size: 11px; }}"
+        )
         self._frame_label = QLabel("")
         self._fps_label = QLabel("")
 
         self._status_bar.addWidget(self._status_label, 1)
+        self._status_bar.addPermanentWidget(self._mode_label)
         self._status_bar.addPermanentWidget(self._frame_label)
         self._status_bar.addPermanentWidget(self._fps_label)
 
@@ -745,6 +778,186 @@ class AppWindow(QMainWindow):
         self._pipeline_dock.mode_changed.connect(self._on_mode_changed)
 
     # ------------------------------------------------------------------
+    # Interaction modes (Phase 10)
+    # ------------------------------------------------------------------
+
+    # Mode → number key mapping
+    _MODE_KEYS = {
+        Qt.Key_1: InteractionMode.NAVIGATE,
+        Qt.Key_2: InteractionMode.SELECT,
+        Qt.Key_3: InteractionMode.CORRECT,
+        Qt.Key_4: InteractionMode.TRACK,
+    }
+
+    def _setup_interaction_modes(self):
+        """Initialise interaction mode state and update the status bar indicator."""
+        self._update_mode_indicator()
+
+    def set_interaction_mode(self, mode: InteractionMode):
+        """Switch the active interaction mode and update UI."""
+        if self._interaction_mode == mode:
+            return
+        self._interaction_mode = mode
+        self._update_mode_indicator()
+        self.interaction_mode_changed.emit(mode.value)
+        self._mesh_viewport.set_hud_mode(mode.value)
+        log.info("Interaction mode → %s", mode.value)
+
+    def _update_mode_indicator(self):
+        """Update the status bar mode pill label."""
+        mode = self._interaction_mode
+        # Color-code the mode pill for quick visual identification
+        mode_colors = {
+            InteractionMode.NAVIGATE: COLORS["accent"],
+            InteractionMode.SELECT:   "#3d85c6",  # blue
+            InteractionMode.CORRECT:  "#cc4125",  # red
+            InteractionMode.TRACK:    "#6aa84f",  # green
+        }
+        bg = mode_colors.get(mode, COLORS["accent"])
+        self._mode_label.setStyleSheet(
+            f"QLabel {{ background: {bg}; color: #ffffff; "
+            f"padding: 1px 8px; border-radius: 3px; font-weight: bold; "
+            f"font-size: 11px; }}"
+        )
+        self._mode_label.setText(f"{mode.value} (#{list(InteractionMode).index(mode) + 1})")
+
+    def keyPressEvent(self, event):
+        """Route key events based on active interaction mode.
+
+        Why centralised: Each mode remaps the same physical keys to different
+        actions — e.g. G means "go-to-frame" in Navigate but "next unreviewed"
+        in Track mode.  Processing here before child widgets see the event
+        ensures mode-awareness without each widget needing to know about modes.
+        """
+        key = event.key()
+        mod = event.modifiers()
+
+        # Mode switching: 1-4 keys (without modifiers)
+        if not mod and key in self._MODE_KEYS:
+            self.set_interaction_mode(self._MODE_KEYS[key])
+            return
+
+        # Dispatch to mode-specific handler
+        handled = False
+        if self._interaction_mode == InteractionMode.NAVIGATE:
+            handled = self._key_navigate(key, mod)
+        elif self._interaction_mode == InteractionMode.SELECT:
+            handled = self._key_select(key, mod)
+        elif self._interaction_mode == InteractionMode.CORRECT:
+            handled = self._key_correct(key, mod)
+        elif self._interaction_mode == InteractionMode.TRACK:
+            handled = self._key_track(key, mod)
+
+        if not handled:
+            super().keyPressEvent(event)
+
+    def _key_navigate(self, key, mod) -> bool:
+        """Navigate mode: WASD orbit camera, G go-to-frame."""
+        if key == Qt.Key_W:
+            self._orbit_nudge(pitch=-5)
+            return True
+        if key == Qt.Key_S:
+            self._orbit_nudge(pitch=5)
+            return True
+        if key == Qt.Key_A:
+            self._orbit_nudge(yaw=-5)
+            return True
+        if key == Qt.Key_D:
+            self._orbit_nudge(yaw=5)
+            return True
+        if key == Qt.Key_G:
+            self._go_to_frame_dialog()
+            return True
+        return False
+
+    def _key_select(self, key, mod) -> bool:
+        """Select mode: G go-to-frame, Escape deselect."""
+        if key == Qt.Key_G:
+            self._go_to_frame_dialog()
+            return True
+        if key == Qt.Key_Escape:
+            self._mesh_viewport._selected_joint = -1
+            self._mesh_viewport.joint_clicked.emit(-1)
+            if hasattr(self._mesh_viewport, 'update'):
+                self._mesh_viewport.update()
+            return True
+        return False
+
+    def _key_correct(self, key, mod) -> bool:
+        """Correct mode: G open euler, R reset joint, Escape deselect."""
+        if key == Qt.Key_G:
+            # Focus the pose corrector dock and raise it
+            self._pose_corrector_dock.setVisible(True)
+            self._pose_corrector_dock.raise_()
+            return True
+        if key == Qt.Key_R:
+            # Reset the currently selected joint rotation
+            self._pose_corrector.reset_current_joint()
+            return True
+        if key == Qt.Key_Escape:
+            self._mesh_viewport._selected_joint = -1
+            self._mesh_viewport.joint_clicked.emit(-1)
+            if hasattr(self._mesh_viewport, 'update'):
+                self._mesh_viewport.update()
+            return True
+        return False
+
+    def _key_track(self, key, mod) -> bool:
+        """Track mode: G next unreviewed, Tab next person, Shift+Tab prev."""
+        if key == Qt.Key_G:
+            self._identity_inspector.go_to_next_unreviewed()
+            return True
+        if key == Qt.Key_Tab:
+            if mod & Qt.ShiftModifier:
+                self._cycle_person(-1)
+            else:
+                self._cycle_person(1)
+            return True
+        return False
+
+    def _orbit_nudge(self, yaw: float = 0, pitch: float = 0):
+        """Nudge the orbit camera by the given yaw/pitch degrees."""
+        vp = self._mesh_viewport
+        if vp._camera_mode != "orbit":
+            vp.set_camera_mode("orbit")
+        vp._orbit_yaw += yaw
+        vp._orbit_pitch = float(np.clip(vp._orbit_pitch + pitch, -89, 89))
+        vp._update_camera()
+        vp.camera_changed.emit(vp._camera_state())
+
+    def _go_to_frame_dialog(self):
+        """Show a go-to-frame input dialog."""
+        max_frame = max(0, self._video_player.num_frames - 1)
+        frame, ok = QInputDialog.getInt(
+            self, "Go to Frame", f"Frame (0–{max_frame}):",
+            self._video_player._current_frame, 0, max_frame,
+        )
+        if ok:
+            self._video_player.seek(frame)
+
+    def _cycle_person(self, direction: int):
+        """Cycle through person tracks by direction (+1 = next, -1 = prev)."""
+        pids = sorted(self._session.person_tracks.keys())
+        if not pids:
+            return
+        current = self._session.selected_person
+        if current in pids:
+            idx = pids.index(current)
+            idx = (idx + direction) % len(pids)
+        else:
+            idx = 0
+        new_pid = pids[idx]
+        self._session.selected_person = new_pid
+        self._identity_inspector.set_person(new_pid)
+        self._pose_corrector.set_person(new_pid)
+        self._mesh_viewport.set_person(new_pid)
+        self.set_status(f"Selected Person {new_pid}")
+
+    def _on_toggle_hud(self, visible: bool):
+        """Toggle the HUD overlay on the mesh viewport."""
+        self._mesh_viewport.set_hud_visible(visible)
+
+    # ------------------------------------------------------------------
     # Mode switching
     # ------------------------------------------------------------------
 
@@ -768,10 +981,17 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_video_frame_changed(self, frame_idx: int):
-        """Update status bar and broadcast frame change in multi mode."""
+        """Update status bar, HUD, and broadcast frame change in multi mode."""
         self.set_frame_info(frame_idx, self._video_player.num_frames)
         self.set_fps_info(self._video_player.fps)
         self._session.current_frame = frame_idx
+        # Update HUD overlay with current state
+        self._mesh_viewport.update_hud(
+            frame=frame_idx,
+            total_frames=self._video_player.num_frames,
+            speed=self._video_player._playback_speed,
+            person=self._session.selected_person,
+        )
 
         if self._pipeline_dock.current_mode == "multi":
             self._track_overview.set_current_frame(frame_idx)

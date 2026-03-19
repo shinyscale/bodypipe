@@ -3002,3 +3002,92 @@ class TestSetScrubbing:
         assert w._render_mode is RenderMode.WIREFRAME
         w.set_scrubbing(False)
         assert w._render_mode is RenderMode.FULL
+
+
+# ======================================================================
+# Phase 10: HUD overlay tests
+# ======================================================================
+
+
+class TestViewportHUDWidget:
+    """_ViewportHUD standalone widget tests."""
+
+    def test_hud_created_on_viewport(self, qapp):
+        w = MeshViewport()
+        assert hasattr(w, "_hud")
+        from views.mesh_viewport import _ViewportHUD
+        assert isinstance(w._hud, _ViewportHUD)
+
+    def test_hud_enabled_default(self, qapp):
+        w = MeshViewport()
+        assert w._hud_enabled is True
+
+    def test_set_hud_visible_true_enables(self, qapp):
+        w = MeshViewport()
+        w._hud_enabled = False
+        w.set_hud_visible(True)
+        assert w._hud_enabled is True
+
+    def test_set_hud_visible_false_disables(self, qapp):
+        w = MeshViewport()
+        w.set_hud_visible(True)
+        w.set_hud_visible(False)
+        assert w._hud_enabled is False
+
+    def test_set_hud_mode(self, qapp):
+        w = MeshViewport()
+        w.set_hud_mode("Select")
+        assert w._hud._mode_text == "Select"
+
+    def test_update_hud_frame(self, qapp):
+        w = MeshViewport()
+        w.update_hud(frame=10, total_frames=50)
+        assert "10" in w._hud._frame_text
+        assert "50" in w._hud._frame_text
+
+    def test_update_hud_speed(self, qapp):
+        w = MeshViewport()
+        w.update_hud(speed=0.5)
+        assert "0.5x" in w._hud._speed_text
+
+    def test_update_hud_speed_integer(self, qapp):
+        w = MeshViewport()
+        w.update_hud(speed=4.0)
+        assert "4x" in w._hud._speed_text
+
+    def test_update_hud_person(self, qapp):
+        w = MeshViewport()
+        w.update_hud(person=2)
+        assert "Person: 2" in w._hud._person_text
+
+    def test_update_hud_person_negative(self, qapp):
+        w = MeshViewport()
+        w.update_hud(person=-1)
+        assert w._hud._person_text == ""
+
+    def test_update_hud_calls_show_when_enabled(self, qapp):
+        w = MeshViewport()
+        w._hud_enabled = True
+        with patch.object(w._hud, "show_with_timer") as mock_show:
+            w.update_hud(frame=5, total_frames=100)
+        mock_show.assert_called_once()
+
+    def test_update_hud_no_show_when_disabled(self, qapp):
+        w = MeshViewport()
+        w._hud_enabled = False
+        with patch.object(w._hud, "show_with_timer") as mock_show:
+            w.update_hud(frame=5, total_frames=100)
+        mock_show.assert_not_called()
+
+    def test_hud_update_info_partial(self, qapp):
+        """Partial update only changes specified fields."""
+        from views.mesh_viewport import _ViewportHUD
+        hud = _ViewportHUD()
+        hud.update_info(mode="Correct")
+        assert hud._mode_text == "Correct"
+        # Speed should still be default
+        assert hud._speed_text == "1x"
+
+    def test_mouse_tracking_enabled(self, qapp):
+        w = MeshViewport()
+        assert w.hasMouseTracking()

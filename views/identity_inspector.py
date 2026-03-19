@@ -1761,6 +1761,20 @@ class IdentityInspector(QWidget):
             desc_item = QTableWidgetItem(issue.description)
             self._issues_table.setItem(row, 3, desc_item)
 
+    def go_to_next_unreviewed(self):
+        """Public API: navigate to next unreviewed keyframe (keyboard shortcut).
+
+        Falls back to next review issue if no unreviewed keyframes exist.
+        """
+        # Try review issues first
+        if self._review_issues:
+            self._on_next_issue()
+            return
+        # Otherwise run a scan and go to the first result
+        self._on_scan_issues()
+        if self._review_issues:
+            self._on_next_issue()
+
     # ------------------------------------------------------------------
     # Reprocess
     # ------------------------------------------------------------------

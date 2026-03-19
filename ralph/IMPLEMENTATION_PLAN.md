@@ -2,13 +2,14 @@
 
 ## Completed Phases (summary)
 
-All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX fully implemented. 1455 tests passing.
+All 7 original phases + UX overhaul (Commits 1A-1F) + viewport improvements (Phases 2-7) + dock data flow fix + Phase 5 Pose Correction UX + Phase 10 Keyboard & Interaction Polish fully implemented. 1508 tests passing.
 
 - **Phases 1-7 (original)**: Pipeline tabs, identity inspector, 3D viewport + pose corrector, app shell polish, spec compliance, Gradio parity, settings persistence
 - **Commits 1A-1F**: Tab-to-dock migration — pipeline settings extraction, dock wrappers, AppWindow rewire, workspace presets, tab class removal, shim cleanup
 - **Viewport Phases 2-7**: Joint chain highlighting, skeleton heatmap, quality toggle, DAW-style track timeline, transport overlay + speed chips + adaptive cache
 - **Dock data flow fix**: Startup restore, panel hydration, _refresh_all_panels()
 - **Phase 5 (Pose Correction UX)**: Preview range, smoothing, apply-to-similar, correction propagation — all with undo support
+- **Phase 10 (Keyboard & Interaction Polish)**: InteractionMode enum (Navigate/Select/Correct/Track), context-aware shortcuts, mode indicator, viewport HUD overlay
 
 ---
 
@@ -224,7 +225,7 @@ Full spec: `spec/ux-overhaul.md`
 
 ## Execution Order
 
-1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3
+1A → 1B → 1C → 1D → 1E → 1F → Phase 4 → Phase 6 → Phase 7 → Phase 2 → Phase 3 → Phase 5 → Phase 10
 
 ## Current Task Queue
 
@@ -260,11 +261,23 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 **Files:** `views/pose_corrector_panel.py` (replaced 3 stub methods with full implementations, added preview range UI), `tests/test_pose_corrector.py` (56 new tests)
 
-### Phase 10: Keyboard & Interaction Polish
+### Phase 10: Keyboard & Interaction Polish *(DONE)*
 
-- [ ] Context-aware shortcuts that change by active tool/mode: Navigate (WASD orbit, G go-to-frame), Select (click pick joint, shift+click add), Correct (G open euler, R reset), Track (G next unreviewed, Tab next person).
-- [ ] Mode indicator in status bar.
-- [ ] On-screen HUD overlay on viewport (bottom-right): current frame, playback speed, active mode, selected person, FPS counter. Auto-hide after 2s idle. Toggle via View menu.
+- [x] **InteractionMode enum** — 4 modes (Navigate, Select, Correct, Track) with `InteractionMode` enum in `app_window.py`
+- [x] **Context-aware shortcuts** that change by active mode:
+  - Mode switching: 1=Navigate, 2=Select, 3=Correct, 4=Track
+  - Navigate: WASD orbit camera nudge (auto-switches to orbit mode), G go-to-frame dialog
+  - Select: Click pick joint, G go-to-frame, Escape deselect
+  - Correct: G opens/raises Pose Corrector dock, R resets current joint rotation, Escape deselect
+  - Track: G next unreviewed keyframe (via review scanner), Tab/Shift+Tab cycle persons
+- [x] **Mode indicator in status bar** — Color-coded pill label showing active mode name and number (amber=Navigate, blue=Select, red=Correct, green=Track)
+- [x] **On-screen HUD overlay on viewport** (bottom-right): `_ViewportHUD` widget showing current frame, playback speed, active mode, selected person. Auto-hide after 2s idle. Mouse movement over viewport triggers show. Toggle via View > Toggle HUD Overlay (Ctrl+H).
+- [x] **Public API additions**: `PoseCorrectorPanel.reset_current_joint()`, `IdentityInspector.go_to_next_unreviewed()`
+- [x] **Keyboard shortcuts dialog updated** — Added Mode, Navigate, Select, Correct, Track categories + Ctrl+H for HUD toggle
+- [x] 53 new tests: TestInteractionModeEnum (2), TestInteractionModeManager (7), TestModeKeyboardShortcuts (4), TestNavigateModeKeys (2), TestCorrectModeKeys (2), TestTrackModeKeys (4), TestViewportHUD (11), TestKeyboardShortcutsDialog (5), TestGoToFrameDialog (2), TestViewportHUDWidget (14 in test_mesh_viewport.py)
+- [x] All 1508 tests pass (1455 original + 53 new)
+
+**Files:** `app_window.py` (InteractionMode enum, mode manager, keyboard routing, mode indicator, HUD toggle), `views/mesh_viewport.py` (_ViewportHUD overlay, HUD API methods, mouse tracking), `views/keyboard_shortcuts_dialog.py` (mode-specific shortcuts), `views/pose_corrector_panel.py` (reset_current_joint), `views/identity_inspector.py` (go_to_next_unreviewed), `tests/test_app_window.py`, `tests/test_mesh_viewport.py`
 
 ### Phase 8: Property Panel Refinement
 
@@ -278,7 +291,7 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 
 ## Verification
 
-1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1455 tests pass
+1. `QT_QPA_PLATFORM=offscreen python -m pytest tests/ -x -q` — all 1508 tests pass
 2. `python main.py` with previously-processed video → video frames visible, transport works, 3D mesh renders, inspector populated, timeline synced
 3. Dock panels can be dragged, floated, tabbed, closed/reopened via View menu
 4. Workspace presets restore correct layouts with populated panels
@@ -286,3 +299,4 @@ The tab→dock migration (commits 1A-1F) broke the runtime data flow. The dock l
 6. Full end-to-end: load video → run pipeline → results populate all panels → corrections workflow functional
 7. Track timeline: zoom (scroll wheel), pan (middle-drag), click to select person + seek, collapsible lanes, marker overlays
 8. Transport overlay: auto-hide after 2s, speed chips sync between video player and track timeline, adaptive read-ahead during playback
+9. Keyboard interaction: mode switching (1-4), context-aware shortcuts per mode, status bar mode indicator, viewport HUD overlay (Ctrl+H toggle)
