@@ -30,6 +30,9 @@ class PipelineConfig:
     hand_source: str = "smplestx"  # "smplestx" | "hamer"
     body_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
     use_vitpose_face_crops: bool = True
+    # Body model and estimation backend (SOMA migration)
+    body_model: str = "smplx"            # "smplx" | "soma"
+    estimation_backend: str = "gvhmr"    # "gvhmr" | "gemx"
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +53,8 @@ class PipelineConfig:
             "hand_source": self.hand_source,
             "body_smooth_preset": self.body_smooth_preset,
             "use_vitpose_face_crops": self.use_vitpose_face_crops,
+            "body_model": self.body_model,
+            "estimation_backend": self.estimation_backend,
         }
 
     @classmethod

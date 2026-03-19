@@ -116,6 +116,8 @@ class PersonTrack:
     # Typed as Any to avoid importing GVHMR backend at module level
     identity_track: Any = None
     smplx_params: dict | None = None
+    soma_params: dict | None = None
+    body_model_type: str = "smplx"  # "smplx" | "soma"
     confidences: list | None = None
     bboxes: np.ndarray | None = None
     original_bboxes: np.ndarray | None = None
@@ -130,6 +132,7 @@ class PersonTrack:
         d = {
             "person_id": self.person_id,
             "person_dir": str(self.person_dir) if self.person_dir else None,
+            "body_model_type": self.body_model_type,
             "keyframes": self.keyframes,
         }
         if self.identity_track is not None and hasattr(self.identity_track, "to_dict"):
@@ -141,6 +144,7 @@ class PersonTrack:
         return cls(
             person_id=data.get("person_id", -1),
             person_dir=Path(data["person_dir"]) if data.get("person_dir") else None,
+            body_model_type=data.get("body_model_type", "smplx"),
             keyframes=data.get("keyframes", []),
         )
 

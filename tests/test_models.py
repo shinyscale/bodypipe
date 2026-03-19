@@ -406,3 +406,112 @@ class TestUndoStack:
         session.undo_stack.redo()
         assert len(track.keyframes) == 2
         assert track.keyframes[1]["frame"] == 50
+
+
+class TestPersonTrackSomaFields:
+    """Tests for SOMA migration fields on PersonTrack."""
+
+    def test_soma_params_default_none(self):
+        track = PersonTrack()
+        assert track.soma_params is None
+
+    def test_body_model_type_default(self):
+        track = PersonTrack()
+        assert track.body_model_type == "smplx"
+
+    def test_body_model_type_roundtrip(self):
+        track = PersonTrack(person_id=1, body_model_type="soma")
+        d = track.to_dict()
+        assert d["body_model_type"] == "soma"
+        loaded = PersonTrack.from_dict(d)
+        assert loaded.body_model_type == "soma"
+
+    def test_body_model_type_default_on_legacy_load(self):
+        """Loading a dict without body_model_type should default to 'smplx'."""
+        d = {"person_id": 5, "keyframes": []}
+        loaded = PersonTrack.from_dict(d)
+        assert loaded.body_model_type == "smplx"
+
+    def test_session_roundtrip_with_body_model_type(self, tmp_path):
+        s = Session(video_path=Path("/tmp/test.mp4"), num_frames=10)
+        s.person_tracks[0] = PersonTrack(person_id=0, body_model_type="soma")
+        s.person_tracks[1] = PersonTrack(person_id=1, body_model_type="smplx")
+        path = tmp_path / "session.json"
+        s.save(path)
+        loaded = Session.load(path)
+        assert loaded.person_tracks[0].body_model_type == "soma"
+        assert loaded.person_tracks[1].body_model_type == "smplx"
+
+
+class TestPipelineConfigSomaFields:
+    """Tests for SOMA migration fields on PipelineConfig."""
+
+    def test_body_model_default(self):
+        c = PipelineConfig()
+        assert c.body_model == "smplx"
+
+    def test_estimation_backend_default(self):
+        c = PipelineConfig()
+        assert c.estimation_backend == "gvhmr"
+
+    def test_new_fields_roundtrip(self, tmp_path):
+        c = PipelineConfig(body_model="soma", estimation_backend="gemx")
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.body_model == "soma"
+        assert loaded.estimation_backend == "gemx"
+
+    def test_new_fields_in_to_dict(self):
+        c = PipelineConfig(body_model="soma", estimation_backend="gemx")
+        d = c.to_dict()
+        assert d["body_model"] == "soma"
+        assert d["estimation_backend"] == "gemx"
+
+    def test_legacy_load_without_new_fields(self):
+        """Loading a dict without body_model/estimation_backend uses defaults."""
+        c = PipelineConfig.from_dict({"mode": "single"})
+        assert c.body_model == "smplx"
+        assert c.estimation_backend == "gvhmr"
+
+
+class TestSkeletonRegistry:
+    """Smoke tests for the skeleton registry module."""
+
+    def test_smplx_skeleton_basic(self):
+        from models.skeleton import SMPLX_SKELETON
+        assert SMPLX_SKELETON.n_joints == 52
+        assert SMPLX_SKELETON.n_body_joints == 22
+        assert SMPLX_SKELETON.name == "smplx_52"
+        assert len(SMPLX_SKELETON.joint_parents) == 52
+        assert len(SMPLX_SKELETON.default_offsets) == 52
+
+    def test_soma_skeleton_basic(self):
+        from models.skeleton import SOMA_SKELETON
+        assert SOMA_SKELETON.n_joints == 77
+        assert SOMA_SKELETON.n_body_joints == 22
+        assert SOMA_SKELETON.name == "soma_77"
+        assert len(SOMA_SKELETON.joint_parents) == 77
+
+    def test_smplx_skeleton_frozen(self):
+        from models.skeleton import SMPLX_SKELETON
+        import pytest
+        with pytest.raises(AttributeError):
+            SMPLX_SKELETON.name = "modified"
+
+    def test_body_model_protocol(self):
+        from models.body_model import SmplxAdapter, SomaAdapter, BodyModelAdapter
+        smplx = SmplxAdapter()
+        soma = SomaAdapter()
+        assert isinstance(smplx, BodyModelAdapter)
+        assert isinstance(soma, BodyModelAdapter)
+        assert smplx.skeleton.name == "smplx_52"
+        assert soma.skeleton.name == "soma_77"
+
+    def test_param_converter_stubs(self):
+        from models.param_converter import smplx_to_soma, soma_to_smplx
+        import pytest
+        with pytest.raises(NotImplementedError):
+            smplx_to_soma({})
+        with pytest.raises(NotImplementedError):
+            soma_to_smplx({})
