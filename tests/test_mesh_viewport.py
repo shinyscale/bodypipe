@@ -3091,3 +3091,62 @@ class TestViewportHUDWidget:
     def test_mouse_tracking_enabled(self, qapp):
         w = MeshViewport()
         assert w.hasMouseTracking()
+
+
+# ======================================================================
+# SOMA forward kinematics tests
+# ======================================================================
+
+
+class TestForwardKinematicsSoma:
+    """forward_kinematics: SOMA unified poses tensor dispatch."""
+
+    def _make_soma_params(self, n_frames=10, n_joints=77):
+        return {
+            "poses": np.zeros((n_frames, n_joints, 3), dtype=np.float32),
+            "transl": np.zeros((n_frames, 3), dtype=np.float32),
+        }
+
+    def test_output_shape(self):
+        """SOMA params should produce (77, 3) joint positions."""
+        params = self._make_soma_params()
+        pos = forward_kinematics(params, 0)
+        assert pos.shape == (77, 3)
+
+    def test_root_at_origin(self):
+        """Zero poses and zero transl → root at origin."""
+        params = self._make_soma_params()
+        pos = forward_kinematics(params, 0)
+        np.testing.assert_allclose(pos[0], [0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_root_with_translation(self):
+        """Translation should be applied to root joint."""
+        params = self._make_soma_params()
+        params["transl"][0] = [1.0, 2.0, 3.0]
+        pos = forward_kinematics(params, 0)
+        np.testing.assert_allclose(pos[0], [1.0, 2.0, 3.0], atol=1e-6)
+
+    def test_nonzero_rotation_moves_joints(self):
+        """Rotating L_Hip (joint 1) should move L_Knee (joint 4) from rest pose."""
+        params = self._make_soma_params()
+        # Get rest-pose L_Knee position
+        pos_rest = forward_kinematics(params, 0)
+        knee_rest = pos_rest[4].copy()
+
+        # Apply a 45° rotation to L_Hip
+        params["poses"][0, 1] = [0.0, 0.0, np.pi / 4]
+        pos_rot = forward_kinematics(params, 0)
+        knee_rot = pos_rot[4]
+
+        # L_Knee should have moved
+        assert not np.allclose(knee_rest, knee_rot, atol=1e-4)
+
+    def test_smplx_params_still_work(self):
+        """SMPL-X format params should still return (52, 3)."""
+        params = {
+            "global_orient": np.zeros((10, 3), dtype=np.float32),
+            "body_pose": np.zeros((10, 21, 3), dtype=np.float32),
+            "transl": np.zeros((10, 3), dtype=np.float32),
+        }
+        pos = forward_kinematics(params, 0)
+        assert pos.shape == (52, 3)

@@ -122,116 +122,19 @@ def _load_shader_source(name: str, fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Skeleton data — 52-joint SMPL-X hierarchy (from smplx_to_bvh.py)
+# Skeleton data — sourced from models/skeleton.py (single source of truth)
 # ---------------------------------------------------------------------------
 
-JOINT_NAMES = [
-    # Body (0-21)
-    "Pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee",
-    "Spine2", "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot",
-    "Neck", "L_Collar", "R_Collar", "Head", "L_Shoulder", "R_Shoulder",
-    "L_Elbow", "R_Elbow", "L_Wrist", "R_Wrist",
-    # Left hand (22-36)
-    "L_Index1", "L_Index2", "L_Index3",
-    "L_Middle1", "L_Middle2", "L_Middle3",
-    "L_Pinky1", "L_Pinky2", "L_Pinky3",
-    "L_Ring1", "L_Ring2", "L_Ring3",
-    "L_Thumb1", "L_Thumb2", "L_Thumb3",
-    # Right hand (37-51)
-    "R_Index1", "R_Index2", "R_Index3",
-    "R_Middle1", "R_Middle2", "R_Middle3",
-    "R_Pinky1", "R_Pinky2", "R_Pinky3",
-    "R_Ring1", "R_Ring2", "R_Ring3",
-    "R_Thumb1", "R_Thumb2", "R_Thumb3",
-]
+from models.skeleton import SMPLX_SKELETON as _SKEL
 
-JOINT_PARENTS = [
-    -1,  # 0  Pelvis (root)
-    0, 0, 0,       # 1 L_Hip, 2 R_Hip, 3 Spine1
-    1, 2, 3,       # 4 L_Knee, 5 R_Knee, 6 Spine2
-    4, 5, 6,       # 7 L_Ankle, 8 R_Ankle, 9 Spine3
-    7, 8,          # 10 L_Foot, 11 R_Foot
-    9, 9, 9,       # 12 Neck, 13 L_Collar, 14 R_Collar
-    12,            # 15 Head
-    13, 14,        # 16 L_Shoulder, 17 R_Shoulder
-    16, 17,        # 18 L_Elbow, 19 R_Elbow
-    18, 19,        # 20 L_Wrist, 21 R_Wrist
-    # Left hand: finger_base→wrist, then chain
-    20, 22, 23,    # L_Index 1,2,3
-    20, 25, 26,    # L_Middle 1,2,3
-    20, 28, 29,    # L_Pinky 1,2,3
-    20, 31, 32,    # L_Ring 1,2,3
-    20, 34, 35,    # L_Thumb 1,2,3
-    # Right hand
-    21, 37, 38,    # R_Index 1,2,3
-    21, 40, 41,    # R_Middle 1,2,3
-    21, 43, 44,    # R_Pinky 1,2,3
-    21, 46, 47,    # R_Ring 1,2,3
-    21, 49, 50,    # R_Thumb 1,2,3
-]
-
-DEFAULT_OFFSETS = {
-    "Pelvis": [0.003, -0.351, 0.012],
-    "L_Hip": [0.058, -0.093, -0.026], "R_Hip": [-0.063, -0.104, -0.021],
-    "Spine1": [-0.003, 0.110, -0.028],
-    "L_Knee": [0.055, -0.379, -0.009], "R_Knee": [-0.044, -0.362, -0.017],
-    "Spine2": [0.009, 0.132, -0.006],
-    "L_Ankle": [-0.043, -0.403, -0.032], "R_Ankle": [0.015, -0.411, -0.020],
-    "Spine3": [-0.011, 0.052, 0.028],
-    "L_Foot": [0.047, -0.058, 0.118], "R_Foot": [-0.039, -0.058, 0.119],
-    "Neck": [-0.012, 0.165, -0.032],
-    "L_Collar": [0.046, 0.085, -0.007], "R_Collar": [-0.048, 0.084, -0.013],
-    "Head": [0.025, 0.160, 0.021],
-    "L_Shoulder": [0.119, 0.058, -0.015], "R_Shoulder": [-0.103, 0.054, -0.013],
-    "L_Elbow": [0.254, -0.072, -0.042], "R_Elbow": [-0.271, -0.036, -0.026],
-    "L_Wrist": [0.252, 0.023, -0.002], "R_Wrist": [-0.249, -0.005, -0.015],
-    # Left hand
-    "L_Index1": [0.102, -0.009, 0.019], "L_Index2": [0.032, 0.002, 0.003],
-    "L_Index3": [0.023, -0.002, 0.000],
-    "L_Middle1": [0.109, -0.006, -0.004], "L_Middle2": [0.031, 0.001, -0.004],
-    "L_Middle3": [0.024, -0.002, -0.004],
-    "L_Pinky1": [0.084, -0.015, -0.044], "L_Pinky2": [0.015, -0.001, -0.012],
-    "L_Pinky3": [0.016, -0.002, -0.011],
-    "L_Ring1": [0.097, -0.009, -0.027], "L_Ring2": [0.028, 0.001, -0.005],
-    "L_Ring3": [0.023, -0.001, -0.007],
-    "L_Thumb1": [0.041, -0.018, 0.026], "L_Thumb2": [0.017, 0.001, 0.025],
-    "L_Thumb3": [0.021, -0.005, 0.016],
-    # Right hand
-    "R_Index1": [-0.100, -0.012, 0.020], "R_Index2": [-0.032, 0.002, 0.003],
-    "R_Index3": [-0.023, -0.002, 0.000],
-    "R_Middle1": [-0.107, -0.009, -0.004], "R_Middle2": [-0.031, 0.001, -0.004],
-    "R_Middle3": [-0.024, -0.002, -0.004],
-    "R_Pinky1": [-0.082, -0.018, -0.044], "R_Pinky2": [-0.015, -0.001, -0.012],
-    "R_Pinky3": [-0.016, -0.002, -0.011],
-    "R_Ring1": [-0.095, -0.012, -0.027], "R_Ring2": [-0.028, 0.001, -0.005],
-    "R_Ring3": [-0.023, -0.001, -0.007],
-    "R_Thumb1": [-0.039, -0.021, 0.026], "R_Thumb2": [-0.017, 0.001, 0.025],
-    "R_Thumb3": [-0.021, -0.005, 0.016],
-}
-
-# Body bone connections (indices 0-21 only — hand bones omitted for clarity)
-BONE_CONNECTIONS = [
-    # Spine chain
-    (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
-    # Left leg
-    (0, 1), (1, 4), (4, 7), (7, 10),
-    # Right leg
-    (0, 2), (2, 5), (5, 8), (8, 11),
-    # Left arm
-    (9, 13), (13, 16), (16, 18), (18, 20),
-    # Right arm
-    (9, 14), (14, 17), (17, 19), (19, 21),
-]
-
-# Add hand bones
-for _wrist, _start_idx in [(20, 22), (21, 37)]:
-    for _finger_base in range(_start_idx, _start_idx + 15, 3):
-        BONE_CONNECTIONS.append((_wrist, _finger_base))
-        BONE_CONNECTIONS.append((_finger_base, _finger_base + 1))
-        BONE_CONNECTIONS.append((_finger_base + 1, _finger_base + 2))
-
-# Number of body joints (for joint picking — only pick body, not hand joints)
-_N_BODY_JOINTS = 22
+# Module-level aliases for backward compatibility — existing code and tests
+# import these names directly from this module.
+JOINT_NAMES = list(_SKEL.joint_names)
+JOINT_PARENTS = list(_SKEL.joint_parents)
+DEFAULT_OFFSETS = _SKEL.default_offsets
+BONE_CONNECTIONS = list(_SKEL.bone_connections)
+_N_BODY_JOINTS = _SKEL.n_body_joints
+_JOINT_PALETTE = _SKEL.joint_palette
 
 # Joint picking threshold in pixels
 _JOINT_PICK_THRESHOLD = 20.0
@@ -274,33 +177,6 @@ _LABEL_OFFSET_X = 8    # pixels right of joint point
 _LABEL_OFFSET_Y = -4   # pixels above joint point center
 _LABEL_MARGIN = 4       # viewport edge margin (labels clamped inside)
 
-# Joint color palette for per-joint vertex coloring — 22 distinct colors for body joints.
-# Hand joints (22–51) inherit the color of their parent wrist (L=20, R=21).
-_JOINT_PALETTE = np.array([
-    [0.90, 0.10, 0.10],  # 0  Pelvis — red
-    [0.10, 0.72, 0.30],  # 1  L_Hip — green
-    [0.30, 0.10, 0.72],  # 2  R_Hip — purple
-    [0.90, 0.50, 0.10],  # 3  Spine1 — orange
-    [0.10, 0.90, 0.50],  # 4  L_Knee — teal
-    [0.50, 0.10, 0.90],  # 5  R_Knee — violet
-    [0.90, 0.90, 0.10],  # 6  Spine2 — yellow
-    [0.10, 0.70, 0.90],  # 7  L_Ankle — sky blue
-    [0.72, 0.10, 0.60],  # 8  R_Ankle — magenta
-    [0.60, 0.80, 0.20],  # 9  Spine3 — lime
-    [0.20, 0.50, 0.80],  # 10 L_Foot — blue
-    [0.80, 0.30, 0.50],  # 11 R_Foot — rose
-    [0.40, 0.90, 0.90],  # 12 Neck — cyan
-    [0.90, 0.60, 0.40],  # 13 L_Collar — peach
-    [0.60, 0.40, 0.90],  # 14 R_Collar — lavender
-    [0.90, 0.20, 0.50],  # 15 Head — crimson
-    [0.20, 0.90, 0.20],  # 16 L_Shoulder — bright green
-    [0.20, 0.20, 0.90],  # 17 R_Shoulder — bright blue
-    [0.80, 0.80, 0.20],  # 18 L_Elbow — gold
-    [0.20, 0.80, 0.80],  # 19 R_Elbow — aqua
-    [0.90, 0.50, 0.70],  # 20 L_Wrist — pink
-    [0.50, 0.90, 0.70],  # 21 R_Wrist — mint
-], dtype=np.float32)
-
 
 # ---------------------------------------------------------------------------
 # Pure helper functions (testable without OpenGL)
@@ -335,6 +211,57 @@ def compute_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return (vertex_normals / lengths).astype(np.float32)
 
 
+def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
+    """Compute 3D joint positions for SOMA's unified poses tensor.
+
+    Parameters
+    ----------
+    params : dict with keys poses (N, 77, 3), transl (N, 3)
+    frame_idx : which frame to compute
+
+    Returns
+    -------
+    positions : (77, 3) float64 — joint positions in camera space
+    """
+    from scipy.spatial.transform import Rotation
+    from models.skeleton import SOMA_SKELETON
+
+    n_joints = SOMA_SKELETON.n_joints
+    positions = np.zeros((n_joints, 3))
+    accumulated_R = np.zeros((n_joints, 3, 3))
+
+    offsets = np.zeros((n_joints, 3))
+    for i, name in enumerate(SOMA_SKELETON.joint_names):
+        offsets[i] = SOMA_SKELETON.default_offsets.get(name, [0, 0, 0])
+
+    poses = np.asarray(params["poses"])
+    tr = params.get("transl")
+    if tr is not None:
+        tr = np.asarray(tr)
+
+    # Root (joint 0 = global orient)
+    root_aa = poses[frame_idx, 0] if poses.ndim == 3 else poses[0]
+    accumulated_R[0] = Rotation.from_rotvec(np.asarray(root_aa).ravel()[:3]).as_matrix()
+    if tr is not None and tr.ndim >= 2 and frame_idx < tr.shape[0]:
+        positions[0] = tr[frame_idx]
+    elif tr is not None and tr.ndim == 1:
+        positions[0] = tr
+
+    parents = SOMA_SKELETON.joint_parents
+    for j in range(1, n_joints):
+        parent = parents[j]
+        if poses.ndim == 3 and frame_idx < poses.shape[0] and j < poses.shape[1]:
+            rot_aa = poses[frame_idx, j]
+        else:
+            rot_aa = np.zeros(3)
+
+        R_local = Rotation.from_rotvec(np.asarray(rot_aa).ravel()[:3]).as_matrix()
+        accumulated_R[j] = accumulated_R[parent] @ R_local
+        positions[j] = positions[parent] + accumulated_R[parent] @ offsets[j]
+
+    return positions
+
+
 def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     """Compute 3D joint positions in camera space for one frame.
 
@@ -351,6 +278,10 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     -------
     positions : (52, 3) float64 — joint positions in camera space
     """
+    # SOMA path: unified poses tensor (N, J, 3)
+    if "poses" in params and "body_pose" not in params:
+        return _forward_kinematics_soma(params, frame_idx)
+
     from scipy.spatial.transform import Rotation
 
     n_joints = len(JOINT_NAMES)
@@ -485,29 +416,9 @@ def find_nearest_joint(
 # Joint chain / region helpers (pure functions — no Qt/GL dependency)
 # ---------------------------------------------------------------------------
 
-# Left↔Right joint index mapping for body joints (0-21).
-# Hand joints (22-36 ↔ 37-51) are offset by 15.
-_LR_PAIRS = {
-    1: 2, 2: 1,       # L_Hip ↔ R_Hip
-    4: 5, 5: 4,       # L_Knee ↔ R_Knee
-    7: 8, 8: 7,       # L_Ankle ↔ R_Ankle
-    10: 11, 11: 10,   # L_Foot ↔ R_Foot
-    13: 14, 14: 13,   # L_Collar ↔ R_Collar
-    16: 17, 17: 16,   # L_Shoulder ↔ R_Shoulder
-    18: 19, 19: 18,   # L_Elbow ↔ R_Elbow
-    20: 21, 21: 20,   # L_Wrist ↔ R_Wrist
-}
-
-# Body regions — groups of joint indices sharing a kinematic purpose.
-_JOINT_REGIONS = {
-    "spine": [0, 3, 6, 9, 12, 15],
-    "left_leg": [1, 4, 7, 10],
-    "right_leg": [2, 5, 8, 11],
-    "left_arm": [13, 16, 18, 20],
-    "right_arm": [14, 17, 19, 21],
-    "left_hand": list(range(22, 37)),
-    "right_hand": list(range(37, 52)),
-}
+# Left↔Right and region data — sourced from skeleton registry.
+_LR_PAIRS = _SKEL.lr_pairs
+_JOINT_REGIONS = _SKEL.joint_regions
 
 # Reverse lookup: joint index → region name
 _JOINT_TO_REGION: dict[int, str] = {}

@@ -1134,7 +1134,7 @@ class AppWindow(QMainWindow):
                 continue
 
             confidences, confidence_breakdown = self._load_confidences_csv(pdir)
-            smplx_params = self._load_smplx_params(pdir)
+            smplx_params, soma_params, body_model_type = self._load_motion_params(pdir)
 
             pt = PersonTrack(
                 person_id=pid,
@@ -1142,6 +1142,8 @@ class AppWindow(QMainWindow):
                 confidences=confidences,
                 confidence_breakdown=confidence_breakdown,
                 smplx_params=smplx_params,
+                soma_params=soma_params,
+                body_model_type=body_model_type,
             )
             self._session.person_tracks[pid] = pt
 
@@ -1172,8 +1174,11 @@ class AppWindow(QMainWindow):
         for _pid, track in self._session.person_tracks.items():
             if not track.person_dir or not track.person_dir.is_dir():
                 continue
-            if track.smplx_params is None:
-                track.smplx_params = self._load_smplx_params(track.person_dir)
+            if track.smplx_params is None and track.soma_params is None:
+                smplx, soma, bmt = self._load_motion_params(track.person_dir)
+                track.smplx_params = smplx
+                track.soma_params = soma
+                track.body_model_type = bmt
             if track.confidences is None:
                 track.confidences, track.confidence_breakdown = (
                     self._load_confidences_csv(track.person_dir)
@@ -1409,8 +1414,10 @@ class AppWindow(QMainWindow):
                 )
 
             smplx_params = None
+            soma_params = None
+            body_model_type = "smplx"
             if person_dir:
-                smplx_params = self._load_smplx_params(person_dir)
+                smplx_params, soma_params, body_model_type = self._load_motion_params(person_dir)
 
             pt = PersonTrack(
                 person_id=tid,
@@ -1421,6 +1428,8 @@ class AppWindow(QMainWindow):
                 keyframes=keyframes,
                 confidence_breakdown=confidence_breakdown,
                 smplx_params=smplx_params,
+                soma_params=soma_params,
+                body_model_type=body_model_type,
             )
             self._session.person_tracks[tid] = pt
 
@@ -1444,7 +1453,23 @@ class AppWindow(QMainWindow):
                     except Exception:
                         pass
 
-    def _load_smplx_params(self, person_dir: Path) -> dict | None:
+    def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
+        """Load motion params — tries GEM-X (SOMA) first, falls back to GVHMR (SMPL-X)."""
+        soma_npz = person_dir / "soma_results.npz"
+        if soma_npz.is_file():
+            try:
+                from workers.gemx_worker import load_gemx_soma_output
+                soma_params = load_gemx_soma_output(person_dir)
+                if soma_params is not None:
+                    return None, soma_params, "soma"
+            except Exception:
+                pass
+        smplx_params = self._load_smplx_params_legacy(person_dir)
+        if smplx_params is not None:
+            return smplx_params, None, "smplx"
+        return None, None, "smplx"
+
+    def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
         """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering."""
         hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
         if not hmr4d_pt.is_file():

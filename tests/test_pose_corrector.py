@@ -35,6 +35,7 @@ from views.pose_corrector_panel import (
     PoseIssue,
     get_joint_euler,
     _get_joint_axis_angle,
+    _get_soma_joint_axis_angle,
     _rotation_angles_deg,
     _detect_angular_jumps,
     _detect_jitter,
@@ -52,6 +53,7 @@ from views.pose_corrector_panel import (
     euler_deg_to_axis_angle_fallback,
     flip_global_orient_fallback,
     mirror_lr_pose_fallback,
+    mirror_lr_pose_soma_fallback,
     _N_BODY_JOINTS,
     _LR_SWAP_PAIRS,
     _CollapsibleSection,
@@ -3329,3 +3331,132 @@ class TestConsistentGridLayout:
         assert _LABEL_MIN_WIDTH == 120
         assert _SPINBOX_FIXED_WIDTH == 80
         assert _SLIDER_FIXED_HEIGHT == 22
+
+
+# ======================================================================
+# SOMA helper + test session factory
+# ======================================================================
+
+def _make_soma_session(n_frames=100, n_persons=1):
+    """Create a session with SOMA person tracks for testing."""
+    session = Session(num_frames=n_frames, fps=30.0, img_width=640, img_height=480)
+    for pid in range(n_persons):
+        soma_params = {
+            "poses": np.zeros((n_frames, 77, 3), dtype=np.float32),
+            "transl": np.zeros((n_frames, 3), dtype=np.float32),
+        }
+        # Set some non-zero values
+        soma_params["poses"][0, 0] = [0.1, 0.2, 0.3]   # global orient
+        soma_params["poses"][0, 1] = [0.4, 0.5, 0.6]   # L_Hip (body joint)
+        soma_params["poses"][0, 22] = [0.7, 0.8, 0.9]  # L_Index1 (hand joint)
+        soma_params["poses"][0, 52] = [0.01, 0.02, 0.03]  # Jaw (face joint)
+
+        track = PersonTrack(
+            person_id=pid,
+            soma_params=soma_params,
+            body_model_type="soma",
+        )
+        session.person_tracks[pid] = track
+    return session
+
+
+# ======================================================================
+# SOMA pose corrector tests
+# ======================================================================
+
+
+class TestGetJointAxisAngleSoma:
+    """_get_joint_axis_angle: SOMA unified poses tensor dispatch."""
+
+    def test_global_orient(self):
+        """Joint 0 (global orient) should return poses[frame, 0]."""
+        session = _make_soma_session()
+        aa = _get_joint_axis_angle(session, 0, 0, 0)
+        np.testing.assert_allclose(aa, [0.1, 0.2, 0.3], atol=1e-6)
+
+    def test_body_joint(self):
+        """Joint 1 (L_Hip) should return poses[frame, 1]."""
+        session = _make_soma_session()
+        aa = _get_joint_axis_angle(session, 0, 0, 1)
+        np.testing.assert_allclose(aa, [0.4, 0.5, 0.6], atol=1e-6)
+
+    def test_hand_joint(self):
+        """Joint 22 (L_Index1) should return poses[frame, 22]."""
+        session = _make_soma_session()
+        aa = _get_joint_axis_angle(session, 0, 0, 22)
+        np.testing.assert_allclose(aa, [0.7, 0.8, 0.9], atol=1e-6)
+
+    def test_face_joint(self):
+        """Joint 52 (Jaw) should return poses[frame, 52]."""
+        session = _make_soma_session()
+        aa = _get_joint_axis_angle(session, 0, 0, 52)
+        np.testing.assert_allclose(aa, [0.01, 0.02, 0.03], atol=1e-6)
+
+    def test_missing_person(self):
+        """Non-existent person should return zeros."""
+        session = _make_soma_session()
+        aa = _get_joint_axis_angle(session, 99, 0, 0)
+        np.testing.assert_allclose(aa, [0.0, 0.0, 0.0])
+
+    def test_smplx_still_works(self):
+        """SMPL-X tracks should still use the existing path."""
+        session = _make_session_with_params()
+        aa = _get_joint_axis_angle(session, 0, 0, 0)
+        np.testing.assert_allclose(aa, [0.1, 0.2, 0.3], atol=1e-6)
+
+
+class TestComputePoseIssuesSoma:
+    """compute_pose_issues: SOMA tracks detected correctly."""
+
+    def test_detects_angular_jump(self):
+        """A large rotation jump in SOMA poses should be flagged."""
+        session = _make_soma_session(n_frames=10)
+        track = session.person_tracks[0]
+        # Create a big jump at frame 5 in joint 1
+        track.soma_params["poses"][5, 1] = [0.0, 0.0, np.pi]
+        issues = compute_pose_issues(session, jump_threshold_deg=45.0)
+        jump_issues = [i for i in issues if i.issue_type == "angular_jump"]
+        assert len(jump_issues) > 0
+
+    def test_no_issues_on_smooth(self):
+        """Smooth (all-zero) SOMA poses should produce no angular jump issues."""
+        session = _make_soma_session(n_frames=50)
+        # Reset the non-zero values we set in the factory
+        track = session.person_tracks[0]
+        track.soma_params["poses"][:] = 0.0
+        issues = compute_pose_issues(session, jump_threshold_deg=45.0)
+        jump_issues = [i for i in issues if i.issue_type == "angular_jump"]
+        assert len(jump_issues) == 0
+
+
+class TestMirrorSomaFallback:
+    """mirror_lr_pose_soma_fallback: L/R swap with SOMA pairs."""
+
+    def test_swaps_leg_joints(self):
+        """LeftLeg (67) and RightLeg (72) should be swapped."""
+        soma_params = {
+            "poses": np.zeros((10, 77, 3), dtype=np.float32),
+        }
+        soma_params["poses"][0, 67] = [1.0, 2.0, 3.0]  # LeftLeg
+        soma_params["poses"][0, 72] = [4.0, 5.0, 6.0]  # RightLeg
+
+        mirrored = mirror_lr_pose_soma_fallback(soma_params, 0)
+        np.testing.assert_allclose(mirrored[67], [4.0, 5.0, 6.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[72], [1.0, 2.0, 3.0], atol=1e-6)
+
+    def test_swaps_eye_pairs(self):
+        """Eye L/R pairs (LeftEye=9, RightEye=10) should also swap."""
+        soma_params = {
+            "poses": np.zeros((10, 77, 3), dtype=np.float32),
+        }
+        soma_params["poses"][0, 9] = [0.1, 0.0, 0.0]   # LeftEye
+        soma_params["poses"][0, 10] = [0.0, 0.2, 0.0]  # RightEye
+
+        mirrored = mirror_lr_pose_soma_fallback(soma_params, 0)
+        np.testing.assert_allclose(mirrored[9], [0.0, 0.2, 0.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[10], [0.1, 0.0, 0.0], atol=1e-6)
+
+    def test_empty_on_missing_poses(self):
+        """Missing 'poses' key should return empty dict."""
+        mirrored = mirror_lr_pose_soma_fallback({}, 0)
+        assert mirrored == {}
