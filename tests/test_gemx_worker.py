@@ -68,7 +68,7 @@ class TestConvertSomaToBvh:
         bvh_path = tmp_path / "test.bvh"
         convert_soma_to_bvh(params, bvh_path)
         content = bvh_path.read_text()
-        assert "ROOT Pelvis" in content
+        assert "ROOT Hips" in content
 
     def test_root_has_6_channels(self, tmp_path):
         params = _make_soma_params(n_frames=3)

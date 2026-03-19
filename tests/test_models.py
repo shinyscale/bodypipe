@@ -489,7 +489,7 @@ class TestSkeletonRegistry:
     def test_soma_skeleton_basic(self):
         from models.skeleton import SOMA_SKELETON
         assert SOMA_SKELETON.n_joints == 77
-        assert SOMA_SKELETON.n_body_joints == 22
+        assert SOMA_SKELETON.n_body_joints == 15
         assert SOMA_SKELETON.name == "soma_77"
         assert len(SOMA_SKELETON.joint_parents) == 77
 

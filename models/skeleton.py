@@ -223,125 +223,205 @@ SMPLX_SKELETON = SkeletonDef(
 
 
 # ---------------------------------------------------------------------------
-# SOMA 77-joint skeleton (placeholder — real data from py-soma-x at runtime)
+# SOMA 77-joint skeleton (from kimodo.skeleton.SOMASkeleton77)
 # ---------------------------------------------------------------------------
 
-# Placeholder: 77 joints. The first 22 body joints share names with SMPL-X.
-# Joints 22-76 are placeholder names that will be replaced when py-soma-x
-# is available and we can read soma.rig_data["joint_names"].
 _SOMA_JOINT_NAMES = (
-    # Body (0-21) — same naming as SMPL-X
-    "Pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee",
-    "Spine2", "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot",
-    "Neck", "L_Collar", "R_Collar", "Head", "L_Shoulder", "R_Shoulder",
-    "L_Elbow", "R_Elbow", "L_Wrist", "R_Wrist",
-    # Left hand (22-36) — 15 joints
-    "L_Index1", "L_Index2", "L_Index3",
-    "L_Middle1", "L_Middle2", "L_Middle3",
-    "L_Pinky1", "L_Pinky2", "L_Pinky3",
-    "L_Ring1", "L_Ring2", "L_Ring3",
-    "L_Thumb1", "L_Thumb2", "L_Thumb3",
-    # Right hand (37-51) — 15 joints
-    "R_Index1", "R_Index2", "R_Index3",
-    "R_Middle1", "R_Middle2", "R_Middle3",
-    "R_Pinky1", "R_Pinky2", "R_Pinky3",
-    "R_Ring1", "R_Ring2", "R_Ring3",
-    "R_Thumb1", "R_Thumb2", "R_Thumb3",
-    # Face (52-76) — 25 placeholder joints
-    "Jaw",
-    "L_Eye", "R_Eye",
-    "L_Brow_Inner", "L_Brow_Mid", "L_Brow_Outer",
-    "R_Brow_Inner", "R_Brow_Mid", "R_Brow_Outer",
-    "L_Cheek", "R_Cheek",
-    "Nose_Tip",
-    "Upper_Lip", "Lower_Lip",
-    "L_Lip_Corner", "R_Lip_Corner",
-    "L_Eyelid_Upper", "L_Eyelid_Lower",
-    "R_Eyelid_Upper", "R_Eyelid_Lower",
-    "L_Nostril", "R_Nostril",
-    "Chin",
-    "L_Ear", "R_Ear",
+    # Spine / head (0-10)
+    "Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "Head", "HeadEnd",
+    "Jaw", "LeftEye", "RightEye",
+    # Left arm (11-14)
+    "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
+    # Left fingers (15-38) — thumb(4) + index(5) + middle(5) + ring(5) + pinky(5) = 24
+    "LeftHandThumb1", "LeftHandThumb2", "LeftHandThumb3", "LeftHandThumb4",
+    "LeftHandIndex1", "LeftHandIndex2", "LeftHandIndex3", "LeftHandIndex4", "LeftHandIndex5",
+    "LeftHandMiddle1", "LeftHandMiddle2", "LeftHandMiddle3", "LeftHandMiddle4", "LeftHandMiddle5",
+    "LeftHandRing1", "LeftHandRing2", "LeftHandRing3", "LeftHandRing4", "LeftHandRing5",
+    "LeftHandPinky1", "LeftHandPinky2", "LeftHandPinky3", "LeftHandPinky4", "LeftHandPinky5",
+    # Right arm (39-42)
+    "RightShoulder", "RightArm", "RightForeArm", "RightHand",
+    # Right fingers (43-66) — thumb(4) + index(5) + middle(5) + ring(5) + pinky(5) = 24
+    "RightHandThumb1", "RightHandThumb2", "RightHandThumb3", "RightHandThumb4",
+    "RightHandIndex1", "RightHandIndex2", "RightHandIndex3", "RightHandIndex4", "RightHandIndex5",
+    "RightHandMiddle1", "RightHandMiddle2", "RightHandMiddle3", "RightHandMiddle4", "RightHandMiddle5",
+    "RightHandRing1", "RightHandRing2", "RightHandRing3", "RightHandRing4", "RightHandRing5",
+    "RightHandPinky1", "RightHandPinky2", "RightHandPinky3", "RightHandPinky4", "RightHandPinky5",
+    # Left leg (67-71)
+    "LeftLeg", "LeftShin", "LeftFoot", "LeftToeBase", "LeftToeEnd",
+    # Right leg (72-76)
+    "RightLeg", "RightShin", "RightFoot", "RightToeBase", "RightToeEnd",
 )
 
-# Placeholder parents — body matches SMPL-X, face joints parent to Head (15)
 _SOMA_JOINT_PARENTS = (
-    -1,  # 0  Pelvis (root)
-    0, 0, 0,       # 1-3
-    1, 2, 3,       # 4-6
-    4, 5, 6,       # 7-9
-    7, 8,          # 10-11
-    9, 9, 9,       # 12-14
-    12,            # 15 Head
-    13, 14,        # 16-17
-    16, 17,        # 18-19
-    18, 19,        # 20-21
-    # Left hand
-    20, 22, 23,
-    20, 25, 26,
-    20, 28, 29,
-    20, 31, 32,
-    20, 34, 35,
-    # Right hand
-    21, 37, 38,
-    21, 40, 41,
-    21, 43, 44,
-    21, 46, 47,
-    21, 49, 50,
-    # Face — all parented to Head (15)
-    15,            # 52 Jaw
-    15, 15,        # 53-54 Eyes
-    15, 15, 15,    # 55-57 L_Brow
-    15, 15, 15,    # 58-60 R_Brow
-    15, 15,        # 61-62 Cheeks
-    15,            # 63 Nose_Tip
-    52, 52,        # 64-65 Lips (parent to Jaw)
-    52, 52,        # 66-67 Lip corners (parent to Jaw)
-    53, 53,        # 68-69 L eyelids (parent to L_Eye)
-    54, 54,        # 70-71 R eyelids (parent to R_Eye)
-    15, 15,        # 72-73 Nostrils
-    52,            # 74 Chin (parent to Jaw)
-    15, 15,        # 75-76 Ears
+    -1,  # 0  Hips (root)
+    0, 1, 2,          # 1 Spine1, 2 Spine2, 3 Chest
+    3, 4, 5,          # 4 Neck1, 5 Neck2, 6 Head
+    6, 6, 6, 6,       # 7 HeadEnd, 8 Jaw, 9 LeftEye, 10 RightEye
+    3,                # 11 LeftShoulder
+    11, 12, 13,       # 12 LeftArm, 13 LeftForeArm, 14 LeftHand
+    # Left thumb (15-18): 14→15→16→17→18
+    14, 15, 16, 17,
+    # Left index (19-23): 14→19→20→21→22→23
+    14, 19, 20, 21, 22,
+    # Left middle (24-28): 14→24→25→26→27→28
+    14, 24, 25, 26, 27,
+    # Left ring (29-33): 14→29→30→31→32→33
+    14, 29, 30, 31, 32,
+    # Left pinky (34-38): 14→34→35→36→37→38
+    14, 34, 35, 36, 37,
+    3,                # 39 RightShoulder
+    39, 40, 41,       # 40 RightArm, 41 RightForeArm, 42 RightHand
+    # Right thumb (43-46): 42→43→44→45→46
+    42, 43, 44, 45,
+    # Right index (47-51): 42→47→48→49→50→51
+    42, 47, 48, 49, 50,
+    # Right middle (52-56): 42→52→53→54→55→56
+    42, 52, 53, 54, 55,
+    # Right ring (57-61): 42→57→58→59→60→61
+    42, 57, 58, 59, 60,
+    # Right pinky (62-66): 42→62→63→64→65→66
+    42, 62, 63, 64, 65,
+    0,                # 67 LeftLeg
+    67, 68, 69, 70,   # 68 LeftShin, 69 LeftFoot, 70 LeftToeBase, 71 LeftToeEnd
+    0,                # 72 RightLeg
+    72, 73, 74, 75,   # 73 RightShin, 74 RightFoot, 75 RightToeBase, 76 RightToeEnd
 )
 
-# Placeholder offsets — zeros for face joints, body matches SMPL-X
-_SOMA_DEFAULT_OFFSETS = dict(_SMPLX_DEFAULT_OFFSETS)
-for _name in _SOMA_JOINT_NAMES[52:]:
-    _SOMA_DEFAULT_OFFSETS[_name] = [0.0, 0.0, 0.0]
+# Parent-relative offsets from SOMASkeleton77.neutral_joints (meters)
+_SOMA_DEFAULT_OFFSETS = {
+    "Hips": [0.000, 0.923, 0.000],
+    "Spine1": [0.000, 0.103, -0.012],
+    "Spine2": [0.000, 0.104, 0.003],
+    "Chest": [0.000, 0.137, 0.015],
+    "Neck1": [0.000, 0.146, -0.019],
+    "Neck2": [0.000, 0.057, 0.002],
+    "Head": [0.000, 0.076, 0.017],
+    "HeadEnd": [0.000, 0.159, 0.029],
+    "Jaw": [0.000, 0.012, 0.064],
+    "LeftEye": [0.032, 0.074, 0.066],
+    "RightEye": [-0.032, 0.074, 0.066],
+    "LeftShoulder": [0.040, 0.114, -0.005],
+    "LeftArm": [0.127, 0.031, -0.011],
+    "LeftForeArm": [0.262, -0.017, -0.014],
+    "LeftHand": [0.249, 0.001, 0.003],
+    "LeftHandThumb1": [0.035, -0.010, 0.024],
+    "LeftHandThumb2": [0.025, -0.003, 0.019],
+    "LeftHandThumb3": [0.020, -0.002, 0.014],
+    "LeftHandThumb4": [0.016, -0.002, 0.011],
+    "LeftHandIndex1": [0.093, -0.006, 0.021],
+    "LeftHandIndex2": [0.033, 0.001, 0.003],
+    "LeftHandIndex3": [0.023, -0.001, 0.001],
+    "LeftHandIndex4": [0.018, -0.001, 0.000],
+    "LeftHandIndex5": [0.014, -0.001, 0.000],
+    "LeftHandMiddle1": [0.098, -0.003, 0.001],
+    "LeftHandMiddle2": [0.034, 0.001, -0.002],
+    "LeftHandMiddle3": [0.024, -0.001, -0.002],
+    "LeftHandMiddle4": [0.019, -0.001, -0.001],
+    "LeftHandMiddle5": [0.015, -0.001, -0.001],
+    "LeftHandRing1": [0.088, -0.007, -0.020],
+    "LeftHandRing2": [0.030, 0.001, -0.004],
+    "LeftHandRing3": [0.022, -0.001, -0.003],
+    "LeftHandRing4": [0.017, -0.001, -0.003],
+    "LeftHandRing5": [0.013, -0.001, -0.002],
+    "LeftHandPinky1": [0.076, -0.012, -0.038],
+    "LeftHandPinky2": [0.020, -0.001, -0.006],
+    "LeftHandPinky3": [0.015, -0.001, -0.005],
+    "LeftHandPinky4": [0.012, -0.001, -0.004],
+    "LeftHandPinky5": [0.010, -0.001, -0.003],
+    "RightShoulder": [-0.040, 0.114, -0.005],
+    "RightArm": [-0.127, 0.031, -0.011],
+    "RightForeArm": [-0.262, -0.017, -0.014],
+    "RightHand": [-0.249, 0.001, 0.003],
+    "RightHandThumb1": [-0.035, -0.010, 0.024],
+    "RightHandThumb2": [-0.025, -0.003, 0.019],
+    "RightHandThumb3": [-0.020, -0.002, 0.014],
+    "RightHandThumb4": [-0.016, -0.002, 0.011],
+    "RightHandIndex1": [-0.093, -0.006, 0.021],
+    "RightHandIndex2": [-0.033, 0.001, 0.003],
+    "RightHandIndex3": [-0.023, -0.001, 0.001],
+    "RightHandIndex4": [-0.018, -0.001, 0.000],
+    "RightHandIndex5": [-0.014, -0.001, 0.000],
+    "RightHandMiddle1": [-0.098, -0.003, 0.001],
+    "RightHandMiddle2": [-0.034, 0.001, -0.002],
+    "RightHandMiddle3": [-0.024, -0.001, -0.002],
+    "RightHandMiddle4": [-0.019, -0.001, -0.001],
+    "RightHandMiddle5": [-0.015, -0.001, -0.001],
+    "RightHandRing1": [-0.088, -0.007, -0.020],
+    "RightHandRing2": [-0.030, 0.001, -0.004],
+    "RightHandRing3": [-0.022, -0.001, -0.003],
+    "RightHandRing4": [-0.017, -0.001, -0.003],
+    "RightHandRing5": [-0.013, -0.001, -0.002],
+    "RightHandPinky1": [-0.076, -0.012, -0.038],
+    "RightHandPinky2": [-0.020, -0.001, -0.006],
+    "RightHandPinky3": [-0.015, -0.001, -0.005],
+    "RightHandPinky4": [-0.012, -0.001, -0.004],
+    "RightHandPinky5": [-0.010, -0.001, -0.003],
+    "LeftLeg": [0.075, -0.045, 0.001],
+    "LeftShin": [0.013, -0.397, -0.013],
+    "LeftFoot": [-0.007, -0.398, -0.027],
+    "LeftToeBase": [0.020, -0.058, 0.108],
+    "LeftToeEnd": [0.000, -0.010, 0.060],
+    "RightLeg": [-0.075, -0.045, 0.001],
+    "RightShin": [-0.013, -0.397, -0.013],
+    "RightFoot": [0.007, -0.398, -0.027],
+    "RightToeBase": [-0.020, -0.058, 0.108],
+    "RightToeEnd": [0.000, -0.010, 0.060],
+}
 
-# Bone connections — body + hand from SMPL-X, plus face bones
-_SOMA_BONE_CONNECTIONS: list[tuple[int, int]] = list(_SMPLX_BONE_CONNECTIONS)
-# Face bones: Head→Jaw, Head→Eyes, Jaw→Lips, etc.
-_SOMA_BONE_CONNECTIONS.extend([
-    (15, 52),  # Head → Jaw
-    (15, 53), (15, 54),  # Head → Eyes
-    (52, 64), (52, 65),  # Jaw → Lips
-    (52, 66), (52, 67),  # Jaw → Lip corners
-    (53, 68), (53, 69),  # L_Eye → eyelids
-    (54, 70), (54, 71),  # R_Eye → eyelids
-    (52, 74),  # Jaw → Chin
-])
-
-# SOMA uses same L/R body swap pairs as SMPL-X, plus face pairs
-_SOMA_LR_SWAP_PAIRS = list(_SMPLX_LR_SWAP_PAIRS) + [
-    (53, 54),   # L_Eye <-> R_Eye
-    (55, 58),   # L_Brow_Inner <-> R_Brow_Inner
-    (56, 59),   # L_Brow_Mid <-> R_Brow_Mid
-    (57, 60),   # L_Brow_Outer <-> R_Brow_Outer
-    (61, 62),   # L_Cheek <-> R_Cheek
-    (66, 67),   # L_Lip_Corner <-> R_Lip_Corner
-    (68, 70),   # L_Eyelid_Upper <-> R_Eyelid_Upper
-    (69, 71),   # L_Eyelid_Lower <-> R_Eyelid_Lower
-    (72, 73),   # L_Nostril <-> R_Nostril
-    (75, 76),   # L_Ear <-> R_Ear
+# Bone connections derived from parent hierarchy (every parent→child pair)
+_SOMA_BONE_CONNECTIONS: list[tuple[int, int]] = [
+    (_SOMA_JOINT_PARENTS[i], i) for i in range(1, 77)
 ]
 
-_SOMA_LR_PAIRS = dict(_SMPLX_LR_PAIRS)
+_SOMA_LR_SWAP_PAIRS = [
+    (9, 10),    # LeftEye <-> RightEye
+    (11, 39),   # LeftShoulder <-> RightShoulder
+    (12, 40),   # LeftArm <-> RightArm
+    (13, 41),   # LeftForeArm <-> RightForeArm
+    (14, 42),   # LeftHand <-> RightHand
+] + [
+    (15 + i, 43 + i) for i in range(24)  # Left fingers 15-38 <-> Right fingers 43-66
+] + [
+    (67, 72),   # LeftLeg <-> RightLeg
+    (68, 73),   # LeftShin <-> RightShin
+    (69, 74),   # LeftFoot <-> RightFoot
+    (70, 75),   # LeftToeBase <-> RightToeBase
+    (71, 76),   # LeftToeEnd <-> RightToeEnd
+]
+
+_SOMA_LR_PAIRS: dict[int, int] = {}
 for _l, _r in _SOMA_LR_SWAP_PAIRS:
     _SOMA_LR_PAIRS[_l] = _r
     _SOMA_LR_PAIRS[_r] = _l
 
-_SOMA_JOINT_REGIONS = dict(_SMPLX_JOINT_REGIONS)
-_SOMA_JOINT_REGIONS["face"] = list(range(52, 77))
+_SOMA_JOINT_REGIONS = {
+    "spine": [0, 1, 2, 3],
+    "neck_head": [4, 5, 6, 7, 8, 9, 10],
+    "left_arm": [11, 12, 13, 14],
+    "right_arm": [39, 40, 41, 42],
+    "left_hand": list(range(15, 39)),
+    "right_hand": list(range(43, 67)),
+    "left_leg": [67, 68, 69, 70, 71],
+    "right_leg": [72, 73, 74, 75, 76],
+}
+
+_SOMA_JOINT_PALETTE = np.array([
+    [0.90, 0.10, 0.10],  # 0  Hips — red
+    [0.90, 0.50, 0.10],  # 1  Spine1 — orange
+    [0.90, 0.90, 0.10],  # 2  Spine2 — yellow
+    [0.60, 0.80, 0.20],  # 3  Chest — lime
+    [0.40, 0.90, 0.90],  # 4  Neck1 — cyan
+    [0.20, 0.80, 0.80],  # 5  Neck2 — aqua
+    [0.90, 0.20, 0.50],  # 6  Head — crimson
+    [0.80, 0.30, 0.50],  # 7  HeadEnd — rose
+    [0.72, 0.10, 0.60],  # 8  Jaw — magenta
+    [0.10, 0.72, 0.30],  # 9  LeftEye — green
+    [0.30, 0.10, 0.72],  # 10 RightEye — purple
+    [0.90, 0.60, 0.40],  # 11 LeftShoulder — peach
+    [0.20, 0.90, 0.20],  # 12 LeftArm — bright green
+    [0.80, 0.80, 0.20],  # 13 LeftForeArm — gold
+    [0.90, 0.50, 0.70],  # 14 LeftHand — pink
+], dtype=np.float32)
 
 SOMA_SKELETON = SkeletonDef(
     name="soma_77",
@@ -349,9 +429,9 @@ SOMA_SKELETON = SkeletonDef(
     joint_parents=_SOMA_JOINT_PARENTS,
     default_offsets=_SOMA_DEFAULT_OFFSETS,
     bone_connections=_SOMA_BONE_CONNECTIONS,
-    n_body_joints=22,
+    n_body_joints=15,
     lr_swap_pairs=_SOMA_LR_SWAP_PAIRS,
     lr_pairs=_SOMA_LR_PAIRS,
     joint_regions=_SOMA_JOINT_REGIONS,
-    joint_palette=_SMPLX_JOINT_PALETTE,  # same 22-color body palette
+    joint_palette=_SOMA_JOINT_PALETTE,
 )

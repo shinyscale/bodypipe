@@ -91,14 +91,16 @@ def _cosine_crossfade(
 
 
 def _try_import_kimodo():
-    """Lazily import kimodo. Returns (load_model, FullBodyConstraintSet, SOMASkeleton30, SOMASkeleton77) or Nones."""
+    """Lazily import kimodo. Returns (load_model, FullBodyConstraintSet, SOMASkeleton30, SOMASkeleton77, axis_angle_to_matrix, matrix_to_axis_angle) or Nones."""
     try:
         from kimodo import load_model
         from kimodo.constraints import FullBodyConstraintSet
         from kimodo.skeleton import SOMASkeleton30, SOMASkeleton77
-        return load_model, FullBodyConstraintSet, SOMASkeleton30, SOMASkeleton77
+        from kimodo.geometry import axis_angle_to_matrix, matrix_to_axis_angle
+        import torch  # noqa: F401 — needed at call site
+        return load_model, FullBodyConstraintSet, SOMASkeleton30, SOMASkeleton77, axis_angle_to_matrix, matrix_to_axis_angle
     except ImportError:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
 
 class KimodoWorker(QThread):
@@ -119,10 +121,12 @@ class KimodoWorker(QThread):
 
     def run(self):
         try:
+            import torch
+
             req = self._request
             self.progress.emit(0.0, "Loading Kimodo model...")
 
-            load_model, FullBodyConstraintSet, Skel30, Skel77 = _try_import_kimodo()
+            load_model, FullBodyConstraintSet, Skel30, Skel77, axis_angle_to_matrix, matrix_to_axis_angle = _try_import_kimodo()
             if load_model is None:
                 self.error.emit(
                     "Kimodo not installed. Install from NVIDIA repo: pip install kimodo"
@@ -134,7 +138,7 @@ class KimodoWorker(QThread):
 
             # Load model
             self.progress.emit(0.1, f"Loading {req.model_name}...")
-            model = load_model(req.model_name)
+            model = load_model(req.model_name, device="cuda")
             self.log_line.emit(f"Kimodo model loaded: {req.model_name}")
 
             if self._cancelled:
@@ -142,6 +146,7 @@ class KimodoWorker(QThread):
 
             # Extract boundary keyframes
             poses = np.asarray(req.soma_params["poses"], dtype=np.float32)
+            transl = np.asarray(req.soma_params["transl"], dtype=np.float32)
             n_frames = poses.shape[0]
             start = max(0, req.start_frame)
             end = min(n_frames - 1, req.end_frame)
@@ -149,15 +154,28 @@ class KimodoWorker(QThread):
 
             self.progress.emit(0.2, f"Building constraints for frames {start}-{end}...")
 
-            # Downconvert 77 → 30 for Kimodo's internal representation
-            start_pose_77 = poses[start]  # (77, 3)
-            end_pose_77 = poses[end]      # (77, 3)
+            # Boundary frames axis-angle → rotation matrices for FK
+            boundary_aa = torch.tensor(
+                np.stack([poses[start], poses[end]]),  # (2, 77, 3)
+                dtype=torch.float32, device="cuda",
+            )
+            boundary_transl = torch.tensor(
+                np.stack([transl[start], transl[end]]),  # (2, 3)
+                dtype=torch.float32, device="cuda",
+            )
+            boundary_rotmats = axis_angle_to_matrix(boundary_aa)  # (2, 77, 3, 3)
 
-            # Build constraint set from boundary keyframes
-            constraints = FullBodyConstraintSet()
-            constraints.add_keyframe(0, start_pose_77)
-            constraints.add_keyframe(span_length - 1, end_pose_77)
-            constraints.set_text(req.text_prompt)
+            # FK for global positions/rotations using full 77-joint skeleton
+            skel77 = Skel77()
+            global_rots, global_pos, _ = skel77.fk(boundary_rotmats, boundary_transl)  # (2, 77, 3)
+
+            # Build constraint from boundary global poses
+            constraint = FullBodyConstraintSet(
+                skeleton=skel77,
+                frame_indices=torch.tensor([0, span_length - 1], device="cuda"),
+                global_joints_positions=global_pos,
+                global_joints_rots=global_rots,
+            )
 
             if self._cancelled:
                 return
@@ -166,10 +184,14 @@ class KimodoWorker(QThread):
             self.progress.emit(0.4, "Running Kimodo diffusion...")
             self.log_line.emit(f"Generating {span_length} frames: \"{req.text_prompt}\"")
 
-            generated_30 = model.generate(
-                constraints=constraints,
-                n_frames=span_length,
-                guidance_scale=7.5,
+            output = model(
+                prompts=req.text_prompt,
+                num_frames=span_length,
+                num_denoising_steps=20,
+                constraint_lst=[constraint],
+                cfg_weight=[2.0, 2.0],
+                return_numpy=False,
+                post_processing=True,
             )
 
             if self._cancelled:
@@ -177,9 +199,11 @@ class KimodoWorker(QThread):
 
             self.progress.emit(0.8, "Upconverting 30→77 joints...")
 
-            # Upconvert 30 → 77
-            generated_77 = Skel30.to_SOMASkeleton77(generated_30)
-            self.log_line.emit(f"Generated: {generated_77.shape[0]} frames @ 77 joints")
+            # Output local_rot_mats is (1, T, 30, 3, 3) — upconvert to 77 joints
+            local_rot_mats = output.local_rot_mats  # (1, T, 30, 3, 3)
+            rot77 = Skel30().to_SOMASkeleton77(local_rot_mats)  # (1, T, 77, 3, 3)
+            generated_aa = matrix_to_axis_angle(rot77)[0].cpu().numpy()  # (T, 77, 3)
+            self.log_line.emit(f"Generated: {generated_aa.shape[0]} frames @ 77 joints")
 
             # Build blended result
             self.progress.emit(0.9, "Blending...")
@@ -188,10 +212,10 @@ class KimodoWorker(QThread):
             blend_end = min(n_frames - 1, end + blend)
 
             original_region = poses[blend_start:blend_end + 1].copy()
-            blended = _cosine_crossfade(original_region, generated_77, blend)
+            blended = _cosine_crossfade(original_region, generated_aa, blend)
 
             result = KimodoResult(
-                poses=generated_77,
+                poses=generated_aa,
                 start_frame=start,
                 end_frame=end,
                 blended_poses=blended,

@@ -174,10 +174,9 @@ class GEMXWorker(SubprocessWorkerBase):
     def _gemx_command(self) -> list[str]:
         cmd = [
             sys.executable,
-            "demo_soma.py",
+            "scripts/demo/demo_soma.py",
             f"--video={self._video_path}",
-            f"--output_dir={self._output_dir}",
-            f"--fps={self._fps}",
+            f"--output_root={self._output_dir}",
         ]
         if self._config.static_cam:
             cmd.append("--static_cam")

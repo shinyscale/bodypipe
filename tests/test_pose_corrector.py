@@ -3432,29 +3432,29 @@ class TestComputePoseIssuesSoma:
 class TestMirrorSomaFallback:
     """mirror_lr_pose_soma_fallback: L/R swap with SOMA pairs."""
 
-    def test_swaps_hip_joints(self):
-        """L_Hip (1) and R_Hip (2) should be swapped."""
+    def test_swaps_leg_joints(self):
+        """LeftLeg (67) and RightLeg (72) should be swapped."""
         soma_params = {
             "poses": np.zeros((10, 77, 3), dtype=np.float32),
         }
-        soma_params["poses"][0, 1] = [1.0, 2.0, 3.0]  # L_Hip
-        soma_params["poses"][0, 2] = [4.0, 5.0, 6.0]  # R_Hip
+        soma_params["poses"][0, 67] = [1.0, 2.0, 3.0]  # LeftLeg
+        soma_params["poses"][0, 72] = [4.0, 5.0, 6.0]  # RightLeg
 
         mirrored = mirror_lr_pose_soma_fallback(soma_params, 0)
-        np.testing.assert_allclose(mirrored[1], [4.0, 5.0, 6.0], atol=1e-6)
-        np.testing.assert_allclose(mirrored[2], [1.0, 2.0, 3.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[67], [4.0, 5.0, 6.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[72], [1.0, 2.0, 3.0], atol=1e-6)
 
-    def test_swaps_face_pairs(self):
-        """Face L/R pairs (e.g. L_Eye=53, R_Eye=54) should also swap."""
+    def test_swaps_eye_pairs(self):
+        """Eye L/R pairs (LeftEye=9, RightEye=10) should also swap."""
         soma_params = {
             "poses": np.zeros((10, 77, 3), dtype=np.float32),
         }
-        soma_params["poses"][0, 53] = [0.1, 0.0, 0.0]  # L_Eye
-        soma_params["poses"][0, 54] = [0.0, 0.2, 0.0]  # R_Eye
+        soma_params["poses"][0, 9] = [0.1, 0.0, 0.0]   # LeftEye
+        soma_params["poses"][0, 10] = [0.0, 0.2, 0.0]  # RightEye
 
         mirrored = mirror_lr_pose_soma_fallback(soma_params, 0)
-        np.testing.assert_allclose(mirrored[53], [0.0, 0.2, 0.0], atol=1e-6)
-        np.testing.assert_allclose(mirrored[54], [0.1, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[9], [0.0, 0.2, 0.0], atol=1e-6)
+        np.testing.assert_allclose(mirrored[10], [0.1, 0.0, 0.0], atol=1e-6)
 
     def test_empty_on_missing_poses(self):
         """Missing 'poses' key should return empty dict."""
