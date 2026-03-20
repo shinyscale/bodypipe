@@ -440,6 +440,11 @@ class AppWindow(QMainWindow):
         save_session_action.triggered.connect(self._on_save_session)
         file_menu.addAction(save_session_action)
 
+        save_as_action = QAction("Save Session &As...", self)
+        save_as_action.setShortcut("Ctrl+Shift+S")
+        save_as_action.triggered.connect(self._on_save_session_as)
+        file_menu.addAction(save_as_action)
+
         file_menu.addSeparator()
 
         self._recent_menu = QMenu("Recent Sessions", self)
@@ -1742,6 +1747,26 @@ class AppWindow(QMainWindow):
         self._session_path = save_path
         self._add_recent(save_path)
         self.set_status(f"Session saved to {save_path.name}")
+        self.session_saved.emit(save_path)
+
+    def _on_save_session_as(self):
+        """Save session to a user-chosen location."""
+        default_dir = str(self._session.output_dir) if self._session.output_dir else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Session As", default_dir,
+            "Session Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        save_path = Path(path)
+        try:
+            self._session.save(save_path)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Failed to save session:\n{e}")
+            return
+        self._session_path = save_path
+        self._add_recent(save_path)
+        self.set_status(f"Session saved to {save_path}")
         self.session_saved.emit(save_path)
 
     def _on_open_session(self):

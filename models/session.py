@@ -149,16 +149,25 @@ class PersonTrack:
         }
         if self.identity_track is not None and hasattr(self.identity_track, "to_dict"):
             d["identity_track"] = self.identity_track.to_dict()
+        if self.bbox_corrections is not None:
+            d["bbox_corrections"] = self.bbox_corrections.tolist()
+        if self.original_bboxes is not None:
+            d["original_bboxes"] = self.original_bboxes.tolist()
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> PersonTrack:
-        return cls(
+        pt = cls(
             person_id=data.get("person_id", -1),
             person_dir=Path(data["person_dir"]) if data.get("person_dir") else None,
             body_model_type=data.get("body_model_type", "smplx"),
             keyframes=data.get("keyframes", []),
         )
+        if "bbox_corrections" in data:
+            pt.bbox_corrections = np.array(data["bbox_corrections"], dtype=float)
+        if "original_bboxes" in data:
+            pt.original_bboxes = np.array(data["original_bboxes"], dtype=float)
+        return pt
 
 
 @dataclass
