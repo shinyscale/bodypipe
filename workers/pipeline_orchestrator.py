@@ -727,6 +727,7 @@ class MultiPersonWorker(QThread):
                 render_overlays=self._config.render_overlays,
                 use_inpainting=self._config.use_inpainting,
                 progress_callback=progress_callback,
+                estimation_backend=self._config.estimation_backend,
             )
 
             if self._cancelled:

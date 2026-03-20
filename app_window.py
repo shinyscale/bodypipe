@@ -778,6 +778,9 @@ class AppWindow(QMainWindow):
         self._identity_inspector.reprocess_requested.connect(self._on_reprocess_requested)
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
 
+        # Auto-raise PoseCorrector dock when a joint is clicked in 3D viewport
+        self._mesh_viewport.joint_clicked.connect(self._on_joint_clicked_auto_raise)
+
         # Speed sync between video player and track timeline
         self._video_player.speed_changed.connect(self._track_overview.set_speed)
         self._track_overview.speed_changed.connect(self._video_player.set_playback_speed)
@@ -1267,20 +1270,31 @@ class AppWindow(QMainWindow):
         self._identity_inspector.refresh()
         self._show_frame(self._session.current_frame)
 
+    def _on_joint_clicked_auto_raise(self, joint_idx: int):
+        """Auto-raise PoseCorrector dock when a joint is clicked in 3D viewport."""
+        if joint_idx >= 0 and self._pipeline_dock.current_mode == "multi":
+            self._pose_corrector_dock.setVisible(True)
+            self._pose_corrector_dock.raise_()
+
     # ------------------------------------------------------------------
     # Pipeline output handling
     # ------------------------------------------------------------------
 
     def _on_pipeline_output(self, result: dict):
-        """Handle single/perf pipeline completion — load output preview."""
+        """Handle single/perf pipeline completion — load output preview and switch workspace."""
         output_dir = result.get("output_dir")
         if output_dir:
             self._session.output_dir = Path(output_dir)
+        loaded = False
         for key in ("side_by_side", "incam"):
             path = result.get(key)
             if path and Path(path).is_file():
                 self._load_output_preview(Path(path))
+                loaded = True
                 break
+        # Auto-switch to Review workspace if we loaded results
+        if loaded or result.get("soma_params") or result.get("merged_pt"):
+            self._apply_preset("Review")
 
     def _load_output_preview(self, video_path: Path):
         """Load an output video into the shared VideoPlayer."""
@@ -1293,7 +1307,7 @@ class AppWindow(QMainWindow):
         self._video_player.set_video(video_path, num_frames, fps)
 
     def _on_multi_pipeline_finished(self, result: dict):
-        """Handle multi pipeline completion — load tracks and refresh UI."""
+        """Handle multi pipeline completion — load tracks, auto-detect issues, switch workspace."""
         output_dir = result.get("output_dir")
         if output_dir:
             self._session.output_dir = Path(output_dir)
@@ -1303,6 +1317,14 @@ class AppWindow(QMainWindow):
             self._load_person_tracks_from_result(multi_result)
 
         self._refresh_all_panels()
+
+        # Auto-detect pose issues and switch to Correction workspace
+        if self._session.person_tracks:
+            try:
+                self._pose_corrector.run_auto_detection()
+            except Exception as exc:
+                log.warning("Auto-detection failed: %s", exc)
+            self._apply_preset("Correction")
 
     # ------------------------------------------------------------------
     # Reprocess
@@ -1453,16 +1475,21 @@ class AppWindow(QMainWindow):
                         pass
 
     def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
-        """Load motion params — tries GEM-X (SOMA) first, falls back to GVHMR (SMPL-X)."""
-        soma_npz = person_dir / "soma_results.npz"
-        if soma_npz.is_file():
-            try:
-                from workers.gemx_worker import load_gemx_soma_output
-                soma_params = load_gemx_soma_output(person_dir)
+        """Load motion params — tries GEM-X (hpe_results.pt / SOMA) first, falls back to GVHMR (SMPL-X)."""
+        # GEM-X primary: hpe_results.pt (torch dict with body_params_global)
+        try:
+            from workers.gemx_worker import load_gemx_soma_output
+            soma_params = load_gemx_soma_output(person_dir)
+            if soma_params is not None:
+                return None, soma_params, "soma"
+            # Also check gemx_demo subdirectory
+            gemx_demo = person_dir / "gemx_demo"
+            if gemx_demo.is_dir():
+                soma_params = load_gemx_soma_output(gemx_demo)
                 if soma_params is not None:
                     return None, soma_params, "soma"
-            except Exception:
-                pass
+        except Exception:
+            pass
         smplx_params = self._load_smplx_params_legacy(person_dir)
         if smplx_params is not None:
             return smplx_params, None, "smplx"

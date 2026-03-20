@@ -33,17 +33,70 @@ _GEMX_STAGES: list[tuple[float, float, str]] = [
 def load_gemx_soma_output(output_dir: Path) -> dict | None:
     """Load SOMA params from GEM-X output directory.
 
-    GEM-X saves results as .npz with keys:
-    - poses: (N, 77, 3) axis-angle per joint
-    - transl: (N, 3)
-    - global_orient: (N, 3)
-    - identity_coeffs: (1, 45)
-    - scale_params: (1, 68)
-    - identity_model_type: str
+    GEM-X outputs ``hpe_results.pt`` (a torch dict) containing:
+    - ``body_params_global``: dict with ``body_pose`` (L,63), ``global_orient`` (L,3),
+      ``transl`` (L,3), ``identity_coeffs`` (1,45), ``scale_params`` (1,68)
+    - ``body_params_incam``: same structure, camera space
+    - ``K_fullimg``: camera intrinsics
+
+    Falls back to legacy ``.npz`` format for backward compatibility.
 
     Returns dict matching PersonTrack.soma_params format, or None.
     """
-    # GEM-X outputs to {output_dir}/soma_results.npz
+    import torch
+
+    # Primary: look for hpe_results.pt (the real GEM-X output)
+    for pattern in ["**/hpe_results.pt", "**/preprocess/hpe_results.pt", "hpe_results.pt"]:
+        for f in sorted(output_dir.glob(pattern)):
+            try:
+                data = torch.load(str(f), map_location="cpu", weights_only=False)
+                bp = data.get("body_params_global")
+                if bp is None:
+                    continue
+
+                body_pose = np.array(bp["body_pose"])    # (L, 63)
+                global_orient = np.array(bp["global_orient"])  # (L, 3)
+                transl = np.array(bp["transl"])            # (L, 3)
+                n_frames = body_pose.shape[0]
+
+                # Reshape body_pose (L,63) -> (L,21,3)
+                body_pose_3 = body_pose.reshape(n_frames, 21, 3)
+
+                # Build SOMA-format poses: (L, 77, 3) =
+                #   global_orient(1) + body_pose(21) + zeros(55 for hands/face)
+                go_3 = global_orient.reshape(n_frames, 1, 3)
+                zeros_55 = np.zeros((n_frames, 55, 3), dtype=np.float32)
+                poses = np.concatenate([go_3, body_pose_3, zeros_55], axis=1).astype(np.float32)
+
+                result = {
+                    "poses": poses,
+                    "transl": transl.astype(np.float32),
+                    "global_orient": global_orient.astype(np.float32),
+                }
+
+                if "identity_coeffs" in bp:
+                    result["identity_coeffs"] = np.array(bp["identity_coeffs"]).astype(np.float32)
+                if "scale_params" in bp:
+                    result["scale_params"] = np.array(bp["scale_params"]).astype(np.float32)
+
+                # Store incam params and intrinsics for rendering
+                if "body_params_incam" in data:
+                    result["body_params_incam"] = {
+                        k: np.array(v).astype(np.float32)
+                        for k, v in data["body_params_incam"].items()
+                    }
+                if "K_fullimg" in data:
+                    result["K_fullimg"] = np.array(data["K_fullimg"]).astype(np.float32)
+
+                result["identity_model_type"] = "gemx"
+                result["source_file"] = str(f)
+                logger.info("Loaded GEM-X output from %s: %d frames", f, n_frames)
+                return result
+            except Exception as exc:
+                logger.debug("Failed to load %s: %s", f, exc)
+                continue
+
+    # Fallback: legacy .npz format
     for pattern in ["soma_results.npz", "*.npz"]:
         for f in sorted(output_dir.glob(pattern)):
             try:

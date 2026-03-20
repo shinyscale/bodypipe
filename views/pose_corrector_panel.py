@@ -3007,6 +3007,14 @@ class PoseCorrectorPanel(QWidget):
     # Auto-Detect: Bad span detection
     # ------------------------------------------------------------------
 
+    def run_auto_detection(self):
+        """Public entry point for automatic pose issue detection.
+
+        Called both by the Detect button and by app_window after pipeline
+        finishes to auto-populate the issues table.
+        """
+        self._on_detect_bad_spans()
+
     def _on_detect_bad_spans(self):
         """Run automatic pose issue detection across active tracks.
 
