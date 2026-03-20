@@ -1272,11 +1272,11 @@ class AppWindow(QMainWindow):
         self._mesh_viewport.set_person(pid)
         self._pose_corrector.set_person(pid)
 
-        # Auto-switch to orbit camera for GEM-X tracks (global-space data)
+        # Auto-switch to orbit camera for skeleton-only tracks (no mesh)
         track = self._session.person_tracks.get(pid)
-        if track is not None:
-            params = track.soma_params or track.smplx_params
-            if params and params.get("identity_model_type") == "gemx":
+        if track is not None and track.smplx_params is not None:
+            # GEM-X smplx_params don't have betas → no mesh, skeleton only
+            if track.smplx_params.get("betas") is None and track.soma_params is None:
                 self._mesh_viewport.set_camera_mode("orbit")
 
         # Broadcast current frame to all panels

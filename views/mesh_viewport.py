@@ -1209,12 +1209,9 @@ class MeshViewport(_BaseWidget):
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
-            # Detect global-space data (GEM-X) vs camera-space (GVHMR)
+            # All data is now camera-space (incam) — GEM-X loads
+            # body_params_incam, GVHMR loads hmr4d_results (camera-space)
             self._data_is_global = False
-            if track is not None:
-                params = track.soma_params or track.smplx_params
-                if params and params.get("identity_model_type") == "gemx":
-                    self._data_is_global = True
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):

@@ -50,7 +50,9 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
         for f in sorted(output_dir.glob(pattern)):
             try:
                 data = torch.load(str(f), map_location="cpu", weights_only=False)
-                bp = data.get("body_params_global")
+                # Use incam (camera-space) params — matches GVHMR convention
+                # and the viewport's CV→GL coordinate pipeline.
+                bp = data.get("body_params_incam") or data.get("body_params_global")
                 if bp is None:
                     continue
 
