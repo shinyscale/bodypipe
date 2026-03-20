@@ -63,6 +63,13 @@ try:
 except ImportError:
     pass
 
+import platform as _platform
+_IS_WSL = False
+try:
+    _IS_WSL = "microsoft" in _platform.uname().release.lower()
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Shader sources — embedded copies of shaders/mesh.vert and mesh.frag.
 # The canonical files are loaded if found; these are fallbacks.
@@ -1010,6 +1017,7 @@ class MeshViewport(_BaseWidget):
 
     joint_clicked = Signal(int)
     camera_changed = Signal(object)
+    gl_rendered = Signal()  # emitted after paintGL completes
 
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
@@ -1109,11 +1117,8 @@ class MeshViewport(_BaseWidget):
         if _HAS_GL:
             from PySide6.QtGui import QSurfaceFormat
 
-            fmt = QSurfaceFormat()
-            fmt.setVersion(3, 3)
-            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
-            fmt.setDepthBufferSize(24)
-            self.setFormat(fmt)
+            # Surface format is set globally in main.py (no alpha buffer)
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         else:
             self._status_msg = "OpenGL not available"
             self._setup_fallback()
@@ -1436,7 +1441,12 @@ class MeshViewport(_BaseWidget):
     def _update_camera(self):
         """Recompute model/view/projection from current camera state."""
         if self._camera_mode == "orbit":
-            self._model_mat = _CV_TO_GL.copy()
+            # SOMA/GEM-X global-space data is already Y-up; SMPL-X camera-space
+            # data needs _CV_TO_GL to flip Y/Z from CV to GL convention.
+            if self._active_skel is _SOMA_SKEL:
+                self._model_mat = np.eye(4, dtype=np.float32)
+            else:
+                self._model_mat = _CV_TO_GL.copy()
             self._view = compute_orbit_view(
                 self._orbit_yaw,
                 self._orbit_pitch,
@@ -1469,15 +1479,20 @@ class MeshViewport(_BaseWidget):
             pts = self._joint_positions
         if pts is None:
             return
-        # Convert centroid from CV camera space to GL space (flip Y, Z)
+
+        # SOMA/GEM-X data is already in GL-compatible Y-up space;
+        # SMPL-X camera-space data needs Y/Z flip to GL convention.
+        need_flip = self._active_skel is not _SOMA_SKEL
         centroid = pts.mean(axis=0).copy()
-        centroid[1] *= -1
-        centroid[2] *= -1
+        if need_flip:
+            centroid[1] *= -1
+            centroid[2] *= -1
         self._orbit_center = centroid.astype(np.float32)
-        # Set distance from point cloud extent
+
         gl_pts = pts.copy()
-        gl_pts[:, 1] *= -1
-        gl_pts[:, 2] *= -1
+        if need_flip:
+            gl_pts[:, 1] *= -1
+            gl_pts[:, 2] *= -1
         extent = np.max(
             np.linalg.norm(gl_pts - self._orbit_center, axis=1)
         )
@@ -1499,15 +1514,15 @@ class MeshViewport(_BaseWidget):
 
         if self._camera_mode == "orbit":
             self._mouse_last_pos = (event.position().x(), event.position().y())
-        super().mousePressEvent(event)
+        event.accept()
 
     def mouseMoveEvent(self, event):
         """Update orbit/pan during drag; show HUD on movement."""
+        event.accept()
         # Show HUD on any mouse activity over the viewport
         if self._hud_enabled:
             self._hud.show_with_timer()
         if self._camera_mode != "orbit" or self._mouse_last_pos is None:
-            super().mouseMoveEvent(event)
             return
 
         x, y = event.position().x(), event.position().y()
@@ -1546,12 +1561,10 @@ class MeshViewport(_BaseWidget):
             self._update_camera()
             self.camera_changed.emit(self._camera_state())
 
-        super().mouseMoveEvent(event)
-
     def mouseReleaseEvent(self, event):
         """End orbit/pan drag."""
         self._mouse_last_pos = None
-        super().mouseReleaseEvent(event)
+        event.accept()
 
     def wheelEvent(self, event):
         """Zoom in/out in orbit mode."""
@@ -2098,12 +2111,16 @@ class MeshViewport(_BaseWidget):
 
         painter.beginNativePainting()
 
-        # When compositing over a video frame, only clear depth so the
-        # QPainter-drawn background is preserved.
+        # Clear with alpha=1.0 to ensure the surface is fully opaque,
+        # then disable alpha writes so GL draw calls can't make it transparent.
+        # Without this, the Wayland compositor on WSL2 treats GL-rendered
+        # pixels as transparent → click-through to windows behind.
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
         if _has_bg:
             gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
         else:
             gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_FALSE)
 
         # Grid floor (orbit mode only, drawn first so mesh occludes it)
         if self._show_grid and self._camera_mode == "orbit":
@@ -2189,6 +2206,20 @@ class MeshViewport(_BaseWidget):
                 y += 20
 
         painter.end()
+
+        # WSL2/Wayland fix: QPainter text rendering writes alpha < 1.0 for
+        # antialiasing.  The Wayland compositor treats those pixels as
+        # transparent, causing click-through to windows behind.
+        # Fix: after QPainter is done, do one final GL pass that overwrites
+        # the entire framebuffer alpha channel to 1.0 (fully opaque).
+        if _IS_WSL and _HAS_GL:
+            self.makeCurrent()
+            gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_TRUE)
+            gl.glClearColor(0, 0, 0, 1)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+            gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+            # Restore clear color for next frame
+            gl.glClearColor(0.1, 0.1, 0.12, 1.0)
 
     # ------------------------------------------------------------------
     # Skeleton GL rendering

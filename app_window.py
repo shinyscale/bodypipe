@@ -774,6 +774,7 @@ class AppWindow(QMainWindow):
 
         # Multi-mode signal hub (signals only fire when panels are visible)
         self._video_player.frame_clicked.connect(self._identity_inspector.on_frame_click)
+        self._video_player.bbox_dragged.connect(self._identity_inspector.on_bbox_drag)
         self._track_overview.person_clicked.connect(self._on_track_clicked)
         self._identity_inspector.frame_requested.connect(self._video_player.seek)
         self._identity_inspector.person_changed.connect(self._on_identity_person_changed)

@@ -106,9 +106,10 @@ class FrameCache:
 
 
 class FrameDisplay(QLabel):
-    """QLabel that displays video frames and emits click positions."""
+    """QLabel that displays video frames and emits click/drag positions."""
 
     clicked = Signal(float, float)  # normalized (x, y) in image space
+    drag_rect = Signal(float, float, float, float)  # (x1, y1, x2, y2) normalized
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,8 +119,10 @@ class FrameDisplay(QLabel):
         self.setStyleSheet(f"background-color: {COLORS['bg_input']};")
         self._pixmap_size = None
         self._current_frame: np.ndarray | None = None
+        self._drag_start: tuple[float, float] | None = None
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self.setMouseTracking(True)
 
     def set_frame(self, frame: np.ndarray):
         """Display an RGB numpy array."""
@@ -174,17 +177,42 @@ class FrameDisplay(QLabel):
             if pixmap:
                 pixmap.save(path)
 
+    def _screen_to_norm(self, pos) -> tuple[float, float] | None:
+        """Convert screen position to normalized [0,1] image coords."""
+        if not self._pixmap_size:
+            return None
+        pw, ph = self._pixmap_size
+        ox = (self.width() - pw) / 2
+        oy = (self.height() - ph) / 2
+        x = (pos.x() - ox) / pw
+        y = (pos.y() - oy) / ph
+        if 0 <= x <= 1 and 0 <= y <= 1:
+            return (x, y)
+        return None
+
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton and self._pixmap_size:
-            pw, ph = self._pixmap_size
-            # Compute offset (pixmap is centered in label)
-            ox = (self.width() - pw) / 2
-            oy = (self.height() - ph) / 2
-            x = (event.position().x() - ox) / pw
-            y = (event.position().y() - oy) / ph
-            if 0 <= x <= 1 and 0 <= y <= 1:
-                self.clicked.emit(x, y)
+        if event.button() == Qt.LeftButton:
+            norm = self._screen_to_norm(event.position())
+            if norm:
+                self._drag_start = norm
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and self._drag_start:
+            norm = self._screen_to_norm(event.position())
+            if norm:
+                x1, y1 = self._drag_start
+                x2, y2 = norm
+                # If drag distance is significant (>2% of image), emit drag_rect
+                if abs(x2 - x1) > 0.02 and abs(y2 - y1) > 0.02:
+                    self.drag_rect.emit(
+                        min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+                    )
+                else:
+                    # Small movement = click
+                    self.clicked.emit(x1, y1)
+            self._drag_start = None
+        super().mouseReleaseEvent(event)
 
 
 class _TransportOverlay(QWidget):
@@ -246,6 +274,7 @@ class VideoPlayer(QWidget):
 
     frame_changed = Signal(int)
     frame_clicked = Signal(float, float)
+    bbox_dragged = Signal(float, float, float, float)  # (x1, y1, x2, y2) normalized
     playback_toggled = Signal(bool)
     scrub_started = Signal()   # slider press — user is actively scrubbing
     scrub_ended = Signal()     # slider release — scrubbing finished
@@ -409,6 +438,7 @@ class VideoPlayer(QWidget):
 
     def _connect_signals(self):
         self._display.clicked.connect(self.frame_clicked.emit)
+        self._display.drag_rect.connect(self.bbox_dragged.emit)
         self._slider.valueChanged.connect(self._on_slider_changed)
         self._slider.sliderPressed.connect(self.scrub_started.emit)
         self._slider.sliderReleased.connect(self.scrub_ended.emit)

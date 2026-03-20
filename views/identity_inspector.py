@@ -707,6 +707,99 @@ class IdentityInspector(QWidget):
             self.keyframe_changed.emit(self._current_person_id, self._current_frame)
             self.bbox_overlay_changed.emit({"edit_preview": None})
 
+    def on_bbox_drag(self, x1_norm: float, y1_norm: float,
+                      x2_norm: float, y2_norm: float):
+        """Handle click-and-drag bbox from video display.
+
+        Directly applies the dragged rectangle as a bbox correction,
+        bypassing the two-click state machine. Works regardless of
+        whether bbox edit mode is active.
+        """
+        track = self._get_current_track()
+        if track is None:
+            return
+
+        # Convert normalized coords to pixel coords
+        w, h = self._session.img_width, self._session.img_height
+        bbox = [
+            max(0, int(x1_norm * w)),
+            max(0, int(y1_norm * h)),
+            min(w - 1, int(x2_norm * w)),
+            min(h - 1, int(y2_norm * h)),
+        ]
+
+        # Enforce minimum size (20px)
+        if bbox[2] - bbox[0] < 20:
+            bbox[2] = bbox[0] + 20
+        if bbox[3] - bbox[1] < 20:
+            bbox[3] = bbox[1] + 20
+
+        # Snapshot for undo
+        pid = self._current_person_id
+        frame = self._current_frame
+        old_corr = (
+            track.bbox_corrections[frame].copy()
+            if track.bbox_corrections is not None and frame < len(track.bbox_corrections)
+            else None
+        )
+        had_keyframe = any(kf["frame"] == frame for kf in track.keyframes)
+
+        # Store correction
+        self._store_bbox_correction(track, frame, bbox)
+
+        # Add keyframe at this frame if not present
+        added_kf = False
+        if not any(kf["frame"] == frame for kf in track.keyframes):
+            track.keyframes.append({"frame": frame, "verified": False})
+            added_kf = True
+
+        # Undo/redo
+        new_bbox = list(bbox)
+
+        def undo(p=pid, f=frame, old_c=old_corr, added=added_kf):
+            t = self._session.person_tracks.get(p)
+            if t and t.bbox_corrections is not None and f < len(t.bbox_corrections):
+                if old_c is not None:
+                    t.bbox_corrections[f] = old_c
+                else:
+                    t.bbox_corrections[f] = 0
+            if added and t:
+                t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+            self._session.dirty_persons.discard(p)
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+            self.bbox_overlay_changed.emit({"edit_preview": None})
+
+        def redo(p=pid, f=frame, new_b=new_bbox, was_kf=had_keyframe):
+            t = self._session.person_tracks.get(p)
+            if t:
+                self._store_bbox_correction(t, f, new_b)
+                if not was_kf and not any(kf["frame"] == f for kf in t.keyframes):
+                    t.keyframes.append({"frame": f, "verified": False})
+                self._session.dirty_persons.add(p)
+            self._refresh_for_person()
+            self.keyframe_changed.emit(p, f)
+            self.bbox_overlay_changed.emit({"edit_preview": None})
+
+        self._session.undo_stack.push(UndoEntry("BBox drag", undo, redo))
+
+        # Mark dirty
+        self._session.dirty_persons.add(pid)
+        self.person_dirty.emit(pid)
+
+        log.info("BBox drag correction: person=%d frame=%d bbox=%s", pid, frame, bbox)
+
+        # Cancel any active two-click edit
+        self._bbox_edit_state = None
+        self._bbox_edit_corner1 = None
+        self._update_bbox_edit_status()
+
+        # Refresh displays
+        self._update_keyframe_table()
+        self._update_timeline()
+        self.keyframe_changed.emit(pid, frame)
+        self.bbox_overlay_changed.emit({"edit_preview": None})
+
     # ------------------------------------------------------------------
     # Internal updates
     # ------------------------------------------------------------------

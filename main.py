@@ -32,16 +32,53 @@ try:
 except Exception:
     pass
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QSurfaceFormat
 
 from app_window import AppWindow
+
+# Force all OpenGL surfaces to have no alpha buffer — prevents the Wayland
+# compositor on WSL2 from treating the QOpenGLWidget as transparent.
+# Must be set before QApplication is created.
+_fmt = QSurfaceFormat()
+_fmt.setAlphaBufferSize(0)
+_fmt.setDepthBufferSize(24)
+_fmt.setVersion(3, 3)
+_fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
+QSurfaceFormat.setDefaultFormat(_fmt)
+
+
+def _patch_combobox_for_wayland():
+    """WSL2/Wayland fix: combo box popups don't dismiss after selection.
+
+    The Wayland compositor in WSLg doesn't properly close popup windows.
+    This patches QComboBox.hidePopup to also close the underlying popup
+    container widget, ensuring it disappears on Wayland.
+    """
+    _original = QComboBox.hidePopup
+
+    def _patched_hidePopup(self):
+        _original(self)
+        # The popup is the combo's view's parent (a QFrame container)
+        view = self.view()
+        if view and view.parent():
+            view.parent().close()
+
+    QComboBox.hidePopup = _patched_hidePopup
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("bodypipe")
     app.setOrganizationName("GVHMR")
+
+    # Fix WSL2/Wayland combo box popup persistence
+    try:
+        if "microsoft" in platform.uname().release.lower():
+            _patch_combobox_for_wayland()
+    except Exception:
+        pass
 
     window = AppWindow()
     window.show()
