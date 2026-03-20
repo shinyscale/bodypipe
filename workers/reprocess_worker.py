@@ -39,7 +39,12 @@ class ReprocessWorker(QThread):
             if not tracks_path.is_file():
                 self.error.emit(f"Track cache not found: {tracks_path}")
                 return
-            all_tracks = torch.load(str(tracks_path), map_location="cpu", weights_only=False)
+            all_tracks_data = torch.load(str(tracks_path), map_location="cpu", weights_only=False)
+            # all_tracks.pt stores {"tracks": [...], "metadata": {...}}
+            if isinstance(all_tracks_data, dict) and "tracks" in all_tracks_data:
+                all_tracks = all_tracks_data["tracks"]
+            else:
+                all_tracks = all_tracks_data  # legacy format: bare list
 
             slam_path = str(output_dir / "shared_slam.pt")
             masks_dir = str(output_dir / "masks")
