@@ -569,7 +569,9 @@ class VideoPlayer(QWidget):
         self.playback_toggled.emit(self._playing)
 
     def _advance_frame(self):
-        next_frame = self._current_frame + 1
+        # At speeds > 1x, skip frames so playback is perceptibly faster
+        step = max(1, round(self._playback_speed))
+        next_frame = self._current_frame + step
         if next_frame >= self._num_frames:
             self._toggle_play()  # stop at end
             return

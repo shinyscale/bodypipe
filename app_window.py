@@ -300,9 +300,9 @@ class AppWindow(QMainWindow):
              "_track_overview_dock"},
         ),
         "Correction": (
-            "Video + 3D + Pose Corrector",
+            "Video + 3D + Pose Corrector + Inspector",
             {"_pipeline_dock", "_video_dock", "_mesh_dock",
-             "_pose_corrector_dock", "_track_overview_dock"},
+             "_pose_corrector_dock", "_track_overview_dock", "_identity_dock"},
         ),
         "Tracking": (
             "Video + Inspector + Track Overview",
@@ -394,6 +394,12 @@ class AppWindow(QMainWindow):
         self._session_library_dock = SessionLibraryDock(self._session_library, self)
 
         # ---- Arrange docks ----
+        # Put dock tabs at the top of their groups (default is bottom)
+        from PySide6.QtWidgets import QTabWidget
+        self.setTabPosition(Qt.RightDockWidgetArea, QTabWidget.North)
+        self.setTabPosition(Qt.LeftDockWidgetArea, QTabWidget.North)
+        self.setTabPosition(Qt.BottomDockWidgetArea, QTabWidget.North)
+
         # Left: Pipeline Settings + Session Library (tabified, Settings on top)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._pipeline_dock)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._session_library_dock)
@@ -855,6 +861,15 @@ class AppWindow(QMainWindow):
             self.set_interaction_mode(self._MODE_KEYS[key])
             return
 
+        # Global shortcuts (mode-independent)
+        if not mod and key == Qt.Key_V:
+            # Toggle camera mode between incam and orbit
+            vp = self._mesh_viewport
+            new_mode = "orbit" if vp._camera_mode == "incam" else "incam"
+            vp.set_camera_mode(new_mode)
+            self.set_status(f"Camera: {new_mode}")
+            return
+
         # Dispatch to mode-specific handler
         handled = False
         if self._interaction_mode == InteractionMode.NAVIGATE:
@@ -921,7 +936,7 @@ class AppWindow(QMainWindow):
         return False
 
     def _key_track(self, key, mod) -> bool:
-        """Track mode: G next unreviewed, Tab next person, Shift+Tab prev."""
+        """Track mode: G next unreviewed, Tab next person, Shift+Tab prev, E edit bbox."""
         if key == Qt.Key_G:
             self._identity_inspector.go_to_next_unreviewed()
             return True
@@ -930,6 +945,11 @@ class AppWindow(QMainWindow):
                 self._cycle_person(-1)
             else:
                 self._cycle_person(1)
+            return True
+        if key == Qt.Key_E:
+            self._identity_dock.setVisible(True)
+            self._identity_dock.raise_()
+            self._identity_inspector._on_edit_bbox()
             return True
         return False
 
@@ -1211,6 +1231,11 @@ class AppWindow(QMainWindow):
         self._identity_inspector.set_person(pid)
         self._mesh_viewport.set_person(pid)
         self._pose_corrector.set_person(pid)
+
+        # Auto-switch to orbit camera for skeleton-only tracks (SOMA/GEM-X)
+        track = self._session.person_tracks.get(pid)
+        if track is not None and track.body_model_type == "soma":
+            self._mesh_viewport.set_camera_mode("orbit")
 
         # Broadcast current frame to all panels
         frame = self._session.current_frame

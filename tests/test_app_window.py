@@ -789,14 +789,14 @@ class TestWorkspacePresets:
         assert app_window._pose_corrector_dock.isHidden()
 
     def test_apply_correction_preset(self, app_window):
-        """Correction preset shows video, mesh, pose corrector; hides identity."""
+        """Correction preset shows video, mesh, pose corrector, and identity."""
         app_window._apply_preset("Correction")
 
         assert not app_window._video_dock.isHidden()
         assert not app_window._mesh_dock.isHidden()
         assert not app_window._pose_corrector_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
-        assert app_window._identity_dock.isHidden()
+        assert not app_window._identity_dock.isHidden()
 
     def test_apply_tracking_preset(self, app_window):
         """Tracking preset shows video, identity, track; hides mesh, pose."""

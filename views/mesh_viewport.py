@@ -125,7 +125,7 @@ def _load_shader_source(name: str, fallback: str) -> str:
 # Skeleton data — sourced from models/skeleton.py (single source of truth)
 # ---------------------------------------------------------------------------
 
-from models.skeleton import SMPLX_SKELETON as _SKEL
+from models.skeleton import SMPLX_SKELETON as _SKEL, SOMA_SKELETON as _SOMA_SKEL
 
 # Module-level aliases for backward compatibility — existing code and tests
 # import these names directly from this module.
@@ -764,6 +764,8 @@ def compute_joint_label_layout(
     selected_joint: int = -1,
     body_only: bool = True,
     margin: int = _LABEL_MARGIN,
+    joint_names: list[str] | None = None,
+    n_body_joints: int | None = None,
 ) -> list[tuple[int, str, float, float, bool]]:
     """Compute label positions for visible joints, clamped to viewport.
 
@@ -782,8 +784,10 @@ def compute_joint_label_layout(
     labels : list of (joint_idx, name, screen_x, screen_y, is_selected)
         Sorted with selected joint last (drawn on top).
     """
-    n_joints = min(len(joints_2d), len(JOINT_NAMES))
-    max_idx = _N_BODY_JOINTS if body_only else n_joints
+    names = joint_names if joint_names is not None else JOINT_NAMES
+    n_body = n_body_joints if n_body_joints is not None else _N_BODY_JOINTS
+    n_joints = min(len(joints_2d), len(names))
+    max_idx = n_body if body_only else n_joints
 
     labels = []
     for i in range(n_joints):
@@ -802,7 +806,7 @@ def compute_joint_label_layout(
         sy = max(margin, min(sy, viewport_h - margin))
 
         is_sel = (i == selected_joint)
-        labels.append((i, JOINT_NAMES[i], sx, sy, is_sel))
+        labels.append((i, names[i], sx, sy, is_sel))
 
     # Sort so selected joint label is drawn last (on top)
     labels.sort(key=lambda t: t[4])
@@ -1064,9 +1068,10 @@ class MeshViewport(_BaseWidget):
         self._mouse_last_pos: tuple[int, int] | None = None
 
         # Skeleton state (Phase 3.3)
-        self._joint_positions: np.ndarray | None = None  # (52, 3) camera-space
+        self._joint_positions: np.ndarray | None = None  # (J, 3) camera-space
         self._selected_joint: int = -1  # -1 = no selection
         self._show_skeleton: bool = True  # whether to draw skeleton overlay
+        self._active_skel = _SKEL  # skeleton def for current person (SMPLX or SOMA)
         self._skeleton_heatmap: bool = False  # confidence heatmap on skeleton
 
         # Pose override for real-time preview (Phase 3.4)
@@ -1188,6 +1193,13 @@ class MeshViewport(_BaseWidget):
         if person_id == self._person_id:
             return
         self._person_id = person_id
+        # Update active skeleton def based on body model type
+        if self._session is not None:
+            track = self._session.person_tracks.get(person_id)
+            if track is not None and track.body_model_type == "soma":
+                self._active_skel = _SOMA_SKEL
+            else:
+                self._active_skel = _SKEL
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1449,24 +1461,28 @@ class MeshViewport(_BaseWidget):
         self._auto_center_orbit()
 
     def _auto_center_orbit(self):
-        """Set orbit center to the current mesh centroid in GL space."""
-        if self._vertices is None:
+        """Set orbit center to the current mesh/skeleton centroid in GL space."""
+        # Use vertices if available, otherwise fall back to joint positions
+        pts = self._vertices
+        if pts is None:
+            pts = self._joint_positions
+        if pts is None:
             return
         # Convert centroid from CV camera space to GL space (flip Y, Z)
-        centroid = self._vertices.mean(axis=0).copy()
+        centroid = pts.mean(axis=0).copy()
         centroid[1] *= -1
         centroid[2] *= -1
         self._orbit_center = centroid.astype(np.float32)
-        # Set distance from mesh extent
-        gl_verts = self._vertices.copy()
-        gl_verts[:, 1] *= -1
-        gl_verts[:, 2] *= -1
+        # Set distance from point cloud extent
+        gl_pts = pts.copy()
+        gl_pts[:, 1] *= -1
+        gl_pts[:, 2] *= -1
         extent = np.max(
-            np.linalg.norm(gl_verts - self._orbit_center, axis=1)
+            np.linalg.norm(gl_pts - self._orbit_center, axis=1)
         )
         self._orbit_distance = max(float(extent) * 2.5, 1.0)
-        # Place grid floor at lowest mesh point (feet)
-        self._grid_y = float(np.min(gl_verts[:, 1]))
+        # Place grid floor at lowest point (feet)
+        self._grid_y = float(np.min(gl_pts[:, 1]))
         self._orbit_auto_centered = True
 
     def mousePressEvent(self, event):
@@ -1635,15 +1651,22 @@ class MeshViewport(_BaseWidget):
     def _compute_joints(self) -> np.ndarray | None:
         """Compute 3D joint positions for current person/frame.
 
-        Returns (52, 3) array in camera space, or None if params unavailable.
+        Returns (J, 3) array in camera space, or None if params unavailable.
         """
         if self._session is None or self._person_id < 0:
             return None
         track = self._session.person_tracks.get(self._person_id)
-        if track is None or track.smplx_params is None:
+        if track is None:
+            logger.debug("_compute_joints: no track for pid=%d", self._person_id)
             return None
-
-        params = track.smplx_params
+        params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
+        if params is None:
+            logger.debug(
+                "_compute_joints: no params for pid=%d (model=%s, soma=%s, smplx=%s)",
+                self._person_id, track.body_model_type,
+                track.soma_params is not None, track.smplx_params is not None,
+            )
+            return None
 
         # Apply pose override for real-time preview
         if self._pose_override is not None:
@@ -1900,10 +1923,16 @@ class MeshViewport(_BaseWidget):
             return None
 
         track = self._session.person_tracks.get(person_id)
-        if track is None or track.smplx_params is None:
+        if track is None:
+            return None
+
+        if track.body_model_type == "soma":
+            # SOMA: skeleton-only rendering (no mesh model available yet)
             return None
 
         params = track.smplx_params
+        if params is None:
+            return None
 
         # Apply pose override for real-time preview
         if override_active:
@@ -2182,12 +2211,26 @@ class MeshViewport(_BaseWidget):
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
 
+        # Use active skeleton's bone connections and parent hierarchy
+        skel = self._active_skel
+        active_bones = skel.bone_connections
+        active_parents = list(skel.joint_parents)
+        active_n_body = skel.n_body_joints
+
         # Compute chain highlight set when a joint is selected
         chain_set: set[int] = set()
         chain_bones: set[tuple[int, int]] = set()
         if 0 <= self._selected_joint < len(joints):
-            chain_set = set(get_joint_chain(self._selected_joint))
-            chain_bones = get_joint_chain_bones(self._selected_joint)
+            # Walk parent chain using active skeleton
+            chain = [self._selected_joint]
+            cur = self._selected_joint
+            while cur < len(active_parents) and active_parents[cur] >= 0:
+                cur = active_parents[cur]
+                chain.append(cur)
+            chain_set = set(chain)
+            for i in range(len(chain) - 1):
+                child, parent = chain[i], chain[i + 1]
+                chain_bones.add((min(parent, child), max(parent, child)))
 
         # Heatmap base color: confidence-mapped color for non-highlighted elements
         if self._skeleton_heatmap:
@@ -2201,7 +2244,7 @@ class MeshViewport(_BaseWidget):
         chain_bone_verts = []
         chain_bone_colors = []
         base_bone_color = heatmap_color if heatmap_color is not None else _BONE_COLOR
-        for a, b in BONE_CONNECTIONS:
+        for a, b in active_bones:
             if a < len(joints) and b < len(joints):
                 key = (min(a, b), max(a, b))
                 if key in chain_bones:
@@ -2243,7 +2286,7 @@ class MeshViewport(_BaseWidget):
                 jp[i] = _CHAIN_JOINT_POINT_SIZE
             elif heatmap_color is not None:
                 jc[i] = heatmap_color
-            elif i < _N_BODY_JOINTS:
+            elif i < active_n_body:
                 jc[i] = _BODY_JOINT_COLOR
             else:
                 jc[i] = _HAND_JOINT_COLOR
@@ -2343,6 +2386,8 @@ class MeshViewport(_BaseWidget):
             screen, w, h,
             selected_joint=self._selected_joint,
             body_only=True,
+            joint_names=list(self._active_skel.joint_names),
+            n_body_joints=self._active_skel.n_body_joints,
         )
         if not labels:
             return
@@ -2493,6 +2538,16 @@ class MeshViewport(_BaseWidget):
 
         # Recompute skeleton joint positions (lightweight FK — always computed)
         self._joint_positions = self._compute_joints()
+
+        # Auto-center orbit camera on skeleton when no mesh is available
+        if (
+            self._vertices is None
+            and self._joint_positions is not None
+            and self._camera_mode == "orbit"
+            and not self._orbit_auto_centered
+        ):
+            self._auto_center_orbit()
+            self._update_camera()
 
         if _HAS_GL:
             self.update()
