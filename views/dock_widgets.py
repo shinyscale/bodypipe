@@ -112,8 +112,6 @@ class TrackOverviewDock(QDockWidget):
         self.setObjectName("TrackOverviewDock")
         self._track_overview = track_overview
         self.setWidget(track_overview)
-        # Prevent the dock from collapsing to nothing when dragging the splitter
-        self.setMinimumHeight(60)
 
     @property
     def track_overview(self) -> TrackOverview:

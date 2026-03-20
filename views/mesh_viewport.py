@@ -1222,6 +1222,7 @@ class MeshViewport(_BaseWidget):
             return
         self._camera_mode = mode
         if mode == "orbit":
+            self._orbit_auto_centered = False  # force re-center on mode switch
             self._auto_center_orbit()
         self._update_camera()
         self.camera_changed.emit(self._camera_state())
@@ -2151,6 +2152,42 @@ class MeshViewport(_BaseWidget):
         ):
             self._draw_joint_labels(painter)
 
+        # Debug: show joint count + camera info when skeleton is loaded
+        if self._joint_positions is not None:
+            painter.setPen(QColor(120, 200, 120))
+            painter.setFont(QFont("sans-serif", 10))
+            jp = self._joint_positions
+            centroid = jp.mean(axis=0)
+            spread = float(np.max(np.linalg.norm(jp - centroid, axis=1)))
+            painter.drawText(10, 20, (
+                f"{len(jp)} joints  |  centroid: [{centroid[0]:.2f}, {centroid[1]:.2f}, {centroid[2]:.2f}]"
+                f"  |  spread: {spread:.2f}m  |  skel: {self._active_skel.name}"
+            ))
+
+        # Status text when no mesh/skeleton is rendering
+        if self._vertices is None and self._joint_positions is None:
+            painter.setPen(QColor(180, 180, 180))
+            painter.setFont(QFont("sans-serif", 11))
+            lines = []
+            if self._session is None:
+                lines.append("No session loaded")
+            elif self._person_id < 0:
+                lines.append("No person selected")
+            else:
+                track = self._session.person_tracks.get(self._person_id)
+                if track is None:
+                    lines.append(f"No track for person {self._person_id}")
+                else:
+                    lines.append(f"Person {self._person_id}  |  model: {track.body_model_type}")
+                    lines.append(f"smplx_params: {'yes' if track.smplx_params else 'None'}")
+                    lines.append(f"soma_params: {'yes' if track.soma_params else 'None'}")
+            lines.append(f"Camera: {self._camera_mode}  |  GL: {'ready' if self._gl_ready else 'NOT READY'}")
+            lines.append("Press V to toggle orbit/incam camera")
+            y = self.height() // 2 - len(lines) * 10
+            for line in lines:
+                painter.drawText(10, y, line)
+                y += 20
+
         painter.end()
 
     # ------------------------------------------------------------------
@@ -2537,7 +2574,14 @@ class MeshViewport(_BaseWidget):
                 self._n_indices = 0
 
         # Recompute skeleton joint positions (lightweight FK — always computed)
+        prev_joints = self._joint_positions
         self._joint_positions = self._compute_joints()
+        if self._joint_positions is not None and prev_joints is None:
+            logger.info(
+                "Skeleton loaded: pid=%d, %d joints, camera=%s, gl_ready=%s",
+                self._person_id, len(self._joint_positions),
+                self._camera_mode, self._gl_ready,
+            )
 
         # Auto-center orbit camera on skeleton when no mesh is available
         if (

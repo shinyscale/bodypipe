@@ -54,19 +54,24 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                 if bp is None:
                     continue
 
-                body_pose = np.array(bp["body_pose"])    # (L, 63)
+                body_pose = np.array(bp["body_pose"])    # (L, J*3) — 63 or 228
                 global_orient = np.array(bp["global_orient"])  # (L, 3)
                 transl = np.array(bp["transl"])            # (L, 3)
                 n_frames = body_pose.shape[0]
+                n_pose_joints = body_pose.shape[1] // 3   # 21 or 76
 
-                # Reshape body_pose (L,63) -> (L,21,3)
-                body_pose_3 = body_pose.reshape(n_frames, 21, 3)
+                # Reshape body_pose to (L, J, 3)
+                body_pose_3 = body_pose.reshape(n_frames, n_pose_joints, 3)
 
                 # Build SOMA-format poses: (L, 77, 3) =
-                #   global_orient(1) + body_pose(21) + zeros(55 for hands/face)
+                #   global_orient(1) + body joints + pad to 77
                 go_3 = global_orient.reshape(n_frames, 1, 3)
-                zeros_55 = np.zeros((n_frames, 55, 3), dtype=np.float32)
-                poses = np.concatenate([go_3, body_pose_3, zeros_55], axis=1).astype(np.float32)
+                n_pad = max(0, 76 - n_pose_joints)  # 77 total - 1 global - n_pose_joints
+                if n_pad > 0:
+                    pad = np.zeros((n_frames, n_pad, 3), dtype=np.float32)
+                    poses = np.concatenate([go_3, body_pose_3, pad], axis=1).astype(np.float32)
+                else:
+                    poses = np.concatenate([go_3, body_pose_3[:, :76]], axis=1).astype(np.float32)
 
                 result = {
                     "poses": poses,
@@ -87,6 +92,17 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                     }
                 if "K_fullimg" in data:
                     result["K_fullimg"] = np.array(data["K_fullimg"]).astype(np.float32)
+
+                # Extract per-frame confidence from GEM-X logits
+                net_out = data.get("net_outputs", {})
+                conf_logits = net_out.get("static_conf_logits")
+                if conf_logits is not None:
+                    conf_logits = np.array(conf_logits)
+                    if conf_logits.ndim == 3:
+                        conf_logits = conf_logits[0]  # (N, 6)
+                    # Sigmoid to convert logits → probabilities, mean across channels
+                    conf_probs = 1.0 / (1.0 + np.exp(-conf_logits.astype(np.float64)))
+                    result["confidences"] = conf_probs.mean(axis=1).astype(np.float32)
 
                 result["identity_model_type"] = "gemx"
                 result["source_file"] = str(f)

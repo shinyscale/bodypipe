@@ -712,9 +712,13 @@ class MultiPersonWorker(QThread):
             from multi_person_split import split_multi_person_video
 
             def progress_callback(frac: float, msg: str):
-                overall = 0.05 + frac * 0.85
-                self.progress.emit(overall, msg)
-                self.log_line.emit(f"[MultiPerson] {msg}")
+                if frac < 0:
+                    # Log-only: stream subprocess output without updating progress bar
+                    self.log_line.emit(msg)
+                else:
+                    overall = 0.05 + frac * 0.85
+                    self.progress.emit(overall, msg)
+                    self.log_line.emit(f"[MultiPerson] {msg}")
 
             self.progress.emit(0.02, "Starting multi-person pipeline...")
 

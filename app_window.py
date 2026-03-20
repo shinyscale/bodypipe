@@ -394,11 +394,10 @@ class AppWindow(QMainWindow):
         self._session_library_dock = SessionLibraryDock(self._session_library, self)
 
         # ---- Arrange docks ----
-        # Put dock tabs at the top of their groups (default is bottom)
+        # Put dock tabs at the top for side panels; bottom area keeps default (South)
         from PySide6.QtWidgets import QTabWidget
         self.setTabPosition(Qt.RightDockWidgetArea, QTabWidget.North)
         self.setTabPosition(Qt.LeftDockWidgetArea, QTabWidget.North)
-        self.setTabPosition(Qt.BottomDockWidgetArea, QTabWidget.North)
 
         # Left: Pipeline Settings + Session Library (tabified, Settings on top)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._pipeline_dock)
@@ -1205,6 +1204,11 @@ class AppWindow(QMainWindow):
                 track.confidences, track.confidence_breakdown = (
                     self._load_confidences_csv(track.person_dir)
                 )
+            # Fall back to GEM-X embedded confidences from soma_params
+            if track.confidences is None and track.soma_params is not None:
+                gemx_conf = track.soma_params.get("confidences")
+                if gemx_conf is not None:
+                    track.confidences = gemx_conf.tolist()
 
     def _refresh_all_panels(self):
         """Refresh all panels from current session state after results are loaded.
@@ -1464,6 +1468,12 @@ class AppWindow(QMainWindow):
             body_model_type = "smplx"
             if person_dir:
                 smplx_params, soma_params, body_model_type = self._load_motion_params(person_dir)
+
+            # Use GEM-X embedded confidences if no CSV exists
+            if confidences is None and soma_params is not None:
+                gemx_conf = soma_params.get("confidences")
+                if gemx_conf is not None:
+                    confidences = gemx_conf.tolist()
 
             pt = PersonTrack(
                 person_id=tid,
