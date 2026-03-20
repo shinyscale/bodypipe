@@ -1081,6 +1081,9 @@ class MeshViewport(_BaseWidget):
         self._show_skeleton: bool = True  # whether to draw skeleton overlay
         self._active_skel = _SKEL  # skeleton def for current person (SMPLX or SOMA)
         self._skeleton_heatmap: bool = False  # confidence heatmap on skeleton
+        self._show_all_persons: bool = True  # render all persons' skeletons
+        self._all_joint_positions: dict[int, np.ndarray] = {}  # pid → (J, 3)
+        self._all_active_skels: dict[int, object] = {}  # pid → skeleton def
 
         # Pose override for real-time preview (Phase 3.4)
         # dict with keys: frame_idx (int), global_orient (3,) optional,
@@ -1477,6 +1480,12 @@ class MeshViewport(_BaseWidget):
         pts = self._vertices
         if pts is None:
             pts = self._joint_positions
+        # Combine all persons' joints for multi-person centering
+        if self._all_joint_positions:
+            all_pts = list(self._all_joint_positions.values())
+            if pts is not None:
+                all_pts.append(pts)
+            pts = np.concatenate(all_pts, axis=0) if all_pts else pts
         if pts is None:
             return
 
@@ -2156,8 +2165,17 @@ class MeshViewport(_BaseWidget):
             self._shader.release()
 
         # Skeleton overlay (always drawn when visible — even in wireframe)
-        if self._show_skeleton and self._joint_positions is not None:
-            self._draw_skeleton()
+        if self._show_skeleton:
+            if self._show_all_persons and self._all_joint_positions:
+                # Draw non-selected persons first (dimmer)
+                for pid, joints in self._all_joint_positions.items():
+                    if pid == self._person_id:
+                        continue
+                    skel = self._all_active_skels.get(pid, self._active_skel)
+                    self._draw_skeleton_for(joints, skel, selected=False)
+            # Draw selected person on top (full brightness)
+            if self._joint_positions is not None:
+                self._draw_skeleton()
 
         painter.endNativePainting()
 
@@ -2247,6 +2265,75 @@ class MeshViewport(_BaseWidget):
             if 0 <= self._current_frame < len(track.confidences):
                 return float(track.confidences[self._current_frame])
         return 0.5
+
+    # Per-person colors for multi-person view (up to 8 distinct colors)
+    _PERSON_COLORS = [
+        np.array([0.30, 0.70, 1.00], dtype=np.float32),  # blue
+        np.array([1.00, 0.50, 0.20], dtype=np.float32),  # orange
+        np.array([0.30, 0.90, 0.40], dtype=np.float32),  # green
+        np.array([0.90, 0.30, 0.60], dtype=np.float32),  # pink
+        np.array([0.80, 0.80, 0.20], dtype=np.float32),  # yellow
+        np.array([0.50, 0.30, 0.90], dtype=np.float32),  # purple
+        np.array([0.20, 0.85, 0.85], dtype=np.float32),  # cyan
+        np.array([0.90, 0.40, 0.40], dtype=np.float32),  # red
+    ]
+
+    def _draw_skeleton_for(self, joints: np.ndarray, skel, selected: bool = True):
+        """Draw a skeleton with the given joints/skeleton def.
+
+        When selected=False, draws with a dimmer per-person color and thinner lines.
+        Used for non-selected persons in multi-person view.
+        """
+        if not _HAS_GL or not self._gl_ready or joints is None:
+            return
+
+        self._shader.bind()
+        self._set_mat4("model", self._model_mat)
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        gl.glDisable(gl.GL_DEPTH_TEST)
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        # Pick a color based on person ID
+        pid = None
+        for p, j in self._all_joint_positions.items():
+            if j is joints:
+                pid = p
+                break
+        color_idx = (pid if pid is not None else 0) % len(self._PERSON_COLORS)
+        base_color = self._PERSON_COLORS[color_idx]
+        dim = 1.0 if selected else 0.55
+        bone_color = base_color * dim
+        joint_color = base_color * min(dim * 1.2, 1.0)
+
+        # Draw bones
+        bone_verts = []
+        bone_colors = []
+        for a, b in skel.bone_connections:
+            if a < len(joints) and b < len(joints):
+                bone_verts.append(joints[a])
+                bone_verts.append(joints[b])
+                bone_colors.append(bone_color)
+                bone_colors.append(bone_color)
+        if bone_verts:
+            bv = np.array(bone_verts, dtype=np.float32)
+            bc = np.array(bone_colors, dtype=np.float32)
+            self._draw_primitive(gl.GL_LINES, bv, np.zeros_like(bv), bc,
+                                 line_width=2.0 if selected else 1.5)
+
+        # Draw joints
+        jv = joints.astype(np.float32)
+        jc = np.tile(joint_color, (len(joints), 1))
+        self._draw_primitive(gl.GL_POINTS, jv, np.zeros_like(jv), jc,
+                             point_size=6.0 if selected else 4.0)
+
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glEnable(gl.GL_CULL_FACE)
+        self._shader.release()
 
     def _draw_skeleton(self):
         """Draw skeleton overlay: bones as GL_LINES, joints as GL_POINTS.
@@ -2614,10 +2701,27 @@ class MeshViewport(_BaseWidget):
                 self._camera_mode, self._gl_ready,
             )
 
+        # Compute joints for ALL persons (multi-person view)
+        self._all_joint_positions.clear()
+        self._all_active_skels.clear()
+        if self._show_all_persons and self._session is not None:
+            for pid, track in self._session.person_tracks.items():
+                skel = _SOMA_SKEL if track.body_model_type == "soma" else _SKEL
+                params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
+                if params is None:
+                    continue
+                try:
+                    joints = forward_kinematics(params, self._current_frame)
+                    if joints is not None:
+                        self._all_joint_positions[pid] = joints
+                        self._all_active_skels[pid] = skel
+                except Exception:
+                    pass
+
         # Auto-center orbit camera on skeleton when no mesh is available
         if (
             self._vertices is None
-            and self._joint_positions is not None
+            and (self._joint_positions is not None or self._all_joint_positions)
             and self._camera_mode == "orbit"
             and not self._orbit_auto_centered
         ):

@@ -869,6 +869,13 @@ class AppWindow(QMainWindow):
             vp.set_camera_mode(new_mode)
             self.set_status(f"Camera: {new_mode}")
             return
+        if not mod and key == Qt.Key_M:
+            # Toggle multi-person skeleton view
+            vp = self._mesh_viewport
+            vp._show_all_persons = not vp._show_all_persons
+            vp._refresh_mesh()
+            self.set_status(f"Multi-person: {'on' if vp._show_all_persons else 'off'}")
+            return
 
         # Dispatch to mode-specific handler
         handled = False
