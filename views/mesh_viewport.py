@@ -1080,6 +1080,7 @@ class MeshViewport(_BaseWidget):
         self._selected_joint: int = -1  # -1 = no selection
         self._show_skeleton: bool = True  # whether to draw skeleton overlay
         self._active_skel = _SKEL  # skeleton def for current person (SMPLX or SOMA)
+        self._data_is_global: bool = False  # True = world-space (Y-up), skip CV→GL flip
         self._skeleton_heatmap: bool = False  # confidence heatmap on skeleton
         self._show_all_persons: bool = True  # render all persons' skeletons
         self._all_joint_positions: dict[int, np.ndarray] = {}  # pid → (J, 3)
@@ -1201,13 +1202,19 @@ class MeshViewport(_BaseWidget):
         if person_id == self._person_id:
             return
         self._person_id = person_id
-        # Update active skeleton def based on body model type
+        # Update active skeleton def and coordinate space based on track data
         if self._session is not None:
             track = self._session.person_tracks.get(person_id)
             if track is not None and track.body_model_type == "soma":
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
+            # Detect global-space data (GEM-X) vs camera-space (GVHMR)
+            self._data_is_global = False
+            if track is not None:
+                params = track.soma_params or track.smplx_params
+                if params and params.get("identity_model_type") == "gemx":
+                    self._data_is_global = True
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1444,9 +1451,9 @@ class MeshViewport(_BaseWidget):
     def _update_camera(self):
         """Recompute model/view/projection from current camera state."""
         if self._camera_mode == "orbit":
-            # SOMA/GEM-X global-space data is already Y-up; SMPL-X camera-space
-            # data needs _CV_TO_GL to flip Y/Z from CV to GL convention.
-            if self._active_skel is _SOMA_SKEL:
+            # Global-space data (GEM-X) is already Y-up; camera-space data
+            # (GVHMR) needs _CV_TO_GL to flip Y/Z from CV to GL convention.
+            if self._data_is_global:
                 self._model_mat = np.eye(4, dtype=np.float32)
             else:
                 self._model_mat = _CV_TO_GL.copy()
@@ -1489,9 +1496,9 @@ class MeshViewport(_BaseWidget):
         if pts is None:
             return
 
-        # SOMA/GEM-X data is already in GL-compatible Y-up space;
-        # SMPL-X camera-space data needs Y/Z flip to GL convention.
-        need_flip = self._active_skel is not _SOMA_SKEL
+        # Global-space data (GEM-X) is already Y-up;
+        # camera-space data (GVHMR) needs Y/Z flip to GL convention.
+        need_flip = not self._data_is_global
         centroid = pts.mean(axis=0).copy()
         if need_flip:
             centroid[1] *= -1

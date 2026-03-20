@@ -1238,11 +1238,13 @@ class AppWindow(QMainWindow):
                 track.confidences, track.confidence_breakdown = (
                     self._load_confidences_csv(track.person_dir)
                 )
-            # Fall back to GEM-X embedded confidences from soma_params
-            if track.confidences is None and track.soma_params is not None:
-                gemx_conf = track.soma_params.get("confidences")
-                if gemx_conf is not None:
-                    track.confidences = gemx_conf.tolist()
+            # Fall back to GEM-X embedded confidences
+            if track.confidences is None:
+                params = track.soma_params or track.smplx_params
+                if params is not None:
+                    gemx_conf = params.get("confidences")
+                    if gemx_conf is not None:
+                        track.confidences = gemx_conf.tolist()
 
     def _refresh_all_panels(self):
         """Refresh all panels from current session state after results are loaded.
@@ -1270,10 +1272,12 @@ class AppWindow(QMainWindow):
         self._mesh_viewport.set_person(pid)
         self._pose_corrector.set_person(pid)
 
-        # Auto-switch to orbit camera for skeleton-only tracks (SOMA/GEM-X)
+        # Auto-switch to orbit camera for GEM-X tracks (global-space data)
         track = self._session.person_tracks.get(pid)
-        if track is not None and track.body_model_type == "soma":
-            self._mesh_viewport.set_camera_mode("orbit")
+        if track is not None:
+            params = track.soma_params or track.smplx_params
+            if params and params.get("identity_model_type") == "gemx":
+                self._mesh_viewport.set_camera_mode("orbit")
 
         # Broadcast current frame to all panels
         frame = self._session.current_frame
@@ -1521,10 +1525,12 @@ class AppWindow(QMainWindow):
                 smplx_params, soma_params, body_model_type = self._load_motion_params(person_dir)
 
             # Use GEM-X embedded confidences if no CSV exists
-            if confidences is None and soma_params is not None:
-                gemx_conf = soma_params.get("confidences")
-                if gemx_conf is not None:
-                    confidences = gemx_conf.tolist()
+            if confidences is None:
+                _p = soma_params or smplx_params
+                if _p is not None:
+                    gemx_conf = _p.get("confidences")
+                    if gemx_conf is not None:
+                        confidences = gemx_conf.tolist()
 
             pt = PersonTrack(
                 person_id=tid,
