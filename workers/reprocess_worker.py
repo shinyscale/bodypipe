@@ -75,23 +75,27 @@ class ReprocessWorker(QThread):
                     )
                     continue
 
-                # Get updated bboxes (corrections applied over originals)
-                if track.bbox_corrections is not None:
-                    updated = track.bbox_corrections.copy()
-                    # Fill uncorrected frames from original bboxes
-                    orig = track.original_bboxes if track.original_bboxes is not None else track.bboxes
-                    if orig is not None:
-                        zero_mask = np.all(updated == 0, axis=1)
-                        n = min(len(zero_mask), len(orig))
-                        updated[:n][zero_mask[:n]] = np.array(orig[:n])[zero_mask[:n]]
-                elif track.bboxes is not None:
-                    updated = np.array(track.bboxes)
-                else:
+                # Build fully-interpolated bboxes from keyframe corrections
+                orig = track.original_bboxes if track.original_bboxes is not None else track.bboxes
+                if orig is None:
                     self.progress.emit(
                         (i + 1) / total,
                         f"Person {pid}: no bbox data for reprocess",
                     )
                     continue
+
+                if track.bbox_corrections is not None:
+                    from views.identity_inspector import interpolate_bbox_corrections
+                    # Interpolate keyframe corrections across all frames
+                    interpolated = interpolate_bbox_corrections(
+                        np.array(orig), track.bbox_corrections,
+                    )
+                    # Build final bboxes: use interpolated where non-zero, else original
+                    updated = np.array(orig, dtype=float).copy()
+                    non_zero = ~np.all(interpolated == 0, axis=1)
+                    updated[non_zero] = interpolated[non_zero]
+                else:
+                    updated = np.array(orig, dtype=float)
 
                 def _progress_cb(frac, msg, _i=i, _total=total):
                     overall = (i + frac) / _total

@@ -1437,8 +1437,25 @@ class AppWindow(QMainWindow):
         reprocessed = result.get("reprocessed", [])
         self._session.dirty_persons -= set(reprocessed)
 
+        # Reload motion params, confidences, and bboxes from disk for
+        # reprocessed persons — the old data in memory is stale.
+        for pid in reprocessed:
+            track = self._session.person_tracks.get(pid)
+            if track is None or track.person_dir is None:
+                continue
+            # Clear stale params so _hydrate reloads from new output
+            track.smplx_params = None
+            track.soma_params = None
+            track.confidences = None
+            track.confidence_breakdown = None
+        self._hydrate_person_tracks()
+
+        # Update all panels with new data
         self._populate_tracks()
         self._identity_inspector.refresh()
+        pid = self._session.selected_person
+        self._mesh_viewport.set_person(-1)  # force re-select
+        self._mesh_viewport.set_person(pid)
         self._show_frame(self._session.current_frame)
 
         self.set_status(f"Reprocess complete: {len(reprocessed)} person(s) updated")
