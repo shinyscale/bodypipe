@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
 )
 from PySide6.QtCore import Signal, Qt, QTimer, QEvent
-from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QPainter, QColor
+from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QPainter, QColor, QPen
 
 
 # Speed presets for transport overlay and track timeline footer
@@ -120,6 +120,9 @@ class FrameDisplay(QLabel):
         self._pixmap_size = None
         self._current_frame: np.ndarray | None = None
         self._drag_start: tuple[float, float] | None = None
+        self._drag_current: tuple[float, float] | None = None
+        self._current_bbox: tuple[float, float, float, float] | None = None  # normalized
+        self._resize_corner: int | None = None  # 0=TL, 1=TR, 2=BL, 3=BR
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.setMouseTracking(True)
@@ -190,12 +193,70 @@ class FrameDisplay(QLabel):
             return (x, y)
         return None
 
+    def set_current_bbox(self, bbox: tuple[float, float, float, float] | None):
+        """Set the current bbox (normalized x1,y1,x2,y2) for corner resize hit-testing."""
+        self._current_bbox = bbox
+        self.update()
+
+    def _hit_test_corner(self, nx: float, ny: float) -> int | None:
+        """Check if normalized position is near a corner of the current bbox.
+
+        Returns corner index (0=TL, 1=TR, 2=BL, 3=BR) or None.
+        """
+        if self._current_bbox is None or self._pixmap_size is None:
+            return None
+        x1, y1, x2, y2 = self._current_bbox
+        pw, ph = self._pixmap_size
+        # Hit threshold: 12px in screen space → normalized
+        thresh_x = 12.0 / pw
+        thresh_y = 12.0 / ph
+        corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+        for i, (cx, cy) in enumerate(corners):
+            if abs(nx - cx) < thresh_x and abs(ny - cy) < thresh_y:
+                return i
+        return None
+
+    def _norm_to_screen(self, nx: float, ny: float) -> tuple[float, float]:
+        """Convert normalized [0,1] image coords to screen pixel coords."""
+        pw, ph = self._pixmap_size or (1, 1)
+        ox = (self.width() - pw) / 2
+        oy = (self.height() - ph) / 2
+        return ox + nx * pw, oy + ny * ph
+
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             norm = self._screen_to_norm(event.position())
             if norm:
-                self._drag_start = norm
+                # Check if clicking near a corner of the existing bbox
+                corner = self._hit_test_corner(norm[0], norm[1])
+                if corner is not None:
+                    self._resize_corner = corner
+                    # Anchor is the opposite corner
+                    x1, y1, x2, y2 = self._current_bbox
+                    anchors = [(x2, y2), (x1, y2), (x2, y1), (x1, y1)]
+                    self._drag_start = anchors[corner]
+                    self._drag_current = norm
+                else:
+                    self._resize_corner = None
+                    self._drag_start = norm
+                    self._drag_current = norm
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        # Update cursor when hovering near bbox corners
+        if not (event.buttons() & Qt.LeftButton) and self._current_bbox:
+            norm = self._screen_to_norm(event.position())
+            if norm and self._hit_test_corner(norm[0], norm[1]) is not None:
+                self.setCursor(Qt.SizeAllCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+
+        if self._drag_start and event.buttons() & Qt.LeftButton:
+            norm = self._screen_to_norm(event.position())
+            if norm:
+                self._drag_current = norm
+                self.update()  # trigger repaint for rubber band
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton and self._drag_start:
@@ -212,7 +273,44 @@ class FrameDisplay(QLabel):
                     # Small movement = click
                     self.clicked.emit(x1, y1)
             self._drag_start = None
+            self._drag_current = None
+            self._resize_corner = None
+            self.update()  # clear rubber band
         super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._pixmap_size:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw existing bbox with corner handles (when not actively dragging)
+        if self._current_bbox and not self._drag_start:
+            bx1, by1, bx2, by2 = self._current_bbox
+            sx1, sy1 = self._norm_to_screen(bx1, by1)
+            sx2, sy2 = self._norm_to_screen(bx2, by2)
+            painter.setPen(QPen(QColor(202, 149, 46, 160), 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(int(sx1), int(sy1), int(sx2 - sx1), int(sy2 - sy1))
+            # Corner handles
+            handle = 5
+            painter.setBrush(QColor(202, 149, 46, 200))
+            for cx, cy in [(sx1, sy1), (sx2, sy1), (sx1, sy2), (sx2, sy2)]:
+                painter.drawRect(int(cx - handle), int(cy - handle), handle * 2, handle * 2)
+
+        # Draw rubber-band rectangle during bbox drag
+        if self._drag_start and self._drag_current:
+            x1, y1 = self._drag_start
+            x2, y2 = self._drag_current
+            if abs(x2 - x1) > 0.02 or abs(y2 - y1) > 0.02:
+                sx1, sy1 = self._norm_to_screen(min(x1, x2), min(y1, y2))
+                sx2, sy2 = self._norm_to_screen(max(x1, x2), max(y1, y2))
+                painter.setPen(QPen(QColor(202, 149, 46, 220), 2, Qt.DashLine))
+                painter.setBrush(QColor(202, 149, 46, 40))
+                painter.drawRect(int(sx1), int(sy1), int(sx2 - sx1), int(sy2 - sy1))
+
+        painter.end()
 
 
 class _TransportOverlay(QWidget):
@@ -513,6 +611,10 @@ class VideoPlayer(QWidget):
     def set_frame(self, frame: np.ndarray):
         """Set the displayed frame (already composited with overlays)."""
         self._display.set_frame(frame)
+
+    def set_current_bbox(self, bbox: tuple[float, float, float, float] | None):
+        """Set the current person's bbox (normalized) for corner resize handles."""
+        self._display.set_current_bbox(bbox)
 
     def seek(self, frame_idx: int):
         """Seek to specific frame (clamps to valid range)."""

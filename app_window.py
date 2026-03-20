@@ -1065,6 +1065,27 @@ class AppWindow(QMainWindow):
                 composited = render_edit_preview(composited, self._edit_preview)
             self._video_player.set_frame(composited)
 
+        # Update bbox corner handles for the selected person
+        pid = self._session.selected_person
+        track = self._session.person_tracks.get(pid) if pid >= 0 else None
+        if track is not None and track.bboxes is not None and frame_idx < len(track.bboxes):
+            bbox = track.bboxes[frame_idx]
+            # Use corrected bbox if available
+            if (track.bbox_corrections is not None
+                    and frame_idx < len(track.bbox_corrections)
+                    and not np.all(track.bbox_corrections[frame_idx] == 0)):
+                bbox = track.bbox_corrections[frame_idx]
+            w, h = self._session.img_width, self._session.img_height
+            if w > 0 and h > 0:
+                self._video_player.set_current_bbox((
+                    float(bbox[0]) / w, float(bbox[1]) / h,
+                    float(bbox[2]) / w, float(bbox[3]) / h,
+                ))
+            else:
+                self._video_player.set_current_bbox(None)
+        else:
+            self._video_player.set_current_bbox(None)
+
     # ------------------------------------------------------------------
     # Startup restore & result loading
     # ------------------------------------------------------------------
