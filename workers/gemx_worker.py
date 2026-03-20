@@ -89,6 +89,23 @@ class GEMXWorker(SubprocessWorkerBase):
             results: dict = {"video_path": str(self._video_path)}
             self._output_dir.mkdir(parents=True, exist_ok=True)
 
+            # Confirm GEM-X backend is actually being used (not a GVHMR fallback)
+            demo_script = self._gemx_root / "scripts" / "demo" / "demo_soma.py"
+            self.log_line.emit(f"[GEM-X] Root: {self._gemx_root}")
+            self.log_line.emit(f"[GEM-X] Root exists: {self._gemx_root.is_dir()}")
+            self.log_line.emit(f"[GEM-X] demo_soma.py exists: {demo_script.is_file()}")
+            if not self._gemx_root.is_dir():
+                self.error.emit(
+                    f"GEM-X root not found: {self._gemx_root} — "
+                    "check that GEM-X is cloned as a sibling of GVHMR"
+                )
+                return
+            if not demo_script.is_file():
+                self.error.emit(
+                    f"GEM-X demo script not found: {demo_script}"
+                )
+                return
+
             # Stage 0: Preprocessing
             self._emit_stage(0)
             if self._cancelled:
@@ -97,7 +114,8 @@ class GEMXWorker(SubprocessWorkerBase):
             # Stage 1: GEM-X estimation
             self._emit_stage(1)
             cmd = self._gemx_command()
-            self.log_line.emit(f"$ {' '.join(cmd)}")
+            self.log_line.emit(f"[GEM-X] Running: {' '.join(cmd)}")
+            self.log_line.emit(f"[GEM-X] cwd: {self._gemx_root}")
             rc, lines = self._run_subprocess(cmd, self._gemx_root)
             if self._cancelled:
                 return
@@ -112,7 +130,11 @@ class GEMXWorker(SubprocessWorkerBase):
                 self.error.emit("GEM-X produced no SOMA output")
                 return
             n_frames = soma_params["poses"].shape[0]
-            self.log_line.emit(f"GEM-X output: {n_frames} frames, 77 joints (SOMA)")
+            n_joints = soma_params["poses"].shape[1] if soma_params["poses"].ndim == 3 else "?"
+            self.log_line.emit(
+                f"[GEM-X] CONFIRMED: {n_frames} frames, {n_joints} joints (SOMA) — "
+                f"this is GEM-X output, NOT GVHMR"
+            )
             results["soma_params"] = soma_params
             results["n_frames"] = n_frames
 

@@ -50,7 +50,6 @@ from models.session import Session
 from views.video_player import VideoPlayer
 from views.mesh_viewport import MeshViewport
 from views.identity_inspector import IdentityInspector
-from views.pose_corrector_panel import PoseCorrectorPanel
 from views.track_overview import TrackOverview
 from views.pipeline_settings import (
     SinglePipelineSettings,
@@ -280,7 +279,7 @@ class AppWindow(QMainWindow):
     interaction_mode_changed = Signal(str)  # emitted with InteractionMode.value
 
     MAX_RECENT = 5
-    _DOCK_VERSION = 1  # increment when dock layout structure changes
+    _DOCK_VERSION = 3  # increment when dock layout structure changes
 
     _MULTI_ONLY_DOCKS = (
         "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
@@ -371,9 +370,6 @@ class AppWindow(QMainWindow):
         self._mesh_viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
         self._mesh_viewport.set_session(self._session)
         self._identity_inspector = IdentityInspector(self._session)
-        self._pose_corrector = PoseCorrectorPanel(
-            session=self._session, gvhmr_root=self._gvhmr_root,
-        )
         self._track_overview = TrackOverview()
         self._session_library = SessionLibrary(gvhmr_root=self._gvhmr_root)
 
@@ -386,7 +382,11 @@ class AppWindow(QMainWindow):
         self._video_dock = VideoDock(self._video_player, self)
         self._mesh_dock = MeshViewportDock(self._mesh_viewport, self)
         self._identity_dock = IdentityDock(self._identity_inspector, self)
-        self._pose_corrector_dock = PoseCorrectorDock(self._pose_corrector, self)
+        self._pose_corrector_dock = PoseCorrectorDock(
+            session=self._session, gvhmr_root=self._gvhmr_root,
+            viewport=self._mesh_viewport, parent=self,
+        )
+        self._pose_corrector = self._pose_corrector_dock.pose_corrector
         self._track_overview_dock = TrackOverviewDock(self._track_overview, self)
         self._pipeline_dock = PipelineSettingsDock(
             self._single_settings, self._perf_settings, self._multi_settings, self,
@@ -394,23 +394,23 @@ class AppWindow(QMainWindow):
         self._session_library_dock = SessionLibraryDock(self._session_library, self)
 
         # ---- Arrange docks ----
-        # Pipeline settings on the left, session library tabbed below
+        # Left: Pipeline Settings + Session Library (tabified, Settings on top)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._pipeline_dock)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._session_library_dock)
         self.tabifyDockWidget(self._pipeline_dock, self._session_library_dock)
         self._pipeline_dock.raise_()
 
-        # Video + 3D Mesh in center (right area, tabbed)
+        # Right: Video, then Identity split to its right (full-height column)
         self.addDockWidget(Qt.RightDockWidgetArea, self._video_dock)
-        self.tabifyDockWidget(self._video_dock, self._mesh_dock)
-        self._video_dock.raise_()
-
-        # Identity + PoseCorrector split to the right of video (tabbed)
         self.splitDockWidget(self._video_dock, self._identity_dock, Qt.Horizontal)
         self.tabifyDockWidget(self._identity_dock, self._pose_corrector_dock)
         self._identity_dock.raise_()
 
-        # Track overview at the bottom (log dock added later in _setup_log_panel)
+        # Video/3D stacked: split Video vertically so Mesh goes below Video
+        # (Identity stays full-height in the right column)
+        self.splitDockWidget(self._video_dock, self._mesh_dock, Qt.Vertical)
+
+        # Bottom: Track overview (log dock added later in _setup_log_panel)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._track_overview_dock)
 
     def _setup_menu(self):
@@ -769,7 +769,6 @@ class AppWindow(QMainWindow):
 
         # Multi-mode signal hub (signals only fire when panels are visible)
         self._video_player.frame_clicked.connect(self._identity_inspector.on_frame_click)
-        self._mesh_viewport.joint_clicked.connect(self._pose_corrector.set_joint)
         self._track_overview.person_clicked.connect(self._on_track_clicked)
         self._identity_inspector.frame_requested.connect(self._video_player.seek)
         self._identity_inspector.person_changed.connect(self._on_identity_person_changed)

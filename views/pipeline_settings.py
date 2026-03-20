@@ -375,6 +375,10 @@ class SinglePipelineSettings(QWidget):
         self._set_running(True)
         self.status_message.emit(f"Running {backend_label} pipeline...")
         self.log_message.emit(f"Starting {backend_label} pipeline...", "info")
+        self.log_message.emit(
+            f"  Backend: {be} | Body model: {bm} | Worker: {type(self._worker).__name__}",
+            "info",
+        )
 
     def _on_cancel(self):
         if self._worker:
@@ -414,8 +418,20 @@ class SinglePipelineSettings(QWidget):
         if self._worker is not None:
             self._worker.wait()
             self._worker = None
-        self.status_message.emit("GVHMR pipeline complete")
-        self.log_message.emit("Pipeline finished successfully", "info")
+        # Log which backend actually produced results
+        if "soma_params" in result:
+            actual = "GEM-X (SOMA)"
+            poses = result["soma_params"].get("poses")
+            n = poses.shape[0] if poses is not None and hasattr(poses, "shape") else "?"
+            self.log_message.emit(
+                f"Pipeline finished — backend confirmed: {actual}, {n} frames", "info",
+            )
+        else:
+            actual = "GVHMR (SMPL-X)"
+            self.log_message.emit(
+                f"Pipeline finished — backend confirmed: {actual}", "info",
+            )
+        self.status_message.emit(f"{actual} pipeline complete")
         self.pipeline_finished.emit(result)
 
     def _on_error(self, message: str):
@@ -711,6 +727,10 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._set_running(True)
         self.status_message.emit(f"Running {backend_label} performance capture pipeline...")
         self.log_message.emit(f"Starting {backend_label} performance capture pipeline...", "info")
+        self.log_message.emit(
+            f"  Backend: {be} | Body model: {config.body_model} | Worker: {type(self._worker).__name__}",
+            "info",
+        )
 
     # ------------------------------------------------------------------
     # Multi-stage progress display
@@ -1136,6 +1156,10 @@ class MultiPipelineSettings(QWidget):
         self._set_running(True)
         self.status_message.emit(f"Running multi-person pipeline ({backend_label})...")
         self.log_message.emit(f"Starting multi-person pipeline ({backend_label})...", "info")
+        self.log_message.emit(
+            f"  Backend: {be} | Body model: {config.body_model} | Worker: {type(self._worker).__name__}",
+            "info",
+        )
 
     def _on_cancel(self):
         if self._worker:

@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSlider,
     QSpinBox,
-    QSplitter,
     QTabWidget,
     QScrollArea,
     QToolButton,
@@ -828,10 +827,17 @@ class PoseCorrectorPanel(QWidget):
     frame_requested = Signal(int)  # corrections table "Go" → seek to frame
     export_requested = Signal(str)  # "bvh" or "fbx"
 
-    def __init__(self, session: Session, gvhmr_root: Path | None = None, parent=None):
+    def __init__(
+        self,
+        session: Session,
+        gvhmr_root: Path | None = None,
+        viewport: MeshViewport | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._session = session
         self._gvhmr_root = gvhmr_root
+        self._external_viewport = viewport
         self._current_person: int = -1
         self._current_frame: int = 0
         self._current_joint: int = -1
@@ -854,20 +860,18 @@ class PoseCorrectorPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
 
-        splitter = QSplitter(Qt.Horizontal)
+        # Use external viewport if provided, else create embedded one (legacy)
+        if self._external_viewport is not None:
+            self._viewport = self._external_viewport
+            # Don't call set_session — the main viewport already has it
+        else:
+            self._viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
+            self._viewport.set_session(self._session)
 
-        # ---- Left: Viewport + camera/color mode ----
-        viewport_widget = QWidget()
-        vp_layout = QVBoxLayout(viewport_widget)
-        vp_layout.setContentsMargins(4, 4, 4, 4)
-
-        self._viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
-        self._viewport.set_session(self._session)
-        vp_layout.addWidget(self._viewport, stretch=1)
-
+        # Camera/color/labels controls row (controls the main 3D viewport)
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Camera:"))
         self._camera_combo = QComboBox()
@@ -881,23 +885,16 @@ class PoseCorrectorPanel(QWidget):
         self._labels_checkbox.setToolTip("Show joint name labels on skeleton")
         mode_row.addWidget(self._labels_checkbox)
         mode_row.addStretch()
-        vp_layout.addLayout(mode_row)
+        layout.addLayout(mode_row)
 
-        splitter.addWidget(viewport_widget)
-
-        # ---- Right: Tabbed property panel ----
+        # Tabbed controls (no splitter needed — viewport is external)
         self._controls_tabs = QTabWidget()
         self._controls_tabs.setDocumentMode(True)
         self._controls_tabs.addTab(self._build_pose_tab(), "Pose")
         self._controls_tabs.addTab(self._build_corrections_tab(), "Corrections")
         self._controls_tabs.addTab(self._build_export_tab(), "Export")
         self._controls_tabs.addTab(self._build_space_tab(), "Space")
-
-        splitter.addWidget(self._controls_tabs)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        layout.addWidget(splitter)
+        layout.addWidget(self._controls_tabs, stretch=1)
 
         # Preview playback timer (not a visual widget)
         self._preview_timer = QTimer(self)
@@ -1457,7 +1454,9 @@ class PoseCorrectorPanel(QWidget):
     def set_session(self, session: Session):
         """Bind session data source."""
         self._session = session
-        self._viewport.set_session(session)
+        # Only set session on viewport if we own it (not external)
+        if self._external_viewport is None:
+            self._viewport.set_session(session)
         self._refresh_corrections_table()
 
     def set_person(self, person_id: int):

@@ -80,11 +80,20 @@ class IdentityDock(QDockWidget):
 class PoseCorrectorDock(QDockWidget):
     """Dock wrapping a PoseCorrectorPanel widget."""
 
-    def __init__(self, pose_corrector: PoseCorrectorPanel, parent: QWidget | None = None):
+    def __init__(
+        self,
+        session,
+        gvhmr_root=None,
+        viewport=None,
+        parent: QWidget | None = None,
+    ):
         super().__init__("Pose Corrector", parent)
         self.setObjectName("PoseCorrectorDock")
-        self._pose_corrector = pose_corrector
-        self.setWidget(pose_corrector)
+        from views.pose_corrector_panel import PoseCorrectorPanel
+        self._pose_corrector = PoseCorrectorPanel(
+            session=session, gvhmr_root=gvhmr_root, viewport=viewport, parent=self,
+        )
+        self.setWidget(self._pose_corrector)
 
     @property
     def pose_corrector(self) -> PoseCorrectorPanel:
