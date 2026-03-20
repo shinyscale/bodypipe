@@ -542,15 +542,15 @@ class AppWindow(QMainWindow):
         self._toggle_statusbar_action.toggled.connect(self._status_bar.setVisible)
 
     def _setup_log_panel(self):
-        """Create collapsible log dock widget, tabified with track overview."""
+        """Create log dock widget, split horizontally beside track overview."""
         self._log_panel = LogPanel()
         self._log_dock = QDockWidget("Log", self)
         self._log_dock.setObjectName("LogDock")
         self._log_dock.setWidget(self._log_panel)
         self._log_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
-        self.tabifyDockWidget(self._track_overview_dock, self._log_dock)
-        self._log_dock.raise_()
+        # Split side-by-side instead of tabifying — both visible at once
+        self.splitDockWidget(self._track_overview_dock, self._log_dock, Qt.Horizontal)
 
         self._toggle_log_action.toggled.connect(self._log_dock.setVisible)
         self._log_dock.visibilityChanged.connect(self._toggle_log_action.setChecked)
@@ -617,9 +617,9 @@ class AppWindow(QMainWindow):
             if dock:
                 dock.setVisible(attr in visible_attrs)
 
-        # Log dock: visible only in Pipeline preset
+        # Log dock: visible in all presets that have track overview
         if hasattr(self, "_log_dock"):
-            show_log = name == "Pipeline"
+            show_log = "_track_overview_dock" in visible_attrs or name == "Pipeline"
             self._log_dock.setVisible(show_log)
             self._toggle_log_action.setChecked(show_log)
 
