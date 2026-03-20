@@ -129,11 +129,23 @@ class PersonTrack:
     confidence_breakdown: dict[str, list[float]] | None = None
 
     def to_dict(self) -> dict:
+        # Ensure keyframe confidence values are JSON-serializable
+        # (TrackConfidence objects → dicts or floats)
+        safe_kfs = []
+        for kf in self.keyframes:
+            kf_copy = dict(kf)
+            conf = kf_copy.get("confidence")
+            if conf is not None and hasattr(conf, "to_dict"):
+                kf_copy["confidence"] = conf.to_dict()
+            elif conf is not None and not isinstance(conf, (int, float, dict, type(None))):
+                kf_copy["confidence"] = float(conf) if hasattr(conf, "__float__") else None
+            safe_kfs.append(kf_copy)
+
         d = {
             "person_id": self.person_id,
             "person_dir": str(self.person_dir) if self.person_dir else None,
             "body_model_type": self.body_model_type,
-            "keyframes": self.keyframes,
+            "keyframes": safe_kfs,
         }
         if self.identity_track is not None and hasattr(self.identity_track, "to_dict"):
             d["identity_track"] = self.identity_track.to_dict()
