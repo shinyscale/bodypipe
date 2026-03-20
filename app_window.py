@@ -1561,21 +1561,25 @@ class AppWindow(QMainWindow):
                         pass
 
     def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
-        """Load motion params — tries GEM-X (hpe_results.pt / SOMA) first, falls back to GVHMR (SMPL-X)."""
-        # GEM-X primary: hpe_results.pt (torch dict with body_params_global)
+        """Load motion params — tries GEM-X first, falls back to GVHMR."""
+        # GEM-X primary: hpe_results.pt
         try:
             from workers.gemx_worker import load_gemx_soma_output
-            soma_params = load_gemx_soma_output(person_dir)
-            if soma_params is not None:
-                return None, soma_params, "soma"
-            # Also check gemx_demo subdirectory
-            gemx_demo = person_dir / "gemx_demo"
-            if gemx_demo.is_dir():
-                soma_params = load_gemx_soma_output(gemx_demo)
-                if soma_params is not None:
-                    return None, soma_params, "soma"
+            for search_dir in [person_dir, person_dir / "gemx_demo"]:
+                if not search_dir.is_dir():
+                    continue
+                gemx_result = load_gemx_soma_output(search_dir)
+                if gemx_result is not None:
+                    bmt = gemx_result.pop("body_model_type", "soma")
+                    if bmt == "smplx":
+                        # GEM-X with 21 body joints → SMPL-X format
+                        return gemx_result, None, "smplx"
+                    else:
+                        # GEM-X with 76 body joints → true SOMA format
+                        return None, gemx_result, "soma"
         except Exception:
             pass
+        # GVHMR fallback: hmr4d_results.pt
         smplx_params = self._load_smplx_params_legacy(person_dir)
         if smplx_params is not None:
             return smplx_params, None, "smplx"
