@@ -97,6 +97,9 @@ class ReprocessWorker(QThread):
                     overall = (i + frac) / _total
                     self.progress.emit(overall, msg)
 
+                # Use the same backend the track was originally processed with
+                backend = "gemx" if track.body_model_type == "soma" else "gvhmr"
+
                 reprocess_person(
                     video_path=str(self._session.video_path),
                     person_index=person_index,
@@ -108,6 +111,7 @@ class ReprocessWorker(QThread):
                     static_cam=self._session.static_cam,
                     use_dpvo=self._session.use_dpvo,
                     progress_callback=_progress_cb,
+                    estimation_backend=backend,
                 )
 
                 reprocessed.append(pid)
