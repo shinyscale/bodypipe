@@ -73,12 +73,19 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                     conf_probs = 1.0 / (1.0 + np.exp(-conf_logits.astype(np.float64)))
                     confidences = conf_probs.mean(axis=1).astype(np.float32)
 
+                # Also load global-space orient/transl for orbit mode
+                bp_global = data.get("body_params_global", {})
+                go_world = np.array(bp_global.get("global_orient", global_orient)).astype(np.float32)
+                tr_world = np.array(bp_global.get("transl", transl)).astype(np.float32)
+
                 if n_pose_joints <= 21:
                     # SMPL-X format (21 body joints) — use smplx_params path
                     result = {
                         "body_pose": body_pose.reshape(n_frames, n_pose_joints, 3).astype(np.float32),
                         "global_orient": global_orient.astype(np.float32),
                         "transl": transl.astype(np.float32),
+                        "global_orient_world": go_world,
+                        "transl_world": tr_world,
                         "body_model_type": "smplx",
                     }
                 else:

@@ -1209,9 +1209,13 @@ class MeshViewport(_BaseWidget):
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
-            # All data is now camera-space (incam) — GEM-X loads
-            # body_params_incam, GVHMR loads hmr4d_results (camera-space)
+            # Detect if world-space params are available (GEM-X provides both)
+            # In orbit mode, FK will use world-space orient/transl
             self._data_is_global = False
+            if track is not None:
+                params = track.soma_params or track.smplx_params
+                if params and "transl_world" in params:
+                    self._data_is_global = True
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1694,6 +1698,15 @@ class MeshViewport(_BaseWidget):
                 track.soma_params is not None, track.smplx_params is not None,
             )
             return None
+
+        # In orbit mode, use world-space orient/transl if available
+        # so characters stay grounded while the camera orbits freely
+        if (self._camera_mode == "orbit"
+                and "global_orient_world" in params
+                and "transl_world" in params):
+            params = dict(params)  # shallow copy to avoid mutating original
+            params["global_orient"] = params["global_orient_world"]
+            params["transl"] = params["transl_world"]
 
         # Apply pose override for real-time preview
         if self._pose_override is not None:
@@ -2714,6 +2727,13 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
                     continue
+                # In orbit mode, use world-space orient/transl if available
+                if (self._camera_mode == "orbit"
+                        and "global_orient_world" in params
+                        and "transl_world" in params):
+                    params = dict(params)
+                    params["global_orient"] = params["global_orient_world"]
+                    params["transl"] = params["transl_world"]
                 try:
                     joints = forward_kinematics(params, self._current_frame)
                     if joints is not None:
