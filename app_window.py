@@ -1278,7 +1278,7 @@ class AppWindow(QMainWindow):
 
     def _load_slam_if_needed(self):
         """Load shared SLAM camera trajectory from output dir."""
-        if self._session.slam_w2c is not None:
+        if self._session.slam_c2w is not None:
             return
         if self._session.output_dir is None:
             return
@@ -1288,8 +1288,8 @@ class AppWindow(QMainWindow):
         try:
             import torch
             slam = torch.load(str(slam_path), map_location="cpu", weights_only=False)
-            self._session.slam_w2c = np.array(slam, dtype=np.float32)
-            log.info("Loaded SLAM w2c: %s", self._session.slam_w2c.shape)
+            self._session.slam_c2w = np.array(slam, dtype=np.float32)
+            log.info("Loaded SLAM c2w: %s", self._session.slam_c2w.shape)
         except Exception as e:
             log.warning("Failed to load SLAM: %s", e)
 

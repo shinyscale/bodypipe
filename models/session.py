@@ -207,7 +207,7 @@ class Session:
     # Camera intrinsics
     camera_K: np.ndarray | None = None
     K_orig: np.ndarray | None = None  # (3,3) original video intrinsics (GEM-X convention)
-    slam_w2c: np.ndarray | None = None  # (N, 4, 4) per-frame world-to-camera
+    slam_c2w: np.ndarray | None = None  # (N, 4, 4) per-frame camera-to-world
 
     # Session metadata (serialized)
     notes: str = ""
@@ -321,7 +321,7 @@ class Session:
         self.correction_tracks.clear()
         self.camera_K = None
         self.K_orig = None
-        self.slam_w2c = None
+        self.slam_c2w = None
         self.notes = ""
         self.tags.clear()
         self.version = 1

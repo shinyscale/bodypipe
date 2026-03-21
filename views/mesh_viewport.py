@@ -582,22 +582,22 @@ def _transform_crop_to_world(
     K_crop: np.ndarray,
     K_orig: np.ndarray,
     crop_bbox: list[int],
-    T_w2c: np.ndarray,
+    T_c2w: np.ndarray,
 ) -> np.ndarray:
     """Transform joints from crop camera space to world space.
 
     Step 1: Crop camera → original video camera (undo crop offset + intrinsics remap)
-    Step 2: Original camera → world (inverse of SLAM world-to-camera)
+    Step 2: Original camera → world (apply SLAM camera-to-world directly)
 
     Args:
         joints: (J, 3) in crop camera space
         K_crop: (3, 3) crop camera intrinsics
         K_orig: (3, 3) original video intrinsics
         crop_bbox: [x1, y1, x2, y2] crop in original video coords
-        T_w2c: (4, 4) world-to-camera transform from SLAM
+        T_c2w: (4, 4) camera-to-world from SLAM (frame 0 = identity)
 
     Returns:
-        (J, 3) joints in world space (Y-up)
+        (J, 3) joints in world space (Y-down, CV convention)
     """
     # Step 1: crop camera → original camera
     X, Y, Z = joints[:, 0], joints[:, 1], joints[:, 2]
@@ -611,12 +611,10 @@ def _transform_crop_to_world(
     Y_new = (fy_c * Y + (cy_c + crop_y1 - cy_f) * Z) / fy_f
     joints_orig = np.stack([X_new, Y_new, Z], axis=-1)
 
-    # Step 2: original camera → world (fast rigid inverse of T_w2c)
-    R = T_w2c[:3, :3]
-    t = T_w2c[:3, 3]
-    R_inv = R.T
-    t_inv = -R_inv @ t
-    return (R_inv @ joints_orig.T).T + t_inv
+    # Step 2: original camera → world (C2W applied directly)
+    R = T_c2w[:3, :3]
+    t = T_c2w[:3, 3]
+    return (R @ joints_orig.T).T + t
 
 
 def compute_orbit_view(
@@ -1778,11 +1776,13 @@ class MeshViewport(_BaseWidget):
         """Try to transform joints from crop camera space to world space.
 
         Returns world-space joints if all data is available, else None.
+        SLAM world is Y-down (CV convention) — does NOT set _data_is_global,
+        so the CV→GL flip in _update_camera still applies.
         """
         s = self._session
         if s is None:
             return None
-        slam = s.slam_w2c
+        slam = s.slam_c2w
         K_orig = s.K_orig
         K_crop = track.K_crop
         crop_bbox = track.crop_bbox
@@ -1805,11 +1805,9 @@ class MeshViewport(_BaseWidget):
         fi = min(self._current_frame, len(slam) - 1)
         fi = max(fi, 0)
         try:
-            world_joints = _transform_crop_to_world(
+            return _transform_crop_to_world(
                 joints, K_crop, K_orig, crop_bbox, slam[fi]
             )
-            self._data_is_global = True
-            return world_joints
         except Exception as e:
             logger.debug("World-grounding failed: %s", e)
             return None
