@@ -200,6 +200,7 @@ class Session:
 
     # Camera intrinsics
     camera_K: np.ndarray | None = None
+    slam_cam2world: np.ndarray | None = None  # (N, 4, 4) per-frame camera-to-world
 
     # Session metadata (serialized)
     notes: str = ""

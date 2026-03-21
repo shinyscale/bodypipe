@@ -1246,6 +1246,23 @@ class AppWindow(QMainWindow):
                     if gemx_conf is not None:
                         track.confidences = gemx_conf.tolist()
 
+    def _load_slam_if_needed(self):
+        """Load shared SLAM camera trajectory from output dir."""
+        if self._session.slam_cam2world is not None:
+            return
+        if self._session.output_dir is None:
+            return
+        slam_path = self._session.output_dir / "shared_slam.pt"
+        if not slam_path.is_file():
+            return
+        try:
+            import torch
+            slam = torch.load(str(slam_path), map_location="cpu", weights_only=False)
+            self._session.slam_cam2world = np.array(slam, dtype=np.float32)
+            log.info("Loaded SLAM cam2world: %s", self._session.slam_cam2world.shape)
+        except Exception as e:
+            log.warning("Failed to load SLAM: %s", e)
+
     def _refresh_all_panels(self):
         """Refresh all panels from current session state after results are loaded.
 
@@ -1255,6 +1272,9 @@ class AppWindow(QMainWindow):
         """
         if not self._session.person_tracks:
             return
+
+        # Load SLAM camera trajectory for world-space rendering
+        self._load_slam_if_needed()
 
         # Populate track overview and markers
         self._populate_tracks()

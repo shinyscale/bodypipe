@@ -1209,13 +1209,11 @@ class MeshViewport(_BaseWidget):
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
-            # Detect if world-space params are available (GEM-X provides both)
-            # In orbit mode, FK will use world-space orient/transl
-            self._data_is_global = False
-            if track is not None:
-                params = track.soma_params or track.smplx_params
-                if params and "transl_world" in params:
-                    self._data_is_global = True
+            # When SLAM is available, orbit mode transforms to world space
+            self._data_is_global = (
+                self._session is not None
+                and self._session.slam_cam2world is not None
+            )
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1699,15 +1697,6 @@ class MeshViewport(_BaseWidget):
             )
             return None
 
-        # In orbit mode, use world-space orient/transl if available
-        # so characters stay grounded while the camera orbits freely
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
-            params = dict(params)  # shallow copy to avoid mutating original
-            params["global_orient"] = params["global_orient_world"]
-            params["transl"] = params["transl_world"]
-
         # Apply pose override for real-time preview
         if self._pose_override is not None:
             ov_frame = self._pose_override.get("frame_idx", self._current_frame)
@@ -1715,11 +1704,28 @@ class MeshViewport(_BaseWidget):
                 params = self._apply_override_to_params(params, self._current_frame)
 
         try:
-            return forward_kinematics(params, self._current_frame)
+            joints = forward_kinematics(params, self._current_frame)
+            # In orbit mode, transform from camera space to world space
+            # using SLAM camera trajectory so characters stay grounded
+            if joints is not None and self._camera_mode == "orbit":
+                joints = self._cam_to_world(joints, self._current_frame)
+            return joints
         except Exception as e:
             logger.warning("FK failed (pid=%d, f=%d): %s",
                            self._person_id, self._current_frame, e)
             return None
+
+    def _cam_to_world(self, joints: np.ndarray, frame_idx: int) -> np.ndarray:
+        """Transform joint positions from camera space to world space using SLAM."""
+        if self._session is None or self._session.slam_cam2world is None:
+            return joints
+        slam = self._session.slam_cam2world
+        if frame_idx >= len(slam):
+            return joints
+        c2w = slam[frame_idx]  # (4, 4) camera-to-world
+        R = c2w[:3, :3]
+        t = c2w[:3, 3]
+        return (R @ joints.T).T + t
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
         """Pick the joint at screen position, using the active picking mode.
@@ -2727,16 +2733,12 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
                     continue
-                # In orbit mode, use world-space orient/transl if available
-                if (self._camera_mode == "orbit"
-                        and "global_orient_world" in params
-                        and "transl_world" in params):
-                    params = dict(params)
-                    params["global_orient"] = params["global_orient_world"]
-                    params["transl"] = params["transl_world"]
                 try:
                     joints = forward_kinematics(params, self._current_frame)
                     if joints is not None:
+                        # Transform to world space in orbit mode
+                        if self._camera_mode == "orbit":
+                            joints = self._cam_to_world(joints, self._current_frame)
                         self._all_joint_positions[pid] = joints
                         self._all_active_skels[pid] = skel
                 except Exception:
