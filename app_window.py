@@ -1245,10 +1245,40 @@ class AppWindow(QMainWindow):
                     gemx_conf = params.get("confidences")
                     if gemx_conf is not None:
                         track.confidences = gemx_conf.tolist()
+            # Load crop metadata for world-grounding
+            self._load_crop_metadata(track)
+
+    def _load_crop_metadata(self, track):
+        """Load crop_bbox and K_crop for a person track (world-grounding)."""
+        if track.person_dir is None or not track.person_dir.is_dir():
+            return
+        # Load crop_bbox from person_meta.json
+        if track.crop_bbox is None:
+            meta_path = track.person_dir / "person_meta.json"
+            if meta_path.is_file():
+                try:
+                    import json as _json
+                    meta = _json.loads(meta_path.read_text())
+                    bbox = meta.get("crop_bbox")
+                    if bbox is not None and len(bbox) == 4:
+                        track.crop_bbox = [int(v) for v in bbox]
+                except Exception as e:
+                    log.debug("Failed to load crop_bbox from %s: %s", meta_path, e)
+        # Extract K_crop from loaded params' K_fullimg[0]
+        if track.K_crop is None:
+            params = track.soma_params or track.smplx_params
+            if params is not None:
+                K_full = params.get("K_fullimg")
+                if K_full is not None:
+                    K_arr = np.array(K_full, dtype=np.float32)
+                    if K_arr.ndim == 3:
+                        track.K_crop = K_arr[0]  # (3, 3)
+                    elif K_arr.ndim == 2 and K_arr.shape == (3, 3):
+                        track.K_crop = K_arr
 
     def _load_slam_if_needed(self):
         """Load shared SLAM camera trajectory from output dir."""
-        if self._session.slam_cam2world is not None:
+        if self._session.slam_w2c is not None:
             return
         if self._session.output_dir is None:
             return
@@ -1258,8 +1288,8 @@ class AppWindow(QMainWindow):
         try:
             import torch
             slam = torch.load(str(slam_path), map_location="cpu", weights_only=False)
-            self._session.slam_cam2world = np.array(slam, dtype=np.float32)
-            log.info("Loaded SLAM cam2world: %s", self._session.slam_cam2world.shape)
+            self._session.slam_w2c = np.array(slam, dtype=np.float32)
+            log.info("Loaded SLAM w2c: %s", self._session.slam_w2c.shape)
         except Exception as e:
             log.warning("Failed to load SLAM: %s", e)
 
@@ -1275,6 +1305,18 @@ class AppWindow(QMainWindow):
 
         # Load SLAM camera trajectory for world-space rendering
         self._load_slam_if_needed()
+
+        # Compute K_orig (original video intrinsics, GEM-X convention)
+        s = self._session
+        if s.K_orig is None and s.img_width > 0 and s.img_height > 0:
+            focal = float(max(s.img_width, s.img_height))
+            K = np.eye(3, dtype=np.float32)
+            K[0, 0] = focal
+            K[1, 1] = focal
+            K[0, 2] = s.img_width / 2.0
+            K[1, 2] = s.img_height / 2.0
+            s.K_orig = K
+            log.info("Computed K_orig (GEM-X convention): focal=%.0f", focal)
 
         # Populate track overview and markers
         self._populate_tracks()
@@ -1564,6 +1606,7 @@ class AppWindow(QMainWindow):
                 soma_params=soma_params,
                 body_model_type=body_model_type,
             )
+            self._load_crop_metadata(pt)
             self._session.person_tracks[tid] = pt
 
         # Mark inactive tracks

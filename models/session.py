@@ -127,6 +127,9 @@ class PersonTrack:
     # Per-component confidence breakdown (computed from backend, not serialized)
     # Keys: "detection", "visibility", "overlap", "shape", "motion", "overall"
     confidence_breakdown: dict[str, list[float]] | None = None
+    # Crop metadata for world-grounding (loaded from person_meta.json / hpe_results.pt)
+    crop_bbox: list[int] | None = None  # [x1, y1, x2, y2] in original video coords
+    K_crop: np.ndarray | None = None  # (3,3) intrinsics for the crop camera
 
     def to_dict(self) -> dict:
         # Ensure keyframe confidence values are JSON-serializable
@@ -147,6 +150,8 @@ class PersonTrack:
             "body_model_type": self.body_model_type,
             "keyframes": safe_kfs,
         }
+        if self.crop_bbox is not None:
+            d["crop_bbox"] = self.crop_bbox
         if self.identity_track is not None and hasattr(self.identity_track, "to_dict"):
             d["identity_track"] = self.identity_track.to_dict()
         if self.bbox_corrections is not None:
@@ -162,6 +167,7 @@ class PersonTrack:
             person_dir=Path(data["person_dir"]) if data.get("person_dir") else None,
             body_model_type=data.get("body_model_type", "smplx"),
             keyframes=data.get("keyframes", []),
+            crop_bbox=data.get("crop_bbox"),
         )
         if "bbox_corrections" in data:
             pt.bbox_corrections = np.array(data["bbox_corrections"], dtype=float)
@@ -200,7 +206,8 @@ class Session:
 
     # Camera intrinsics
     camera_K: np.ndarray | None = None
-    slam_cam2world: np.ndarray | None = None  # (N, 4, 4) per-frame camera-to-world
+    K_orig: np.ndarray | None = None  # (3,3) original video intrinsics (GEM-X convention)
+    slam_w2c: np.ndarray | None = None  # (N, 4, 4) per-frame world-to-camera
 
     # Session metadata (serialized)
     notes: str = ""
@@ -313,6 +320,8 @@ class Session:
         self.crossing_spans.clear()
         self.correction_tracks.clear()
         self.camera_K = None
+        self.K_orig = None
+        self.slam_w2c = None
         self.notes = ""
         self.tags.clear()
         self.version = 1

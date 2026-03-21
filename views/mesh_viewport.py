@@ -577,6 +577,48 @@ def estimate_K(width: int, height: int) -> np.ndarray:
     return K
 
 
+def _transform_crop_to_world(
+    joints: np.ndarray,
+    K_crop: np.ndarray,
+    K_orig: np.ndarray,
+    crop_bbox: list[int],
+    T_w2c: np.ndarray,
+) -> np.ndarray:
+    """Transform joints from crop camera space to world space.
+
+    Step 1: Crop camera → original video camera (undo crop offset + intrinsics remap)
+    Step 2: Original camera → world (inverse of SLAM world-to-camera)
+
+    Args:
+        joints: (J, 3) in crop camera space
+        K_crop: (3, 3) crop camera intrinsics
+        K_orig: (3, 3) original video intrinsics
+        crop_bbox: [x1, y1, x2, y2] crop in original video coords
+        T_w2c: (4, 4) world-to-camera transform from SLAM
+
+    Returns:
+        (J, 3) joints in world space (Y-up)
+    """
+    # Step 1: crop camera → original camera
+    X, Y, Z = joints[:, 0], joints[:, 1], joints[:, 2]
+    fx_c, cx_c = K_crop[0, 0], K_crop[0, 2]
+    fy_c, cy_c = K_crop[1, 1], K_crop[1, 2]
+    fx_f, cx_f = K_orig[0, 0], K_orig[0, 2]
+    fy_f, cy_f = K_orig[1, 1], K_orig[1, 2]
+    crop_x1, crop_y1 = float(crop_bbox[0]), float(crop_bbox[1])
+
+    X_new = (fx_c * X + (cx_c + crop_x1 - cx_f) * Z) / fx_f
+    Y_new = (fy_c * Y + (cy_c + crop_y1 - cy_f) * Z) / fy_f
+    joints_orig = np.stack([X_new, Y_new, Z], axis=-1)
+
+    # Step 2: original camera → world (fast rigid inverse of T_w2c)
+    R = T_w2c[:3, :3]
+    t = T_w2c[:3, 3]
+    R_inv = R.T
+    t_inv = -R_inv @ t
+    return (R_inv @ joints_orig.T).T + t_inv
+
+
 def compute_orbit_view(
     yaw_deg: float,
     pitch_deg: float,
@@ -1209,12 +1251,9 @@ class MeshViewport(_BaseWidget):
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
-            # Detect if world-space params are available for orbit mode
+            # Reset — _data_is_global is set dynamically by _compute_joints
+            # based on whether world-grounding transform succeeds
             self._data_is_global = False
-            if track is not None:
-                params = track.soma_params or track.smplx_params
-                if params and "transl_world" in params:
-                    self._data_is_global = True
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1681,7 +1720,8 @@ class MeshViewport(_BaseWidget):
     def _compute_joints(self) -> np.ndarray | None:
         """Compute 3D joint positions for current person/frame.
 
-        Returns (J, 3) array in camera space, or None if params unavailable.
+        Returns (J, 3) array in camera space (incam) or world space (orbit
+        with world-grounding data), or None if params unavailable.
         """
         if self._session is None or self._person_id < 0:
             return None
@@ -1698,15 +1738,6 @@ class MeshViewport(_BaseWidget):
             )
             return None
 
-        # In orbit mode, use world-space orient/transl if available
-        # so characters stay grounded while the camera orbits freely
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
-            params = dict(params)
-            params["global_orient"] = params["global_orient_world"]
-            params["transl"] = params["transl_world"]
-
         # Apply pose override for real-time preview
         if self._pose_override is not None:
             ov_frame = self._pose_override.get("frame_idx", self._current_frame)
@@ -1714,10 +1745,73 @@ class MeshViewport(_BaseWidget):
                 params = self._apply_override_to_params(params, self._current_frame)
 
         try:
-            return forward_kinematics(params, self._current_frame)
+            joints = forward_kinematics(params, self._current_frame)
         except Exception as e:
             logger.warning("FK failed (pid=%d, f=%d): %s",
                            self._person_id, self._current_frame, e)
+            return None
+        if joints is None:
+            return None
+
+        # In orbit mode, try to world-ground via crop→orig→world transform
+        if self._camera_mode == "orbit":
+            world_joints = self._try_world_ground(joints, track)
+            if world_joints is not None:
+                return world_joints
+            # Fallback: use body_params_global orient/transl if available
+            if "global_orient_world" in params and "transl_world" in params:
+                params = dict(params)
+                params["global_orient"] = params["global_orient_world"]
+                params["transl"] = params["transl_world"]
+                try:
+                    fallback = forward_kinematics(params, self._current_frame)
+                    if fallback is not None:
+                        self._data_is_global = True
+                        return fallback
+                except Exception:
+                    pass
+        return joints
+
+    def _try_world_ground(
+        self, joints: np.ndarray, track
+    ) -> np.ndarray | None:
+        """Try to transform joints from crop camera space to world space.
+
+        Returns world-space joints if all data is available, else None.
+        """
+        s = self._session
+        if s is None:
+            return None
+        slam = s.slam_w2c
+        K_orig = s.K_orig
+        K_crop = track.K_crop
+        crop_bbox = track.crop_bbox
+        if slam is None or K_orig is None or crop_bbox is None:
+            return None
+        # Estimate K_crop from crop dimensions if not loaded from hpe_results
+        if K_crop is None:
+            cw = crop_bbox[2] - crop_bbox[0]
+            ch = crop_bbox[3] - crop_bbox[1]
+            if cw > 0 and ch > 0:
+                focal = float(max(cw, ch))
+                K_crop = np.eye(3, dtype=np.float32)
+                K_crop[0, 0] = focal
+                K_crop[1, 1] = focal
+                K_crop[0, 2] = cw / 2.0
+                K_crop[1, 2] = ch / 2.0
+            else:
+                return None
+        # Clamp frame index to SLAM range
+        fi = min(self._current_frame, len(slam) - 1)
+        fi = max(fi, 0)
+        try:
+            world_joints = _transform_crop_to_world(
+                joints, K_crop, K_orig, crop_bbox, slam[fi]
+            )
+            self._data_is_global = True
+            return world_joints
+        except Exception as e:
+            logger.debug("World-grounding failed: %s", e)
             return None
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
@@ -2689,6 +2783,8 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
+        # Reset global flag — _compute_joints sets it True when world-grounding succeeds
+        self._data_is_global = False
         # In wireframe mode skip the expensive SMPL-X forward pass —
         # only compute FK joint positions for the skeleton overlay.
         if self._render_mode != RenderMode.WIREFRAME:
@@ -2726,18 +2822,26 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
                     continue
-                # In orbit mode, use world-space orient/transl
-                if (self._camera_mode == "orbit"
-                        and "global_orient_world" in params
-                        and "transl_world" in params):
-                    params = dict(params)
-                    params["global_orient"] = params["global_orient_world"]
-                    params["transl"] = params["transl_world"]
                 try:
                     joints = forward_kinematics(params, self._current_frame)
-                    if joints is not None:
-                        self._all_joint_positions[pid] = joints
-                        self._all_active_skels[pid] = skel
+                    if joints is None:
+                        continue
+                    # In orbit mode, try world-grounding transform
+                    if self._camera_mode == "orbit":
+                        wj = self._try_world_ground(joints, track)
+                        if wj is not None:
+                            joints = wj
+                        elif ("global_orient_world" in params
+                              and "transl_world" in params):
+                            # Fallback: body_params_global
+                            p2 = dict(params)
+                            p2["global_orient"] = p2["global_orient_world"]
+                            p2["transl"] = p2["transl_world"]
+                            j2 = forward_kinematics(p2, self._current_frame)
+                            if j2 is not None:
+                                joints = j2
+                    self._all_joint_positions[pid] = joints
+                    self._all_active_skels[pid] = skel
                 except Exception:
                     pass
 
