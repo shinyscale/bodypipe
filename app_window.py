@@ -1134,6 +1134,7 @@ class AppWindow(QMainWindow):
         # hydrate heavy data from disk and refresh all panels.
         if self._session.person_tracks:
             self._hydrate_person_tracks()
+            self._normalize_world_positions()
             self._refresh_all_panels()
             return
 
@@ -1216,7 +1217,52 @@ class AppWindow(QMainWindow):
                     except Exception:
                         pass
 
+        self._normalize_world_positions()
         self._refresh_all_panels()
+
+    def _normalize_world_positions(self):
+        """Offset world-space translations so persons don't overlap.
+
+        Each person's GVHMR world trajectory starts from its own origin.
+        Use incam frame-0 positions to compute horizontal offsets so
+        persons are separated correctly in orbit mode.
+        """
+        tracks = self._session.person_tracks
+        if len(tracks) < 2:
+            return
+
+        # Collect frame-0 incam transl for each person that has world params
+        incam_frame0 = {}
+        for pid, track in tracks.items():
+            params = track.soma_params or track.smplx_params
+            if params is None or "transl_world" not in params:
+                continue
+            tr_incam = np.asarray(params.get("transl"))
+            if tr_incam is not None and tr_incam.ndim >= 2 and tr_incam.shape[0] > 0:
+                incam_frame0[pid] = tr_incam[0].copy()
+
+        if len(incam_frame0) < 2:
+            return
+
+        # Use lowest pid as reference
+        ref_pid = min(incam_frame0.keys())
+        ref_pos = incam_frame0[ref_pid]
+
+        for pid, track in tracks.items():
+            if pid == ref_pid or pid not in incam_frame0:
+                continue
+            params = track.soma_params or track.smplx_params
+            tr_world = np.asarray(params["transl_world"])
+            if not isinstance(tr_world, np.ndarray) or tr_world.ndim < 2:
+                continue
+            # Incam offset relative to reference person
+            offset = incam_frame0[pid] - ref_pos
+            # Camera→world: X same, Z negated (camera Z is into screen,
+            # world Z is out). Y already ground-normalized per-person.
+            tr_world = tr_world.copy()
+            tr_world[:, 0] += offset[0]
+            tr_world[:, 2] -= offset[2]
+            params["transl_world"] = tr_world.astype(np.float32)
 
     def _hydrate_person_tracks(self):
         """Load heavy data (smplx_params, confidences) from disk for existing tracks.
@@ -1515,6 +1561,7 @@ class AppWindow(QMainWindow):
             track.confidences = None
             track.confidence_breakdown = None
         self._hydrate_person_tracks()
+        self._normalize_world_positions()
 
         # Update all panels with new data
         self._populate_tracks()
@@ -1672,8 +1719,16 @@ class AppWindow(QMainWindow):
                 global_params = results.get("smpl_params_global")
                 if global_params and "global_orient" in global_params:
                     params = dict(params)  # shallow copy to add keys
-                    params["global_orient_world"] = global_params["global_orient"]
-                    params["transl_world"] = global_params["transl"]
+                    go_world = np.array(global_params["global_orient"]).astype(np.float32)
+                    tr_world = np.array(global_params["transl"]).astype(np.float32)
+                    # Ground-normalize: GVHMR transl gives actual pelvis height
+                    # but FK uses mean-shape offsets. Shift Y so feet land at Y=0.
+                    # SMPL-X default leg length (hip→foot sum of Y offsets): ~0.933m
+                    if tr_world.shape[0] > 0:
+                        floor_y = float(tr_world[0, 1]) - 0.933
+                        tr_world[:, 1] -= floor_y
+                    params["global_orient_world"] = go_world
+                    params["transl_world"] = tr_world
                 return params
         except Exception:
             pass

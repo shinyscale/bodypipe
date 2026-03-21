@@ -139,6 +139,14 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                             len(gvhmr_go_global), n_frames,
                         )
 
+                # Ground-normalize: shift transl_world Y so feet land at Y=0.
+                # FK uses mean-shape bone offsets; leg length differs by format.
+                _LEG_LENGTH = 0.908 if n_pose_joints > 21 else 0.933
+                if tr_world.shape[0] > 0:
+                    floor_y = float(tr_world[0, 1]) - _LEG_LENGTH
+                    tr_world = tr_world.copy()
+                    tr_world[:, 1] -= floor_y
+
                 if n_pose_joints <= 21:
                     # SMPL-X format (21 body joints) — use smplx_params path
                     result = {
