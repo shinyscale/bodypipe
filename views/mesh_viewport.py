@@ -1716,16 +1716,23 @@ class MeshViewport(_BaseWidget):
             return None
 
     def _cam_to_world(self, joints: np.ndarray, frame_idx: int) -> np.ndarray:
-        """Transform joint positions from camera space to world space using SLAM."""
+        """Transform joint positions from camera space to world space using SLAM.
+
+        SLAM stores world-to-camera (W2C) matrices. To go from camera space
+        to world space we need the inverse: C2W = inv(W2C).
+        """
         if self._session is None or self._session.slam_cam2world is None:
             return joints
         slam = self._session.slam_cam2world
         if frame_idx >= len(slam):
             return joints
-        c2w = slam[frame_idx]  # (4, 4) camera-to-world
-        R = c2w[:3, :3]
-        t = c2w[:3, 3]
-        return (R @ joints.T).T + t
+        w2c = slam[frame_idx]  # (4, 4) world-to-camera
+        # Invert: for rigid transform, R^T and -R^T @ t
+        R = w2c[:3, :3]
+        t = w2c[:3, 3]
+        R_inv = R.T
+        t_inv = -R_inv @ t
+        return (R_inv @ joints.T).T + t_inv
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
         """Pick the joint at screen position, using the active picking mode.
