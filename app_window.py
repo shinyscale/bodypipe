@@ -1668,6 +1668,12 @@ class AppWindow(QMainWindow):
                 K = results.get("K_fullimg")
                 if K is not None and self._session.camera_K is None:
                     self._session.camera_K = K[0].numpy()
+                # Extract world-space params for orbit mode
+                global_params = results.get("smpl_params_global")
+                if global_params and "global_orient" in global_params:
+                    params = dict(params)  # shallow copy to add keys
+                    params["global_orient_world"] = global_params["global_orient"]
+                    params["transl_world"] = global_params["transl"]
                 return params
         except Exception:
             pass

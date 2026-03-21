@@ -246,8 +246,15 @@ def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
     if tr is not None:
         tr = np.asarray(tr)
 
-    # Root (joint 0 = global orient)
-    root_aa = poses[frame_idx, 0] if poses.ndim == 3 else poses[0]
+    # Root (joint 0 = global orient).
+    # In orbit mode the viewport swaps params["global_orient"] to world-space;
+    # prefer that over poses[:, 0] which is always incam.
+    go = params.get("global_orient")
+    if go is not None:
+        go = np.asarray(go)
+        root_aa = go[frame_idx] if go.ndim >= 2 else go
+    else:
+        root_aa = poses[frame_idx, 0] if poses.ndim == 3 else poses[0]
     accumulated_R[0] = Rotation.from_rotvec(np.asarray(root_aa).ravel()[:3]).as_matrix()
     if tr is not None and tr.ndim >= 2 and frame_idx < tr.shape[0]:
         positions[0] = tr[frame_idx]

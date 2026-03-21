@@ -8,7 +8,6 @@ for hand and face tracking.
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -20,9 +19,6 @@ from models.pipeline_config import PipelineConfig
 from workers._base import SubprocessWorkerBase
 
 logger = logging.getLogger(__name__)
-
-GVHMR_ROOT = Path(__file__).resolve().parents[2] / "GVHMR"
-GVHMR_PYTHON = Path("/home/shinyscale/miniconda3/envs/gvhmr/bin/python")
 
 # Stage fraction ranges for GEM-X pipeline (simpler than GVHMR — single pass)
 _GEMX_STAGES: list[tuple[float, float, str]] = [
@@ -38,8 +34,10 @@ def _load_gvhmr_world_params(hpe_path: Path) -> tuple[np.ndarray, np.ndarray] | 
 
     GVHMR's world-grounding (get_body_params_w_Rt_v2 + SimpleVO) is well-
     calibrated with its model.  When GVHMR results exist alongside GEM-X
-    output, we can borrow GVHMR's body_params_global for orbit-mode world
+    output, we can borrow GVHMR's smpl_params_global for orbit-mode world
     grounding while using GEM-X's superior body/hand/face estimation.
+
+    Returns (global_orient, transl) both as Y-up np.float32, or None.
 
     Search order for hmr4d_results.pt:
     1. Sibling ``demo/`` directory (multi-person layout: person_N/demo/…)
@@ -51,12 +49,10 @@ def _load_gvhmr_world_params(hpe_path: Path) -> tuple[np.ndarray, np.ndarray] | 
     search_dirs = []
     # Multi-person: person_N/gemx_demo/…/hpe_results.pt → person_N/demo/
     for parent in hpe_path.parents:
-        demo_dir = parent / "demo"
-        if demo_dir.is_dir():
-            search_dirs.append(demo_dir)
-        gvhmr_wg = parent / "gvhmr_wg"
-        if gvhmr_wg.is_dir():
-            search_dirs.append(gvhmr_wg)
+        for subdir in ("demo", "demo.bak", "gvhmr_wg"):
+            d = parent / subdir
+            if d.is_dir():
+                search_dirs.append(d)
         if parent.name.startswith("person_"):
             break
     search_dirs.append(hpe_path.parent)
@@ -65,23 +61,15 @@ def _load_gvhmr_world_params(hpe_path: Path) -> tuple[np.ndarray, np.ndarray] | 
         for pt in d.rglob("hmr4d_results.pt"):
             try:
                 data = torch.load(str(pt), map_location="cpu", weights_only=False)
-                bp_global = data.get("body_params_global")
+                # GVHMR uses "smpl_params_global", not "body_params_global"
+                bp_global = data.get("smpl_params_global") or data.get("body_params_global")
                 if bp_global is None:
                     continue
-                go = np.array(bp_global["global_orient"]).astype(np.float32)
-                tr = np.array(bp_global["transl"]).astype(np.float32)
-
-                # GVHMR body_params_global is in CV convention (Y-down).
-                # The viewport's orbit mode with _data_is_global=True expects
-                # GL convention (Y-up).  Conjugate the rotation by the CV→GL
-                # flip: rotvec (rx,ry,rz) → (rx,-ry,-rz), transl → (x,-y,-z).
-                go[:, 1] *= -1
-                go[:, 2] *= -1
-                tr[:, 1] *= -1
-                tr[:, 2] *= -1
-
+                go_global = np.array(bp_global["global_orient"]).astype(np.float32)
+                tr_global = np.array(bp_global["transl"]).astype(np.float32)
+                # GVHMR global params are already Y-up — no flip needed.
                 logger.info("Loaded GVHMR world params from %s", pt)
-                return go, tr
+                return go_global, tr_global
             except Exception:
                 continue
     return None
@@ -139,14 +127,16 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
 
                 gvhmr_world = _load_gvhmr_world_params(f)
                 if gvhmr_world is not None:
-                    gvhmr_go, gvhmr_tr = gvhmr_world
-                    # Length must match GEM-X output
-                    if len(gvhmr_go) == n_frames:
-                        go_world, tr_world = gvhmr_go, gvhmr_tr
+                    gvhmr_go_global, gvhmr_tr_global = gvhmr_world
+                    if len(gvhmr_go_global) == n_frames:
+                        # Both orient and transl from GVHMR — already Y-up,
+                        # matching the orbit camera's world_up = [0, 1, 0].
+                        go_world = gvhmr_go_global
+                        tr_world = gvhmr_tr_global
                     else:
                         logger.warning(
                             "GVHMR frames %d != GEM-X %d — using GEM-X global",
-                            len(gvhmr_go), n_frames,
+                            len(gvhmr_go_global), n_frames,
                         )
 
                 if n_pose_joints <= 21:
@@ -255,16 +245,10 @@ class GEMXWorker(SubprocessWorkerBase):
                 )
                 return
 
-            # Stage 0: Preprocessing — run GVHMR for world-grounding
+            # Stage 0: Preprocessing
             self._emit_stage(0)
             if self._cancelled:
                 return
-
-            if not self._config.static_cam:
-                camera_pt = self._compute_simple_vo()
-                if camera_pt is None:
-                    self.log_line.emit("[GEM-X] SimpleVO unavailable — static camera fallback.")
-                self._run_gvhmr_for_world_grounding()
 
             # Stage 1: GEM-X estimation
             self._emit_stage(1)
@@ -347,86 +331,6 @@ class GEMXWorker(SubprocessWorkerBase):
     def _emit_stage(self, idx: int):
         start, _end, label = _GEMX_STAGES[idx]
         self.progress.emit(start, label)
-
-    def _compute_simple_vo(self) -> Path | None:
-        """Run SimpleVO via GVHMR env subprocess, stage camera.pt for GEM-X.
-
-        Returns the camera.pt path on success, None on failure (graceful fallback).
-        """
-        # GEM-X expects camera.pt at {output_root}/{video_stem}/preprocess/camera.pt
-        video_stem = self._video_path.stem
-        camera_pt = self._output_dir / video_stem / "preprocess" / "camera.pt"
-        if camera_pt.exists():
-            self.log_line.emit(f"[GEM-X] SimpleVO: reusing existing {camera_pt}")
-            return camera_pt
-
-        vo_script = GVHMR_ROOT / "tools" / "compute_vo.py"
-        if not vo_script.exists():
-            self.log_line.emit(f"[GEM-X] SimpleVO: script not found: {vo_script}")
-            return None
-
-        gvhmr_python = str(GVHMR_PYTHON) if GVHMR_PYTHON.exists() else sys.executable
-        camera_pt.parent.mkdir(parents=True, exist_ok=True)
-
-        cmd = [
-            gvhmr_python,
-            str(vo_script),
-            f"--video={self._video_path}",
-            f"--output={camera_pt}",
-        ]
-        self.log_line.emit(f"[GEM-X] SimpleVO: {' '.join(cmd)}")
-        rc, lines = self._run_subprocess(cmd, GVHMR_ROOT)
-        if self._cancelled:
-            return None
-        if rc != 0 or not camera_pt.exists():
-            self.log_line.emit(f"[GEM-X] SimpleVO failed (exit {rc})")
-            return None
-
-        self.log_line.emit(f"[GEM-X] SimpleVO: camera.pt staged at {camera_pt}")
-        return camera_pt
-
-    def _run_gvhmr_for_world_grounding(self) -> None:
-        """Run GVHMR (lightweight, no render) to produce hmr4d_results.pt.
-
-        GEM-X's internal world-grounding is insufficient for large camera
-        orbits.  GVHMR's body_params_global provides world-space root
-        orient/transl that the viewport's orbit mode needs.  The GVHMR
-        result is loaded at result-loading time by _load_gvhmr_world_params().
-
-        Uses a separate output_root (gvhmr_wg/) to avoid preprocess format
-        conflicts — GVHMR and GEM-X have incompatible bbx.pt layouts.
-        """
-        # Use separate dir to avoid sharing preprocess/ with GEM-X
-        gvhmr_output = self._output_dir / "gvhmr_wg"
-
-        # Check if GVHMR already ran
-        existing = list(gvhmr_output.rglob("hmr4d_results.pt"))
-        if existing:
-            self.log_line.emit(f"[GEM-X] GVHMR world-grounding: reusing {existing[0]}")
-            return
-
-        demo_script = GVHMR_ROOT / "tools" / "demo" / "demo.py"
-        if not demo_script.is_file():
-            self.log_line.emit("[GEM-X] GVHMR demo.py not found — skipping world-grounding")
-            return
-
-        gvhmr_python = str(GVHMR_PYTHON) if GVHMR_PYTHON.exists() else sys.executable
-        cmd = [
-            gvhmr_python,
-            str(demo_script),
-            f"--video={self._video_path}",
-            f"--output_root={gvhmr_output}",
-            "--skip_render",
-        ]
-        if self._config.static_cam:
-            cmd.append("--static_cam")
-
-        self.log_line.emit(f"[GEM-X] Running GVHMR for world-grounding: {' '.join(cmd)}")
-        rc, lines = self._run_subprocess(cmd, GVHMR_ROOT)
-        if self._cancelled:
-            return
-        if rc != 0:
-            self.log_line.emit(f"[GEM-X] GVHMR world-grounding failed (exit {rc}) — orbit mode may lazy-susan")
 
     def _gemx_command(self) -> list[str]:
         cmd = [
