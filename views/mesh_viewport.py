@@ -1751,21 +1751,21 @@ class MeshViewport(_BaseWidget):
         if joints is None:
             return None
 
-        # In orbit mode, try to world-ground via crop→orig→world transform
+        # In orbit mode, use global-space params directly (Y-up, world-grounded
+        # by GVHMR's internal VO). This matches what _compute_vertices does when
+        # it uses global params — keeping skeleton and mesh in the same space.
+        # NOTE: the old _try_world_ground() SLAM path is disabled because it
+        # applies a crop→orig→world transform that diverges from the mesh.
         if self._camera_mode == "orbit":
-            world_joints = self._try_world_ground(joints, track)
-            if world_joints is not None:
-                return world_joints
-            # Fallback: use body_params_global orient/transl if available
             if "global_orient_world" in params and "transl_world" in params:
                 params = dict(params)
                 params["global_orient"] = params["global_orient_world"]
                 params["transl"] = params["transl_world"]
                 try:
-                    fallback = forward_kinematics(params, self._current_frame)
-                    if fallback is not None:
+                    world_joints = forward_kinematics(params, self._current_frame)
+                    if world_joints is not None:
                         self._data_is_global = True
-                        return fallback
+                        return world_joints
                 except Exception:
                     pass
         return joints
@@ -2064,6 +2064,13 @@ class MeshViewport(_BaseWidget):
         params = track.smplx_params
         if params is None:
             return None
+
+        # In orbit mode, use global-space params so mesh matches skeleton
+        if self._camera_mode == "orbit":
+            if "global_orient_world" in params and "transl_world" in params:
+                params = dict(params)
+                params["global_orient"] = params["global_orient_world"]
+                params["transl"] = params["transl_world"]
 
         # Apply pose override for real-time preview
         if override_active:

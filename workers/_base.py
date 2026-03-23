@@ -26,12 +26,23 @@ class SubprocessWorkerBase(QThread):
         self._cancelled = True
         self._terminate_proc()
 
-    def _run_subprocess(self, cmd: list[str], cwd: str | Path) -> tuple[int, list[str]]:
+    def _run_subprocess(
+        self, cmd: list[str], cwd: str | Path, env: dict | None = None,
+    ) -> tuple[int, list[str]]:
         """Run a subprocess, streaming stdout line-by-line.
 
         Emits ``log_line`` for each line and calls the ``_on_stdout_line`` hook.
         Returns ``(returncode, log_lines)``.  *returncode* is ``-1`` when cancelled.
+
+        If *env* is provided, it is merged into ``os.environ`` (overrides only
+        the specified keys, preserving PATH and other essentials).
         """
+        import os
+
+        full_env = None
+        if env:
+            full_env = {**os.environ, **env}
+
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -39,6 +50,7 @@ class SubprocessWorkerBase(QThread):
             text=True,
             bufsize=1,
             cwd=str(cwd),
+            env=full_env,
         )
 
         log_lines: list[str] = []

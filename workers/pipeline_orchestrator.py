@@ -660,8 +660,12 @@ class FullPipelineWorker(SubprocessWorkerBase):
         return callback
 
     def _gvhmr_command(self) -> list[str]:
+        # Use GVHMR's own venv Python if it exists, otherwise sys.executable
+        gvhmr_python = self._gvhmr_root / ".venv" / "bin" / "python"
+        python_exe = str(gvhmr_python) if gvhmr_python.exists() else sys.executable
+
         cmd = [
-            sys.executable,
+            python_exe,
             "tools/demo/demo.py",
             f"--video={self._video_path}",
         ]
@@ -722,7 +726,7 @@ class MultiPersonWorker(QThread):
 
             self.progress.emit(0.02, "Starting multi-person pipeline...")
 
-            result = split_multi_person_video(
+            kwargs = dict(
                 video_path=str(self._video_path),
                 output_dir=str(self._output_dir),
                 static_cam=self._config.static_cam,
@@ -731,8 +735,13 @@ class MultiPersonWorker(QThread):
                 render_overlays=self._config.render_overlays,
                 use_inpainting=self._config.use_inpainting,
                 progress_callback=progress_callback,
-                estimation_backend=self._config.estimation_backend,
             )
+            # Pass estimation_backend only if supported (not yet upstream)
+            import inspect
+            if "estimation_backend" in inspect.signature(split_multi_person_video).parameters:
+                kwargs["estimation_backend"] = self._config.estimation_backend
+
+            result = split_multi_person_video(**kwargs)
 
             if self._cancelled:
                 return

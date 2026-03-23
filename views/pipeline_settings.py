@@ -115,8 +115,19 @@ class SinglePipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        self._left_layout = left_layout = QVBoxLayout(self)
+        from PySide6.QtWidgets import QScrollArea
+
+        # Wrap all content in a scroll area so it's usable on small screens
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        inner = QWidget()
+        self._left_layout = left_layout = QVBoxLayout(inner)
         left_layout.setContentsMargins(8, 8, 8, 8)
+        scroll.setWidget(inner)
+        outer_layout.addWidget(scroll)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         # Video input
@@ -878,8 +889,18 @@ class MultiPipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        from PySide6.QtWidgets import QScrollArea
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(inner)
+        outer_layout.addWidget(scroll)
 
         # Video input
         input_group = QGroupBox("Video Input")

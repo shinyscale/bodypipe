@@ -182,17 +182,49 @@ class GEMXWorker(SubprocessWorkerBase):
                 )
                 return
 
-            # Stage 0: Preprocessing
+            # Stage 0: Preprocessing — run SimpleVO for world grounding
             self._emit_stage(0)
             if self._cancelled:
                 return
+
+            if not self._config.static_cam:
+                # GEM-X needs camera.pt for world grounding. Without it,
+                # body_params_global tracks camera rotation instead of being
+                # stationary. SimpleVO (from GVHMR) provides the missing input.
+                # GEM-X output lands in {output_root}/{video_name}/preprocess/
+                # where video_name is the (sanitized) stem.
+                import re
+                safe_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', self._video_path.stem)
+                preprocess_dir = self._output_dir / safe_stem / "preprocess"
+                camera_pt = preprocess_dir / "camera.pt"
+                if not camera_pt.exists():
+                    self.log_line.emit("[GEM-X] Running SimpleVO for world grounding...")
+                    try:
+                        from workers.simplevo_preprocess import run_simplevo
+
+                        gvhmr_root = self._gemx_root.parent / "GVHMR"
+                        run_simplevo(
+                            video_path=self._video_path,
+                            output_path=camera_pt,
+                            gvhmr_root=gvhmr_root,
+                            f_mm=self._config.focal_mm,
+                        )
+                        self.log_line.emit(f"[GEM-X] SimpleVO camera.pt saved: {camera_pt}")
+                    except Exception as e:
+                        self.log_line.emit(
+                            f"[GEM-X] WARNING: SimpleVO failed ({e}), "
+                            "world grounding may be inaccurate"
+                        )
+                else:
+                    self.log_line.emit(f"[GEM-X] Using existing camera.pt: {camera_pt}")
 
             # Stage 1: GEM-X estimation
             self._emit_stage(1)
             cmd = self._gemx_command()
             self.log_line.emit(f"[GEM-X] Running: {' '.join(cmd)}")
             self.log_line.emit(f"[GEM-X] cwd: {self._gemx_root}")
-            rc, lines = self._run_subprocess(cmd, self._gemx_root)
+            env = getattr(self, "_gemx_env", None)
+            rc, lines = self._run_subprocess(cmd, self._gemx_root, env=env)
             if self._cancelled:
                 return
             if rc != 0:
@@ -270,12 +302,34 @@ class GEMXWorker(SubprocessWorkerBase):
         self.progress.emit(start, label)
 
     def _gemx_command(self) -> list[str]:
+        import re
+
+        # Use GEM-X's own venv Python if it exists, otherwise sys.executable
+        gemx_python = self._gemx_root / ".venv" / "bin" / "python"
+        python_exe = str(gemx_python) if gemx_python.exists() else sys.executable
+
+        # Hydra can't handle special chars (&, commas, spaces) in video names.
+        # Symlink to a sanitized name if needed.
+        video_path = self._video_path
+        safe_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', video_path.stem)
+        if safe_stem != video_path.stem:
+            safe_link = video_path.parent / f"{safe_stem}{video_path.suffix}"
+            if not safe_link.exists():
+                safe_link.symlink_to(video_path)
+            video_path = safe_link
+            self.log_line.emit(f"[GEM-X] Sanitized filename: {safe_stem}")
+
         cmd = [
-            sys.executable,
+            python_exe,
             "scripts/demo/demo_soma.py",
-            f"--video={self._video_path}",
+            f"--video={video_path}",
             f"--output_root={self._output_dir}",
         ]
         if self._config.static_cam:
             cmd.append("--static_cam")
+
+        # Set PYTHONPATH so GEM-X can find its submodules
+        self._gemx_env = {
+            "PYTHONPATH": f"{self._gemx_root}:{self._gemx_root / 'third_party' / 'sam-3d-body'}",
+        }
         return cmd

@@ -549,9 +549,15 @@ class AppWindow(QMainWindow):
     def _setup_log_panel(self):
         """Create log dock widget, split horizontally beside track overview."""
         self._log_panel = LogPanel()
+        self._log_panel.setMinimumHeight(100)
         self._log_dock = QDockWidget("Log", self)
         self._log_dock.setObjectName("LogDock")
         self._log_dock.setWidget(self._log_panel)
+        self._log_dock.setMinimumHeight(120)
+        self._log_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )  # remove DockWidgetClosable so it can't collapse
         self._log_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
         # Split side-by-side instead of tabifying — both visible at once
@@ -1655,12 +1661,18 @@ class AppWindow(QMainWindow):
         return None, None, "smplx"
 
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
-        """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering."""
+        """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering.
+
+        Loads both camera-space (incam) and world-space (global) params.
+        World params are stored as ``global_orient_world`` / ``transl_world``
+        so the viewport can use them in orbit mode for proper world grounding.
+        """
         hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
         if not hmr4d_pt.is_file():
             return None
         try:
             import torch
+            import numpy as np
 
             results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
             params = results.get("smpl_params_incam")
@@ -1668,6 +1680,14 @@ class AppWindow(QMainWindow):
                 K = results.get("K_fullimg")
                 if K is not None and self._session.camera_K is None:
                     self._session.camera_K = K[0].numpy()
+
+                # Also load global-space params for orbit mode world grounding
+                g = results.get("smpl_params_global", {})
+                if "global_orient" in g:
+                    params["global_orient_world"] = np.array(g["global_orient"]).astype(np.float32)
+                if "transl" in g:
+                    params["transl_world"] = np.array(g["transl"]).astype(np.float32)
+
                 return params
         except Exception:
             pass

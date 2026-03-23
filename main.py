@@ -14,6 +14,28 @@ GVHMR_ROOT = Path(__file__).resolve().parent.parent / "GVHMR"
 if str(GVHMR_ROOT) not in sys.path:
     sys.path.insert(0, str(GVHMR_ROOT))
 
+# On DGX Spark (separate venvs), add GVHMR's venv site-packages so torch
+# and other heavy deps are available for in-process imports (multi_person_split, etc.)
+_gvhmr_sp = GVHMR_ROOT / ".venv" / "lib" / "python3.12" / "site-packages"
+if _gvhmr_sp.is_dir() and str(_gvhmr_sp) not in sys.path:
+    sys.path.append(str(_gvhmr_sp))
+
+# PyTorch 2.12+ defaults weights_only=True which breaks YOLO/ultralytics
+# checkpoint loading. Allow unsafe loads globally (all checkpoints are local).
+try:
+    import torch
+    torch.serialization.add_safe_globals(
+        [type(None)]  # dummy to ensure the mechanism is initialized
+    )
+    # Override default to weights_only=False for compatibility
+    _orig_load = torch.load
+    def _patched_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_load(*args, **kwargs)
+    torch.load = _patched_load
+except ImportError:
+    pass
+
 # On WSL2, two OpenGL platform issues must be fixed before any GL library
 # is loaded (i.e. before QApplication is created):
 #
