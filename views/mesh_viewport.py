@@ -218,13 +218,16 @@ def compute_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return (vertex_normals / lengths).astype(np.float32)
 
 
-def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
+def _forward_kinematics_soma(
+    params: dict, frame_idx: int, offsets_override: dict | None = None,
+) -> np.ndarray:
     """Compute 3D joint positions for SOMA's unified poses tensor.
 
     Parameters
     ----------
     params : dict with keys poses (N, 77, 3), transl (N, 3)
     frame_idx : which frame to compute
+    offsets_override : optional dict mapping joint name → (3,) rest-pose offset
 
     Returns
     -------
@@ -237,9 +240,10 @@ def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
     positions = np.zeros((n_joints, 3))
     accumulated_R = np.zeros((n_joints, 3, 3))
 
+    src = offsets_override or SOMA_SKELETON.default_offsets
     offsets = np.zeros((n_joints, 3))
     for i, name in enumerate(SOMA_SKELETON.joint_names):
-        offsets[i] = SOMA_SKELETON.default_offsets.get(name, [0, 0, 0])
+        offsets[i] = src.get(name, [0, 0, 0])
 
     poses = np.asarray(params["poses"])
     tr = params.get("transl")
@@ -269,17 +273,18 @@ def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
     return positions
 
 
-def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
+def forward_kinematics(
+    params: dict, frame_idx: int, offsets_override: dict | None = None,
+) -> np.ndarray:
     """Compute 3D joint positions in camera space for one frame.
-
-    Uses DEFAULT_OFFSETS (model-derived rest-pose, not shape-dependent).
-    Mirrors ``visualize_skeleton.py:forward_kinematics``.
 
     Parameters
     ----------
     params : dict with keys global_orient (N,3), body_pose (N,21*3 or N,21,3),
              transl (N,3). Optional: left_hand_pose (N,15,3), right_hand_pose (N,15,3).
     frame_idx : which frame to compute
+    offsets_override : optional dict mapping joint name → (3,) rest-pose offset.
+        When provided, uses shape-dependent bone lengths instead of DEFAULT_OFFSETS.
 
     Returns
     -------
@@ -287,7 +292,7 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     """
     # SOMA path: unified poses tensor (N, J, 3)
     if "poses" in params and "body_pose" not in params:
-        return _forward_kinematics_soma(params, frame_idx)
+        return _forward_kinematics_soma(params, frame_idx, offsets_override)
 
     from scipy.spatial.transform import Rotation
 
@@ -295,9 +300,10 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     positions = np.zeros((n_joints, 3))
     accumulated_R = np.zeros((n_joints, 3, 3))
 
+    src = offsets_override or DEFAULT_OFFSETS
     offsets = np.zeros((n_joints, 3))
     for i, name in enumerate(JOINT_NAMES):
-        offsets[i] = DEFAULT_OFFSETS.get(name, [0, 0, 0])
+        offsets[i] = src.get(name, [0, 0, 0])
 
     def _get_array(key):
         v = params.get(key)
@@ -1078,6 +1084,15 @@ class MeshViewport(_BaseWidget):
         self._model_loaded: bool = False
         self._lbs_weights: np.ndarray | None = None  # (V, J) from model
 
+        # SOMA body model (loaded lazily, separate from SMPL-X)
+        self._soma_model: object | None = None
+        self._soma_model_loaded: bool = False
+        self._soma_faces: np.ndarray | None = None  # (F, 3) int32 — SOMA topology
+        self._uploaded_face_source: str = ""  # "smplx" or "soma" — which EBO is active
+
+        # Shape-dependent FK offsets cache: {person_id: dict[joint_name, (3,)]}
+        self._shape_offsets_cache: dict[int, dict[str, list[float]]] = {}
+
         # Vertex color mode ("solid", "joint", "confidence")
         self._color_mode: str = "solid"
 
@@ -1236,6 +1251,7 @@ class MeshViewport(_BaseWidget):
         """Bind session data source."""
         self._session = session
         self._vertex_cache.clear()
+        self._shape_offsets_cache.clear()
 
     def set_person(self, person_id: int):
         """Select which person's mesh to display."""
@@ -1715,6 +1731,120 @@ class MeshViewport(_BaseWidget):
     # Skeleton: joint computation + joint picking
     # ------------------------------------------------------------------
 
+    def _get_shape_offsets(self, person_id: int) -> dict[str, list[float]] | None:
+        """Compute shape-dependent FK offsets for a person from the body model.
+
+        Uses the SOMA or SMPL-X body model at zero pose with the person's
+        identity parameters to get rest-pose joint positions, then computes
+        parent-relative offsets.  Results are cached per person_id.
+
+        Returns dict mapping joint name → [x, y, z] offset, or None if
+        the body model is unavailable.
+        """
+        if person_id in self._shape_offsets_cache:
+            return self._shape_offsets_cache[person_id]
+
+        if self._session is None:
+            return None
+        track = self._session.person_tracks.get(person_id)
+        if track is None:
+            return None
+
+        try:
+            import torch
+
+            offsets_dict: dict[str, list[float]] = {}
+
+            if track.soma_params is not None and self._load_soma_model():
+                # SOMA path: use SomaLayer.get_skeleton() for rest-pose joints
+                from models.skeleton import SOMA_SKELETON
+                sp = track.soma_params
+                ic = sp.get("identity_coeffs")
+                sc = sp.get("scale_params")
+
+                n_coeffs = 128  # SOMA PCA identity dimension
+                if ic is not None:
+                    ic_t = torch.tensor(np.asarray(ic), dtype=torch.float32)
+                    if ic_t.ndim == 1:
+                        ic_t = ic_t.unsqueeze(0)
+                    if ic_t.shape[-1] != n_coeffs:
+                        ic_t = torch.zeros(1, n_coeffs)
+                else:
+                    ic_t = torch.zeros(1, n_coeffs)
+
+                sc_t = None
+                if sc is not None:
+                    sc_t = torch.tensor(np.asarray(sc), dtype=torch.float32)
+                    if sc_t.ndim == 1:
+                        sc_t = sc_t.unsqueeze(0)
+                if sc_t is None:
+                    sc_t = torch.ones(1, 1)
+
+                with torch.no_grad():
+                    rest_joints = self._soma_model.get_skeleton(
+                        ic_t, sc_t
+                    )  # (1, 77, 3)
+                joints_np = rest_joints[0].cpu().numpy()
+
+                parents = SOMA_SKELETON.joint_parents
+                for i, name in enumerate(SOMA_SKELETON.joint_names):
+                    if i == 0:
+                        offsets_dict[name] = [0.0, 0.0, 0.0]
+                    else:
+                        off = joints_np[i] - joints_np[parents[i]]
+                        offsets_dict[name] = off.tolist()
+
+            elif track.smplx_params is not None and self._load_model():
+                # SMPL-X path: run body model at zero pose with betas
+                params = track.smplx_params
+                betas = params.get("betas")
+                if betas is None:
+                    return None
+
+                be_t = torch.tensor(np.asarray(betas), dtype=torch.float32)
+                if be_t.ndim >= 2:
+                    be_t = be_t[:1]
+                else:
+                    be_t = be_t.unsqueeze(0)
+
+                n_body = 21
+                with torch.no_grad():
+                    out = self._body_model(
+                        body_pose=torch.zeros(1, n_body * 3),
+                        betas=be_t,
+                        global_orient=torch.zeros(1, 3),
+                        transl=torch.zeros(1, 3),
+                    )
+                # out is (1, V, 3) vertices; get joints from the regressor
+                if hasattr(out, "joints"):
+                    joints_np = out.joints[0].cpu().numpy()
+                elif isinstance(out, dict) and "joints" in out:
+                    joints_np = out["joints"][0].cpu().numpy()
+                else:
+                    # SmplxLite returns only vertices; joints not directly available
+                    return None
+
+                for i, name in enumerate(JOINT_NAMES):
+                    if i == 0 or i >= len(joints_np):
+                        offsets_dict[name] = DEFAULT_OFFSETS.get(name, [0, 0, 0])
+                    else:
+                        parent = JOINT_PARENTS[i]
+                        if parent < len(joints_np):
+                            off = joints_np[i] - joints_np[parent]
+                            offsets_dict[name] = off.tolist()
+                        else:
+                            offsets_dict[name] = DEFAULT_OFFSETS.get(name, [0, 0, 0])
+            else:
+                return None
+
+            self._shape_offsets_cache[person_id] = offsets_dict
+            logger.info("Computed shape-dependent offsets for pid=%d", person_id)
+            return offsets_dict
+
+        except Exception as e:
+            logger.debug("Shape offset computation failed for pid=%d: %s", person_id, e)
+            return None
+
     def _compute_joints(self) -> np.ndarray | None:
         """Compute 3D joint positions for current person/frame.
 
@@ -1742,8 +1872,11 @@ class MeshViewport(_BaseWidget):
             if ov_frame == self._current_frame:
                 params = self._apply_override_to_params(params, self._current_frame)
 
+        # Use shape-dependent offsets when available
+        shape_off = self._get_shape_offsets(self._person_id)
+
         try:
-            joints = forward_kinematics(params, self._current_frame)
+            joints = forward_kinematics(params, self._current_frame, shape_off)
         except Exception as e:
             logger.warning("FK failed (pid=%d, f=%d): %s",
                            self._person_id, self._current_frame, e)
@@ -1762,9 +1895,10 @@ class MeshViewport(_BaseWidget):
                 params["global_orient"] = params["global_orient_world"]
                 params["transl"] = params["transl_world"]
                 try:
-                    world_joints = forward_kinematics(params, self._current_frame)
+                    world_joints = forward_kinematics(
+                        params, self._current_frame, shape_off,
+                    )
                     if world_joints is not None:
-                        self._data_is_global = True
                         return world_joints
                 except Exception:
                     pass
@@ -2025,6 +2159,136 @@ class MeshViewport(_BaseWidget):
             self._status_msg = f"Model unavailable: {e}"
             return False
 
+    def _load_soma_model(self) -> bool:
+        """Lazily load SOMA body model. Returns True on success."""
+        if self._soma_model_loaded:
+            return self._soma_model is not None
+        self._soma_model_loaded = True
+
+        try:
+            from gem.utils.soma_utils.soma_layer import SomaLayer
+            from soma.assets import get_assets_dir
+
+            data_root = str(get_assets_dir())
+            self._soma_model = SomaLayer(
+                data_root=data_root,
+                low_lod=True,
+                device="cpu",
+                identity_model_type="soma",
+                mode="dense",
+            )
+            self._soma_model.eval()
+
+            faces_tensor = self._soma_model.faces
+            if hasattr(faces_tensor, "numpy"):
+                self._soma_faces = faces_tensor.long().cpu().numpy().astype(np.int32)
+            else:
+                self._soma_faces = np.asarray(faces_tensor, dtype=np.int32)
+
+            logger.info(
+                "SOMA model loaded: %d faces, %d vertices per frame",
+                len(self._soma_faces),
+                self._soma_model.soma.rest_shape.shape[-2]
+                if hasattr(self._soma_model.soma, "rest_shape")
+                else "?",
+            )
+            return True
+        except Exception as e:
+            logger.warning("Could not load SOMA model: %s", e)
+            return False
+
+    def _compute_soma_vertices(
+        self,
+        soma_params: dict,
+        frame_idx: int,
+        override_active: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Compute SOMA mesh vertices and normals for one frame.
+
+        Returns ``(vertices, normals)`` each (V, 3) float32, or ``None``.
+        """
+        if not self._load_soma_model():
+            return None
+
+        try:
+            import torch
+
+            with torch.no_grad():
+                poses = soma_params.get("poses")  # (N, 77, 3)
+                transl = soma_params.get("transl")  # (N, 3)
+                identity_coeffs = soma_params.get("identity_coeffs")  # (1, C)
+                scale_params = soma_params.get("scale_params")  # (1, S)
+
+                if poses is None:
+                    return None
+
+                def _to_t(x):
+                    if x is None:
+                        return None
+                    if isinstance(x, torch.Tensor):
+                        return x.float().cpu()
+                    return torch.tensor(np.asarray(x), dtype=torch.float32)
+
+                poses_t = _to_t(poses)
+                transl_t = _to_t(transl)
+
+                # Single frame slice
+                if poses_t.ndim == 3 and frame_idx < poses_t.shape[0]:
+                    poses_frame = poses_t[frame_idx : frame_idx + 1]  # (1, 77, 3)
+                else:
+                    return None
+
+                tr_frame = None
+                if transl_t is not None and transl_t.ndim >= 2:
+                    tr_frame = transl_t[frame_idx : frame_idx + 1]  # (1, 3)
+
+                # Identity: SOMA PCA model expects (B, 128). GEM-X MHR gives (1, 45).
+                # Use neutral body (zeros) when coefficients don't match.
+                n_soma_coeffs = 128  # SOMA PCA identity dimension
+                if identity_coeffs is not None:
+                    ic = _to_t(identity_coeffs)
+                    if ic.ndim == 1:
+                        ic = ic.unsqueeze(0)
+                    if ic.shape[-1] != n_soma_coeffs:
+                        ic = torch.zeros(1, n_soma_coeffs)
+                else:
+                    ic = torch.zeros(1, n_soma_coeffs)
+
+                # Scale params: SOMA PCA doesn't use scale_params, pass None
+                # (SomaLayer.static_forward splits scale_params[:, :1] as global_scale)
+                # For 'soma' identity model, there are no per-joint scales.
+                # We create a dummy [global_scale=1.0] + zeros to satisfy the API.
+                sp = None
+                if scale_params is not None:
+                    sp = _to_t(scale_params)
+                    if sp.ndim == 1:
+                        sp = sp.unsqueeze(0)
+                if sp is None:
+                    # (1, 1) — global_scale=1.0 (neutral)
+                    sp = torch.ones(1, 1)
+
+                out = self._soma_model.static_forward(
+                    poses=poses_frame,
+                    identity_coeffs=ic,
+                    scale_params=sp,
+                    transl=tr_frame,
+                    pose2rot=True,
+                )
+
+                verts = out["vertices"]  # (1, V, 3)
+                vertices = verts[0].cpu().numpy().astype(np.float32)
+                normals = compute_normals(vertices, self._soma_faces)
+
+                # Set faces to SOMA topology so _upload_buffers uses the right EBO
+                self._faces = self._soma_faces
+                self._n_faces = len(self._soma_faces)
+
+                return (vertices, normals)
+
+        except Exception as e:
+            logger.warning("SOMA vertex computation failed (f=%d): %s", frame_idx, e)
+            return None
+
     # ------------------------------------------------------------------
     # Vertex computation
     # ------------------------------------------------------------------
@@ -2032,7 +2296,7 @@ class MeshViewport(_BaseWidget):
     def _compute_vertices(
         self, person_id: int, frame_idx: int
     ) -> tuple[np.ndarray, np.ndarray] | None:
-        """Compute SMPL-X vertices and normals for one frame.
+        """Compute SMPL-X or SOMA vertices and normals for one frame.
 
         Returns ``(vertices, normals)`` each (V, 3) float32, or ``None``
         when the model / params are unavailable.
@@ -2048,8 +2312,6 @@ class MeshViewport(_BaseWidget):
         if not override_active and cache_key in self._vertex_cache:
             return self._vertex_cache[cache_key]
 
-        if not self._load_model():
-            return None
         if self._session is None:
             return None
 
@@ -2057,8 +2319,14 @@ class MeshViewport(_BaseWidget):
         if track is None:
             return None
 
-        if track.body_model_type == "soma":
-            # SOMA: skeleton-only rendering (no mesh model available yet)
+        # SOMA track with no SMPL-X fallback — use SOMA body model
+        if track.soma_params is not None and track.smplx_params is None:
+            return self._compute_soma_vertices(
+                track.soma_params, frame_idx, override_active
+            )
+
+        # SMPL-X path (includes SOMA tracks with SMPL-X fallback from GVHMR)
+        if not self._load_model():
             return None
 
         params = track.smplx_params
@@ -2911,8 +3179,11 @@ class MeshViewport(_BaseWidget):
         gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
         gl.glEnableVertexAttribArray(2)
 
-        # Element buffer (face indices) — upload once or if faces changed
-        if not self._faces_uploaded:
+        # Element buffer (face indices) — re-upload when face topology changes
+        # (SMPL-X and SOMA have different face arrays)
+        current_source = "soma" if (self._soma_faces is not None
+                                    and self._faces is self._soma_faces) else "smplx"
+        if not self._faces_uploaded or self._uploaded_face_source != current_source:
             idx_data = self._faces.astype(np.uint32).flatten()
             gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self._ebo)
             gl.glBufferData(
@@ -2923,6 +3194,7 @@ class MeshViewport(_BaseWidget):
             )
             self._n_indices = len(idx_data)
             self._faces_uploaded = True
+            self._uploaded_face_source = current_source
 
         gl.glBindVertexArray(0)
         self.doneCurrent()

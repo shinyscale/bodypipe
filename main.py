@@ -20,6 +20,15 @@ _gvhmr_sp = GVHMR_ROOT / ".venv" / "lib" / "python3.12" / "site-packages"
 if _gvhmr_sp.is_dir() and str(_gvhmr_sp) not in sys.path:
     sys.path.append(str(_gvhmr_sp))
 
+# Add GEM-X root + venv site-packages for SOMA body model (py-soma-x, warp-lang, trimesh).
+# GEM-X's SomaLayer wrapper is imported by the viewport for SOMA mesh rendering.
+GEMX_ROOT = Path(__file__).resolve().parent.parent / "GEM-X"
+_gemx_sp = GEMX_ROOT / ".venv" / "lib" / "python3.12" / "site-packages"
+if _gemx_sp.is_dir() and str(_gemx_sp) not in sys.path:
+    sys.path.append(str(_gemx_sp))
+if GEMX_ROOT.is_dir() and str(GEMX_ROOT) not in sys.path:
+    sys.path.append(str(GEMX_ROOT))
+
 # PyTorch 2.12+ defaults weights_only=True which breaks YOLO/ultralytics
 # checkpoint loading. Allow unsafe loads globally (all checkpoints are local).
 try:

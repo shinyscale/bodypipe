@@ -21,6 +21,67 @@ from models.skeleton import SOMA_SKELETON
 logger = logging.getLogger(__name__)
 
 
+def _compute_soma_shape_offsets(soma_params: dict) -> dict[str, list[float]] | None:
+    """Compute shape-dependent bone offsets from SOMA body model.
+
+    Returns dict mapping joint name → [x, y, z] parent-relative offset,
+    or None if SOMA body model or identity data is unavailable.
+    """
+    ic = soma_params.get("identity_coeffs")
+    sc = soma_params.get("scale_params")
+
+    try:
+        import torch
+        from gem.utils.soma_utils.soma_layer import SomaLayer
+        from soma.assets import get_assets_dir
+
+        data_root = str(get_assets_dir())
+        soma = SomaLayer(
+            data_root=data_root,
+            low_lod=True,
+            device="cpu",
+            identity_model_type="soma",
+            mode="dense",
+        )
+        soma.eval()
+
+        n_coeffs = 128
+        if ic is not None:
+            ic_t = torch.tensor(np.asarray(ic), dtype=torch.float32)
+            if ic_t.ndim == 1:
+                ic_t = ic_t.unsqueeze(0)
+            if ic_t.shape[-1] != n_coeffs:
+                ic_t = torch.zeros(1, n_coeffs)
+        else:
+            ic_t = torch.zeros(1, n_coeffs)
+
+        sc_t = None
+        if sc is not None:
+            sc_t = torch.tensor(np.asarray(sc), dtype=torch.float32)
+            if sc_t.ndim == 1:
+                sc_t = sc_t.unsqueeze(0)
+        if sc_t is None:
+            sc_t = torch.ones(1, 1)
+
+        with torch.no_grad():
+            rest_joints = soma.get_skeleton(ic_t, sc_t)  # (1, 77, 3)
+        joints_np = rest_joints[0].cpu().numpy()
+
+        parents = SOMA_SKELETON.joint_parents
+        result: dict[str, list[float]] = {}
+        for i, name in enumerate(SOMA_SKELETON.joint_names):
+            if i == 0:
+                result[name] = [0.0, 0.0, 0.0]
+            else:
+                off = joints_np[i] - joints_np[parents[i]]
+                result[name] = off.tolist()
+        return result
+
+    except Exception as e:
+        logger.debug("SOMA shape offsets unavailable: %s", e)
+        return None
+
+
 def _axis_angle_to_euler_zxy(aa: np.ndarray) -> np.ndarray:
     """Convert axis-angle (3,) to ZXY Euler degrees for BVH.
 
@@ -63,11 +124,17 @@ def convert_soma_to_bvh(
     assert len(names) == n_joints, f"Joint count mismatch: {len(names)} names vs {n_joints} in poses"
     assert len(parents) == n_joints
 
-    # Get rest-pose offsets
+    # Get rest-pose offsets — use shape-dependent offsets from SOMA body model
+    # when identity data is available, otherwise fall back to skeleton defaults.
     offsets = np.zeros((n_joints, 3), dtype=np.float32)
-    for i, name in enumerate(names):
-        off = SOMA_SKELETON.default_offsets.get(name, [0.0, 0.0, 0.0])
-        offsets[i] = off
+    shape_offsets = _compute_soma_shape_offsets(soma_params)
+    if shape_offsets is not None:
+        for i, name in enumerate(names):
+            offsets[i] = shape_offsets.get(name, [0.0, 0.0, 0.0])
+        logger.info("BVH using shape-dependent offsets from SOMA body model")
+    else:
+        for i, name in enumerate(names):
+            offsets[i] = SOMA_SKELETON.default_offsets.get(name, [0.0, 0.0, 0.0])
 
     # Build BVH hierarchy string
     frame_time = 1.0 / fps
