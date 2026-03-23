@@ -583,46 +583,6 @@ def estimate_K(width: int, height: int) -> np.ndarray:
     return K
 
 
-def _transform_crop_to_world(
-    joints: np.ndarray,
-    K_crop: np.ndarray,
-    K_orig: np.ndarray,
-    crop_bbox: list[int],
-    T_c2w: np.ndarray,
-) -> np.ndarray:
-    """Transform joints from crop camera space to world space.
-
-    Step 1: Crop camera → original video camera (undo crop offset + intrinsics remap)
-    Step 2: Original camera → world (apply SLAM camera-to-world directly)
-
-    Args:
-        joints: (J, 3) in crop camera space
-        K_crop: (3, 3) crop camera intrinsics
-        K_orig: (3, 3) original video intrinsics
-        crop_bbox: [x1, y1, x2, y2] crop in original video coords
-        T_c2w: (4, 4) camera-to-world from SLAM (frame 0 = identity)
-
-    Returns:
-        (J, 3) joints in world space (Y-down, CV convention)
-    """
-    # Step 1: crop camera → original camera
-    X, Y, Z = joints[:, 0], joints[:, 1], joints[:, 2]
-    fx_c, cx_c = K_crop[0, 0], K_crop[0, 2]
-    fy_c, cy_c = K_crop[1, 1], K_crop[1, 2]
-    fx_f, cx_f = K_orig[0, 0], K_orig[0, 2]
-    fy_f, cy_f = K_orig[1, 1], K_orig[1, 2]
-    crop_x1, crop_y1 = float(crop_bbox[0]), float(crop_bbox[1])
-
-    X_new = (fx_c * X + (cx_c + crop_x1 - cx_f) * Z) / fx_f
-    Y_new = (fy_c * Y + (cy_c + crop_y1 - cy_f) * Z) / fy_f
-    joints_orig = np.stack([X_new, Y_new, Z], axis=-1)
-
-    # Step 2: original camera → world (C2W applied directly)
-    R = T_c2w[:3, :3]
-    t = T_c2w[:3, 3]
-    return (R @ joints_orig.T).T + t
-
-
 def compute_orbit_view(
     yaw_deg: float,
     pitch_deg: float,
@@ -1904,48 +1864,6 @@ class MeshViewport(_BaseWidget):
                     pass
         return joints
 
-    def _try_world_ground(
-        self, joints: np.ndarray, track
-    ) -> np.ndarray | None:
-        """Try to transform joints from crop camera space to world space.
-
-        Returns world-space joints if all data is available, else None.
-        SLAM world is Y-down (CV convention) — does NOT set _data_is_global,
-        so the CV→GL flip in _update_camera still applies.
-        """
-        s = self._session
-        if s is None:
-            return None
-        slam = s.slam_c2w
-        K_orig = s.K_orig
-        K_crop = track.K_crop
-        crop_bbox = track.crop_bbox
-        if slam is None or K_orig is None or crop_bbox is None:
-            return None
-        # Estimate K_crop from crop dimensions if not loaded from hpe_results
-        if K_crop is None:
-            cw = crop_bbox[2] - crop_bbox[0]
-            ch = crop_bbox[3] - crop_bbox[1]
-            if cw > 0 and ch > 0:
-                focal = float(max(cw, ch))
-                K_crop = np.eye(3, dtype=np.float32)
-                K_crop[0, 0] = focal
-                K_crop[1, 1] = focal
-                K_crop[0, 2] = cw / 2.0
-                K_crop[1, 2] = ch / 2.0
-            else:
-                return None
-        # Clamp frame index to SLAM range
-        fi = min(self._current_frame, len(slam) - 1)
-        fi = max(fi, 0)
-        try:
-            return _transform_crop_to_world(
-                joints, K_crop, K_orig, crop_bbox, slam[fi]
-            )
-        except Exception as e:
-            logger.debug("World-grounding failed: %s", e)
-            return None
-
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
         """Pick the joint at screen position, using the active picking mode.
 
@@ -3056,8 +2974,19 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        # Reset global flag — _compute_joints sets it True when world-grounding succeeds
+        # Determine coordinate space upfront: orbit mode + world params → global (Y-up).
+        # This must be set BEFORE computing vertices/joints/auto-center so the model
+        # matrix and flip logic are consistent across all render paths.
+        old_is_global = self._data_is_global
         self._data_is_global = False
+        if self._camera_mode == "orbit" and self._session is not None:
+            track = self._session.person_tracks.get(self._person_id)
+            if track is not None:
+                params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
+                if params and "global_orient_world" in params and "transl_world" in params:
+                    self._data_is_global = True
+        if self._data_is_global != old_is_global:
+            self._update_camera()
         # In wireframe mode skip the expensive SMPL-X forward pass —
         # only compute FK joint positions for the skeleton overlay.
         if self._render_mode != RenderMode.WIREFRAME:
@@ -3099,14 +3028,11 @@ class MeshViewport(_BaseWidget):
                     joints = forward_kinematics(params, self._current_frame)
                     if joints is None:
                         continue
-                    # In orbit mode, try world-grounding transform
-                    if self._camera_mode == "orbit":
-                        wj = self._try_world_ground(joints, track)
-                        if wj is not None:
-                            joints = wj
-                        elif ("global_orient_world" in params
+                    # In orbit mode with global data, use world params
+                    # (same path as _compute_joints — global params from GVHMR VO).
+                    if self._camera_mode == "orbit" and self._data_is_global:
+                        if ("global_orient_world" in params
                               and "transl_world" in params):
-                            # Fallback: body_params_global
                             p2 = dict(params)
                             p2["global_orient"] = p2["global_orient_world"]
                             p2["transl"] = p2["transl_world"]
