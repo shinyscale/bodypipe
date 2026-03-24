@@ -1804,6 +1804,12 @@ class AppWindow(QMainWindow):
             cam_offset = _np.array([dx_per_z * approx_Z, dy_per_z * approx_Z, 0.0])
             tr_w[f] += R_c2w @ cam_offset
 
+        # Pre-flip Y and Z for CV→GL compatibility. The viewport uses CV→GL
+        # model matrix (camera-space convention) with incam global_orient.
+        # World transl needs Y/Z flipped so it renders at the correct position
+        # after the CV→GL transform is applied.
+        tr_w[:, 1] *= -1
+        tr_w[:, 2] *= -1
         params["transl_world"] = tr_w
 
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
