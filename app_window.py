@@ -279,7 +279,7 @@ class AppWindow(QMainWindow):
     interaction_mode_changed = Signal(str)  # emitted with InteractionMode.value
 
     MAX_RECENT = 5
-    _DOCK_VERSION = 3  # increment when dock layout structure changes
+    _DOCK_VERSION = 4  # bumped: fix bottom dock collapse + SLAM cleanup
 
     _MULTI_ONLY_DOCKS = (
         "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
@@ -578,9 +578,25 @@ class AppWindow(QMainWindow):
         if state and isinstance(state, QByteArray):
             self.restoreState(state, self._DOCK_VERSION)
 
+        # restoreState can shrink bottom docks to zero — re-enforce minimums.
+        self._enforce_bottom_dock_sizes()
+
         # Enforce mode-based dock visibility — restoreState may have made
         # multi-only docks visible from a previous session.
         self._update_dock_visibility()
+
+    def _enforce_bottom_dock_sizes(self):
+        """Ensure bottom docks have a usable minimum height.
+
+        Qt's restoreState() and dock splitter dragging can collapse docks
+        below their minimum size.  This re-applies constraints and gives
+        bottom docks a reasonable initial height if they were crushed.
+        """
+        min_h = 120
+        for dock in (self._track_overview_dock, self._log_dock):
+            dock.setMinimumHeight(min_h)
+            if dock.height() < min_h and dock.isVisible():
+                dock.resize(dock.width(), min_h)
 
     # ------------------------------------------------------------------
     # Workspace presets

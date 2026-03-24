@@ -112,6 +112,11 @@ class TrackOverviewDock(QDockWidget):
         self.setObjectName("TrackOverviewDock")
         self._track_overview = track_overview
         self.setWidget(track_overview)
+        self.setMinimumHeight(120)
+        self.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
 
     @property
     def track_overview(self) -> TrackOverview:
