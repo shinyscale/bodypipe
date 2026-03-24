@@ -1251,7 +1251,9 @@ class MeshViewport(_BaseWidget):
         self._camera_mode = mode
         if mode == "orbit":
             self._orbit_auto_centered = False
-            self._auto_center_orbit()
+            # Re-compute joints with orbit-mode world params BEFORE
+            # auto-centering so the orbit center uses correct positions.
+            self._refresh_mesh()
         self._update_camera()
         self.camera_changed.emit(self._camera_state())
 
@@ -1861,10 +1863,12 @@ class MeshViewport(_BaseWidget):
         if joints is None:
             return None
 
-        # In orbit mode, use world-grounded transl (pre-flipped for CV→GL)
-        # with incam global_orient for correct body orientation.
-        if self._camera_mode == "orbit" and "transl_world" in params:
+        # In orbit mode, use world-grounded global_orient + transl
+        if (self._camera_mode == "orbit"
+                and "global_orient_world" in params
+                and "transl_world" in params):
             p2 = dict(params)
+            p2["global_orient"] = p2["global_orient_world"]
             p2["transl"] = p2["transl_world"]
             try:
                 world_joints = forward_kinematics(
@@ -2267,9 +2271,12 @@ class MeshViewport(_BaseWidget):
         if params is None:
             return None
 
-        # In orbit mode, use world-grounded transl (pre-flipped for CV→GL)
-        if self._camera_mode == "orbit" and "transl_world" in params:
+        # In orbit mode, use world-grounded params
+        if (self._camera_mode == "orbit"
+                and "global_orient_world" in params
+                and "transl_world" in params):
             params = dict(params)
+            params["global_orient"] = params["global_orient_world"]
             params["transl"] = params["transl_world"]
 
         # Apply pose override for real-time preview
@@ -2988,11 +2995,18 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        # All rendering uses camera-space convention (CV→GL model matrix).
-        # World grounding is achieved by using transl_world (pre-flipped for
-        # CV→GL) with incam global_orient — see _apply_world_crop_offset.
-        if self._data_is_global:
-            self._data_is_global = False
+        # Determine coordinate space: SMPL-X tracks with world params use
+        # Y-up world space (_data_is_global=True, identity model matrix).
+        # Other tracks use camera space (_data_is_global=False, CV→GL flip).
+        old_is_global = self._data_is_global
+        self._data_is_global = False
+        if self._camera_mode == "orbit" and self._session is not None:
+            track = self._session.person_tracks.get(self._person_id)
+            if track is not None and track.body_model_type == "smplx":
+                params = track.smplx_params
+                if params and "global_orient_world" in params and "transl_world" in params:
+                    self._data_is_global = True
+        if self._data_is_global != old_is_global:
             self._update_camera()
         # Skip expensive body model forward pass in wireframe mode and
         # during scrubbing (SOMA on CPU takes ~1s/frame).
@@ -3036,11 +3050,13 @@ class MeshViewport(_BaseWidget):
                 if params is None:
                     continue
                 try:
-                    # In orbit mode, use world transl for grounded positioning
+                    # In orbit mode, use world params for grounded positioning
                     fk_params = params
                     if (self._camera_mode == "orbit"
+                            and "global_orient_world" in params
                             and "transl_world" in params):
                         fk_params = dict(params)
+                        fk_params["global_orient"] = fk_params["global_orient_world"]
                         fk_params["transl"] = fk_params["transl_world"]
                     joints = forward_kinematics(fk_params, self._current_frame)
                     if joints is None:
