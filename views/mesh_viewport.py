@@ -1250,7 +1250,16 @@ class MeshViewport(_BaseWidget):
             return
         self._camera_mode = mode
         if mode == "orbit":
-            self._orbit_auto_centered = False  # force re-center on mode switch
+            # Determine _data_is_global BEFORE auto-centering so the
+            # flip logic and orbit center are computed in the right space.
+            self._data_is_global = False
+            if self._session is not None:
+                track = self._session.person_tracks.get(self._person_id)
+                if track is not None and track.body_model_type == "smplx":
+                    params = track.smplx_params
+                    if params and "global_orient_world" in params and "transl_world" in params:
+                        self._data_is_global = True
+            self._orbit_auto_centered = False
             self._auto_center_orbit()
         self._update_camera()
         self.camera_changed.emit(self._camera_state())
