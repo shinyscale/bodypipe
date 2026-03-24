@@ -1846,6 +1846,22 @@ class MeshViewport(_BaseWidget):
         if joints is None:
             return None
 
+        # For SMPL-X tracks in orbit mode, use world-grounded params
+        # (shared SLAM ensures consistent world frame across persons).
+        if self._data_is_global:
+            if "global_orient_world" in params and "transl_world" in params:
+                p2 = dict(params)
+                p2["global_orient"] = p2["global_orient_world"]
+                p2["transl"] = p2["transl_world"]
+                try:
+                    world_joints = forward_kinematics(
+                        p2, self._current_frame, shape_off,
+                    )
+                    if world_joints is not None:
+                        return world_joints
+                except Exception:
+                    pass
+
         return joints
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
@@ -2237,6 +2253,13 @@ class MeshViewport(_BaseWidget):
         params = track.smplx_params
         if params is None:
             return None
+
+        # In orbit mode with world data, use global params for mesh
+        if self._data_is_global:
+            if "global_orient_world" in params and "transl_world" in params:
+                params = dict(params)
+                params["global_orient"] = params["global_orient_world"]
+                params["transl"] = params["transl_world"]
 
         # Apply pose override for real-time preview
         if override_active:
@@ -2954,11 +2977,18 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        # All data is in original-video camera space (crop→original transform applied
-        # during loading). The CV→GL model matrix handles Y/Z flip for GL rendering.
-        # _data_is_global stays False — no world-space path needed.
-        if self._data_is_global:
-            self._data_is_global = False
+        # Determine coordinate space: SMPL-X tracks with global params use Y-up
+        # world space (from GVHMR shared SLAM). SOMA tracks use camera space
+        # (no shared SLAM available for GEM-X isolated crops).
+        old_is_global = self._data_is_global
+        self._data_is_global = False
+        if self._camera_mode == "orbit" and self._session is not None:
+            track = self._session.person_tracks.get(self._person_id)
+            if track is not None and track.body_model_type == "smplx":
+                params = track.smplx_params
+                if params and "global_orient_world" in params and "transl_world" in params:
+                    self._data_is_global = True
+        if self._data_is_global != old_is_global:
             self._update_camera()
         # Skip expensive body model forward pass in wireframe mode and
         # during scrubbing (SOMA on CPU takes ~1s/frame).
@@ -3002,7 +3032,16 @@ class MeshViewport(_BaseWidget):
                 if params is None:
                     continue
                 try:
-                    joints = forward_kinematics(params, self._current_frame)
+                    # Use world params for SMPL-X tracks in orbit mode
+                    fk_params = params
+                    if (self._data_is_global
+                            and track.body_model_type == "smplx"
+                            and "global_orient_world" in params
+                            and "transl_world" in params):
+                        fk_params = dict(params)
+                        fk_params["global_orient"] = fk_params["global_orient_world"]
+                        fk_params["transl"] = fk_params["transl_world"]
+                    joints = forward_kinematics(fk_params, self._current_frame)
                     if joints is None:
                         continue
                     self._all_joint_positions[pid] = joints

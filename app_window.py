@@ -1674,6 +1674,10 @@ class AppWindow(QMainWindow):
         # GVHMR fallback: hmr4d_results.pt
         smplx_params = self._load_smplx_params_legacy(person_dir)
         if smplx_params is not None:
+            # Apply crop→original transform to incam transl
+            self._crop_to_original_camera(smplx_params, person_dir)
+            # Apply crop offset to world transl using shared SLAM
+            self._apply_world_crop_offset(smplx_params, person_dir)
             return smplx_params, None, "smplx"
         return None, None, "smplx"
 
@@ -1735,6 +1739,73 @@ class AppWindow(QMainWindow):
         tr[:, 1] = (f_crop_y * Y + (cy_crop + y1 - cy_orig) * Z) / f_orig
         params["transl"] = tr
 
+    def _apply_world_crop_offset(self, params: dict, person_dir: Path):
+        """Correct world-space transl for crop position using shared SLAM.
+
+        Each person's global params are estimated from an isolated crop.
+        The world translation doesn't account for where the crop is in
+        the original frame. This applies the crop offset in world space
+        by rotating the camera-space offset through each frame's C2W matrix.
+        """
+        import json
+        import numpy as _np
+
+        tr_w = params.get("transl_world")
+        if tr_w is None:
+            return
+
+        meta_path = person_dir / "person_meta.json"
+        if not meta_path.is_file():
+            return
+        meta = json.loads(meta_path.read_text())
+        crop_bbox = meta.get("crop_bbox")
+        if not crop_bbox:
+            return
+
+        K = params.get("K_fullimg")
+        if K is None:
+            return
+        K_arr = _np.asarray(K)
+        if K_arr.ndim == 3:
+            K_arr = K_arr[0]
+
+        vid_w = self._session.img_width if self._session else 0
+        vid_h = self._session.img_height if self._session else 0
+        if vid_w <= 0 or vid_h <= 0:
+            return
+
+        # Load shared SLAM C2W
+        slam = self._session.slam_c2w
+        if slam is None:
+            output_dir = self._session.output_dir
+            if output_dir:
+                slam_path = output_dir / "shared_slam.pt"
+                if slam_path.is_file():
+                    import torch
+                    slam = _np.array(
+                        torch.load(str(slam_path), map_location="cpu"),
+                        dtype=_np.float32,
+                    )
+                    self._session.slam_c2w = slam
+        if slam is None:
+            return
+
+        f_orig = float(max(vid_w, vid_h))
+        x1, y1 = float(crop_bbox[0]), float(crop_bbox[1])
+        dx_per_z = (float(K_arr[0, 2]) + x1 - vid_w / 2.0) / f_orig
+        dy_per_z = (float(K_arr[1, 2]) + y1 - vid_h / 2.0) / f_orig
+
+        tr_w = _np.asarray(tr_w, dtype=_np.float32).copy()
+        approx_Z = 2.5  # average depth in meters
+
+        for f in range(len(tr_w)):
+            fi = min(f, len(slam) - 1)
+            R_c2w = slam[fi][:3, :3]
+            cam_offset = _np.array([dx_per_z * approx_Z, dy_per_z * approx_Z, 0.0])
+            tr_w[f] += R_c2w @ cam_offset
+
+        params["transl_world"] = tr_w
+
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
         """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering.
 
@@ -1762,6 +1833,10 @@ class AppWindow(QMainWindow):
                     params["global_orient_world"] = np.array(g["global_orient"]).astype(np.float32)
                 if "transl" in g:
                     params["transl_world"] = np.array(g["transl"]).astype(np.float32)
+
+                # Store K for crop offset correction later
+                if K is not None:
+                    params["K_fullimg"] = K.numpy().astype(np.float32)
 
                 return params
         except Exception:
