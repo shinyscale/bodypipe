@@ -1360,17 +1360,18 @@ class MeshViewport(_BaseWidget):
         self._refresh_mesh()
 
     def set_scrubbing(self, active: bool):
-        """Auto-switch to wireframe during active scrubbing/playback.
+        """Auto-switch to fast shading during active scrubbing/playback.
 
         When *active* is True the current render mode is saved and the
-        viewport switches to wireframe.  When *active* becomes False the
-        previous mode is restored.
+        viewport switches to FAST (ambient-only shading — mesh stays visible
+        but lighting is simplified for speed).  When *active* becomes False
+        the previous mode is restored.
         """
         if active:
             if self._pre_scrub_mode is None:
                 self._pre_scrub_mode = self._render_mode
-                if self._render_mode != RenderMode.WIREFRAME:
-                    self._render_mode = RenderMode.WIREFRAME
+                if self._render_mode == RenderMode.FULL:
+                    self._render_mode = RenderMode.FAST
                     self._refresh_mesh()
         else:
             if self._pre_scrub_mode is not None:

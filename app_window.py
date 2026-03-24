@@ -549,11 +549,10 @@ class AppWindow(QMainWindow):
     def _setup_log_panel(self):
         """Create log dock widget, split horizontally beside track overview."""
         self._log_panel = LogPanel()
-        self._log_panel.setMinimumHeight(100)
+        self._log_panel.setMinimumHeight(80)
         self._log_dock = QDockWidget("Log", self)
         self._log_dock.setObjectName("LogDock")
         self._log_dock.setWidget(self._log_panel)
-        self._log_dock.setMinimumHeight(120)
         self._log_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
