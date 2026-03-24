@@ -1511,25 +1511,40 @@ class MeshViewport(_BaseWidget):
         if pts is None:
             return
 
-        # Global-space data (GEM-X) is already Y-up;
-        # camera-space data (GVHMR) needs Y/Z flip to GL convention.
+        # Global-space data is already Y-up;
+        # camera-space data needs Y/Z flip to GL convention.
         need_flip = not self._data_is_global
-        centroid = pts.mean(axis=0).copy()
-        if need_flip:
-            centroid[1] *= -1
-            centroid[2] *= -1
-        self._orbit_center = centroid.astype(np.float32)
-
         gl_pts = pts.copy()
         if need_flip:
             gl_pts[:, 1] *= -1
             gl_pts[:, 2] *= -1
-        extent = np.max(
-            np.linalg.norm(gl_pts - self._orbit_center, axis=1)
-        )
+
+        foot_y = float(np.min(gl_pts[:, 1]))
+        head_y = float(np.max(gl_pts[:, 1]))
+
+        if self._data_is_global:
+            # World-grounded: center between ground (Y=0) and head so
+            # characters appear standing on the grid, not floating.
+            self._grid_y = 0.0
+            center_y = (0.0 + head_y) / 2.0
+        else:
+            # Camera space: grid at feet, center at midpoint
+            self._grid_y = foot_y
+            center_y = (foot_y + head_y) / 2.0
+
+        centroid = gl_pts.mean(axis=0).copy()
+        centroid[1] = center_y
+        self._orbit_center = centroid.astype(np.float32)
+
+        # Distance: ensure both characters + ground are visible
+        extent = np.max(np.linalg.norm(gl_pts - self._orbit_center, axis=1))
+        if self._data_is_global:
+            # Include ground plane in extent calculation
+            ground_dist = np.linalg.norm(
+                np.array([centroid[0], 0.0, centroid[2]]) - self._orbit_center
+            )
+            extent = max(extent, ground_dist)
         self._orbit_distance = max(float(extent) * 2.5, 1.0)
-        # Place grid floor at lowest point (feet)
-        self._grid_y = float(np.min(gl_pts[:, 1]))
         self._orbit_auto_centered = True
 
     def mousePressEvent(self, event):
