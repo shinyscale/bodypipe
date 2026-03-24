@@ -386,6 +386,7 @@ class VideoPlayer(QWidget):
         self._current_frame = 0
         self._playing = False
         self._playback_speed = 1.0
+        self._looping = False
         self._cache = FrameCache()
 
         self._setup_ui()
@@ -493,6 +494,16 @@ class VideoPlayer(QWidget):
             overlay_layout.addWidget(chip)
         self._speed_chips[1.0].setChecked(True)
 
+        # Loop toggle
+        self._btn_loop = QToolButton()
+        self._btn_loop.setText("\U0001f501")  # 🔁
+        self._btn_loop.setToolTip("Loop playback (L)")
+        self._btn_loop.setCheckable(True)
+        self._btn_loop.setFixedSize(28, 24)
+        self._btn_loop.setStyleSheet(_btn_style)
+        self._btn_loop.setFocusPolicy(Qt.NoFocus)
+        overlay_layout.addWidget(self._btn_loop)
+
         # --- Hidden transport buttons (keyboard-only, backward compat) ---
         self._btn_first = QToolButton(self)
         self._btn_first.setText("|<")
@@ -547,6 +558,7 @@ class VideoPlayer(QWidget):
         self._btn_back10.clicked.connect(lambda: self.seek(self._current_frame - 10))
         self._btn_fwd10.clicked.connect(lambda: self.seek(self._current_frame + 10))
         self._btn_play.clicked.connect(self._toggle_play)
+        self._btn_loop.clicked.connect(self._on_loop_toggled)
         self._speed_group.buttonClicked.connect(self._on_speed_chip_clicked)
 
     # ------------------------------------------------------------------
@@ -690,6 +702,9 @@ class VideoPlayer(QWidget):
     def _toggle_play(self):
         self._playing = not self._playing
         if self._playing:
+            # If at the end, restart from beginning
+            if self._current_frame >= self._num_frames - 1:
+                self.seek(0)
             self._btn_play.setText("\u275a\u275a")
             interval = max(1, int(1000 / (self._fps * self._playback_speed)))
             self._play_timer.start(interval)
@@ -700,12 +715,18 @@ class VideoPlayer(QWidget):
             self._cache.readahead = FrameCache.DEFAULT_READAHEAD
         self.playback_toggled.emit(self._playing)
 
+    def _on_loop_toggled(self):
+        self._looping = self._btn_loop.isChecked()
+
     def _advance_frame(self):
         # At speeds > 1x, skip frames so playback is perceptibly faster
         step = max(1, round(self._playback_speed))
         next_frame = self._current_frame + step
         if next_frame >= self._num_frames:
-            self._toggle_play()  # stop at end
+            if self._looping:
+                self.seek(0)
+            else:
+                self._toggle_play()  # stop at end
             return
         self.seek(next_frame)
 
@@ -724,5 +745,8 @@ class VideoPlayer(QWidget):
             self.seek(0)
         elif key == Qt.Key_End:
             self.seek(self._num_frames - 1)
+        elif key == Qt.Key_L:
+            self._btn_loop.setChecked(not self._btn_loop.isChecked())
+            self._on_loop_toggled()
         else:
             super().keyPressEvent(event)
