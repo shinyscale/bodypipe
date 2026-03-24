@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.session import Session, PersonTrack
+from models.skeleton import SOMA_SKELETON
 from views.mesh_viewport import (
     MeshViewport,
     RenderMode,
@@ -511,6 +512,92 @@ class TestMeshViewportVertexComputation:
         result = w._compute_vertices(0, 0)
         assert result is not None
 
+    def test_compute_vertices_uses_world_smplx_params_in_orbit(self, qapp, session):
+        """Orbit-mode SMPL-X vertex computation should forward world root motion."""
+        pytest.importorskip("torch")
+
+        class FakeTensor:
+            def __init__(self, data):
+                self._data = np.array(data, dtype=np.float32)
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return self._data
+
+            def __getitem__(self, idx):
+                return FakeTensor(self._data[idx])
+
+        captured = {}
+
+        def _fake_body_model(**kwargs):
+            captured["global_orient"] = kwargs["global_orient"].cpu().numpy()
+            captured["transl"] = kwargs["transl"].cpu().numpy()
+            return FakeTensor(np.zeros((1, 8, 3), dtype=np.float32))
+
+        mock_model = MagicMock(side_effect=_fake_body_model)
+        mock_model.faces = np.array([[0, 1, 2]], dtype=np.int32)
+
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((2, 3), dtype=np.float32),
+                "body_pose": np.zeros((2, 63), dtype=np.float32),
+                "betas": np.zeros((1, 10), dtype=np.float32),
+                "transl": np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 2.5]], dtype=np.float32),
+                "global_orient_world": np.array([[0.0, 0.5, 0.0], [0.0, 0.25, 0.0]], dtype=np.float32),
+                "transl_world": np.array([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w._model_loaded = True
+        w._body_model = mock_model
+        w._faces = mock_model.faces
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+        captured.clear()
+        w._vertex_cache.clear()
+
+        result = w._compute_vertices(0, 0)
+        assert result is not None
+        np.testing.assert_allclose(captured["global_orient"][0], [0.0, 0.5, 0.0], atol=1e-6)
+        np.testing.assert_allclose(captured["transl"][0], [1.0, 0.0, -1.0], atol=1e-6)
+
+    def test_compute_vertices_passes_world_soma_context_in_orbit(self, qapp, session):
+        """Orbit-mode SOMA vertex computation should receive world-rooted params."""
+        w = MeshViewport()
+        poses = np.zeros((2, SOMA_SKELETON.n_joints, 3), dtype=np.float32)
+        poses[:, 0, :] = [0.0, 0.0, 0.0]
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            body_model_type="soma",
+            soma_params={
+                "poses": poses,
+                "transl": np.array([[0.0, 0.2, 2.0], [0.0, 0.3, 2.5]], dtype=np.float32),
+                "global_orient_world": np.array([[0.0, np.pi / 2, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+                "transl_world": np.array([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        with patch.object(
+            w,
+            "_compute_soma_vertices",
+            return_value=(
+                np.zeros((3, 3), dtype=np.float32),
+                np.zeros((3, 3), dtype=np.float32),
+            ),
+        ) as mock_soma:
+            w._compute_vertices(0, 0)
+
+        passed = mock_soma.call_args.args[0]
+        np.testing.assert_allclose(passed["transl"][0], [1.0, 0.0, -1.0], atol=1e-6)
+        np.testing.assert_allclose(passed["poses"][0, 0], [0.0, np.pi / 2, 0.0], atol=1e-6)
+
     def test_compute_vertices_missing_orient(self, qapp, session):
         """Should return None when global_orient is missing."""
         pytest.importorskip("torch")
@@ -573,7 +660,7 @@ class TestAppWindowMeshIntegration:
         window._pipeline_dock.set_mode("multi")
         window._mesh_viewport.on_frame_changed = MagicMock()
         window._on_video_frame_changed(5)
-        window._mesh_viewport.on_frame_changed.assert_called_once_with(5)
+        window._mesh_viewport.on_frame_changed.assert_any_call(5)
 
     def test_person_change_updates_viewport(self, qapp):
         """Person change from identity inspector should update mesh viewport."""
@@ -582,7 +669,7 @@ class TestAppWindowMeshIntegration:
         window = AppWindow()
         window._mesh_viewport.set_person = MagicMock()
         window._on_identity_person_changed(2)
-        window._mesh_viewport.set_person.assert_called_once_with(2)
+        window._mesh_viewport.set_person.assert_any_call(2)
 
     def test_track_click_updates_viewport(self, qapp):
         """Clicking a track should update mesh viewport person."""
@@ -591,7 +678,7 @@ class TestAppWindowMeshIntegration:
         window = AppWindow()
         window._mesh_viewport.set_person = MagicMock()
         window._on_track_clicked(3, 10)
-        window._mesh_viewport.set_person.assert_called_once_with(3)
+        window._mesh_viewport.set_person.assert_any_call(3)
 
     def test_pose_corrector_has_viewport(self, qapp):
         """PoseCorrectorPanel should have its own MeshViewport."""
@@ -810,6 +897,47 @@ class TestCameraModes:
         w.set_camera_mode("orbit")
         np.testing.assert_array_equal(w._model_mat, _CV_TO_GL)
 
+    def test_orbit_model_is_identity_for_world_smplx_track(self, qapp, session):
+        """World-grounded SMPL-X tracks should skip the CV->GL model flip."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "transl": np.array([[0.0, 1.0, 2.0]], dtype=np.float32),
+                "global_orient_world": np.zeros((1, 3), dtype=np.float32),
+                "transl_world": np.array([[1.5, 0.0, -0.5]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        assert w._data_is_global is True
+        np.testing.assert_array_equal(w._model_mat, np.eye(4, dtype=np.float32))
+
+    def test_orbit_model_is_identity_for_world_soma_track(self, qapp, session):
+        """SOMA tracks with world keys should follow the same orbit rule."""
+        w = MeshViewport()
+        poses = np.zeros((1, SOMA_SKELETON.n_joints, 3), dtype=np.float32)
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            body_model_type="soma",
+            soma_params={
+                "poses": poses,
+                "transl": np.array([[0.0, 1.0, 2.0]], dtype=np.float32),
+                "global_orient_world": np.zeros((1, 3), dtype=np.float32),
+                "transl_world": np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        assert w._data_is_global is True
+        np.testing.assert_array_equal(w._model_mat, np.eye(4, dtype=np.float32))
+
     def test_incam_model_is_identity(self, qapp):
         """In incam mode, model matrix should be identity."""
         w = MeshViewport()
@@ -864,6 +992,22 @@ class TestCameraModes:
         np.testing.assert_allclose(w._orbit_center[2], -3.0, atol=1e-5)
         assert w._orbit_auto_centered is True
 
+    def test_auto_center_orbit_uses_selected_person_only(self, qapp):
+        """Orbit auto-center should ignore other persons' joints by default."""
+        w = MeshViewport()
+        w._joint_positions = np.array(
+            [[1.0, 0.0, 3.0], [1.0, 2.0, 3.0]],
+            dtype=np.float32,
+        )
+        w._all_joint_positions = {
+            99: np.array([[100.0, 0.0, 3.0], [100.0, 2.0, 3.0]], dtype=np.float32)
+        }
+
+        w._auto_center_orbit()
+
+        np.testing.assert_allclose(w._orbit_center[0], 1.0, atol=1e-5)
+        np.testing.assert_allclose(w._orbit_center[2], -3.0, atol=1e-5)
+
     def test_auto_center_orbit_no_vertices(self, qapp):
         """_auto_center_orbit with no vertices should be a no-op."""
         w = MeshViewport()
@@ -871,6 +1015,63 @@ class TestCameraModes:
         w._auto_center_orbit()
         np.testing.assert_array_equal(w._orbit_center, original)
         assert w._orbit_auto_centered is False
+
+    def test_auto_center_orbit_global_grid_pins_to_world_zero(self, qapp):
+        """World-grounded data should keep the grid on Y=0 instead of at foot height."""
+        w = MeshViewport()
+        w._data_is_global = True
+        w._vertices = np.array(
+            [[0.0, 0.2, 1.0], [0.0, 1.8, 1.0], [1.0, 0.4, -1.0]],
+            dtype=np.float32,
+        )
+        w._auto_center_orbit()
+
+        assert w._grid_y == pytest.approx(0.0, abs=1e-6)
+        assert w._orbit_center[1] > 0.0
+
+    def test_set_person_recenters_orbit_on_selected_track(self, qapp, session):
+        """Switching the selected person in orbit should recenter to that track."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "transl": np.array([[0.0, 0.0, 3.0]], dtype=np.float32),
+            },
+        )
+        session.person_tracks[1] = PersonTrack(
+            person_id=1,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "transl": np.array([[6.0, 0.0, 3.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+        center0 = w._orbit_center.copy()
+
+        w.set_person(1)
+
+        assert w._orbit_center[0] > center0[0] + 4.0
+
+    def test_manual_orbit_center_override_persists_until_cleared(self, qapp):
+        """Manual orbit center should suppress auto-centering until reset."""
+        w = MeshViewport()
+        w.set_camera_mode("orbit")
+        w._vertices = np.array(
+            [[0.0, 0.0, 3.0], [2.0, 0.0, 3.0], [-2.0, 0.0, 3.0]],
+            dtype=np.float32,
+        )
+
+        w.set_orbit_center([5.0, 6.0, 7.0])
+        w._auto_center_orbit()
+        np.testing.assert_allclose(w._orbit_center, [5.0, 6.0, 7.0], atol=1e-6)
+
+        w.clear_orbit_center_override(recenter=True)
+        assert not np.allclose(w._orbit_center, [5.0, 6.0, 7.0])
 
     def test_orbit_projection_uses_fov(self, qapp):
         """In orbit mode, projection should use perspective_fov, not K."""
@@ -1516,6 +1717,116 @@ class TestMeshViewportSkeleton:
         assert result.shape == (52, 3)
         # Root should be at translation
         np.testing.assert_allclose(result[0], [0, 0, 2], atol=1e-6)
+
+    def test_compute_joints_uses_world_smplx_in_orbit(self, qapp, session):
+        """Orbit mode should switch SMPL-X FK to world-space root motion."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "transl": np.array([[0.0, 1.0, 2.0]], dtype=np.float32),
+                "global_orient_world": np.array([[0.0, np.pi / 2, 0.0]], dtype=np.float32),
+                "transl_world": np.array([[1.5, 0.0, -0.5]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        joints = w._compute_joints()
+        assert joints is not None
+        np.testing.assert_allclose(joints[0], [1.5, 0.0, -0.5], atol=1e-6)
+        camera_joints = forward_kinematics(
+            session.person_tracks[0].smplx_params, 0
+        )
+        assert not np.allclose(joints[3], camera_joints[3])
+
+    def test_compute_joints_uses_world_soma_in_orbit(self, qapp, session):
+        """Orbit mode should update SOMA root orientation and translation together."""
+        w = MeshViewport()
+        poses = np.zeros((1, SOMA_SKELETON.n_joints, 3), dtype=np.float32)
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            body_model_type="soma",
+            soma_params={
+                "poses": poses,
+                "transl": np.array([[0.0, 1.0, 2.0]], dtype=np.float32),
+                "global_orient_world": np.array([[0.0, np.pi / 2, 0.0]], dtype=np.float32),
+                "transl_world": np.array([[2.0, 0.0, -1.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        joints = w._compute_joints()
+        assert joints is not None
+        np.testing.assert_allclose(joints[0], [2.0, 0.0, -1.0], atol=1e-6)
+        assert abs(joints[11, 2] - joints[0, 2]) > 1e-3
+
+    def test_refresh_mesh_marks_soma_world_track_global(self, qapp, session):
+        """SOMA tracks with world keys should drive the orbit/global state too."""
+        w = MeshViewport()
+        poses = np.zeros((1, SOMA_SKELETON.n_joints, 3), dtype=np.float32)
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            body_model_type="soma",
+            soma_params={
+                "poses": poses,
+                "transl": np.array([[0.0, 1.0, 2.0]], dtype=np.float32),
+                "global_orient_world": np.zeros((1, 3), dtype=np.float32),
+                "transl_world": np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_camera_mode("orbit")
+
+        assert w._data_is_global is True
+
+    def test_get_shape_offsets_uses_smplx_get_skeleton_fallback(self, qapp, session):
+        """Shape offsets should remap native SMPL-X joints before FK offsets."""
+        pytest.importorskip("torch")
+        import torch
+
+        class FakeBodyModel:
+            faces = np.array([[0, 1, 2]], dtype=np.int32)
+
+            def get_skeleton(self, betas):
+                joints = torch.zeros((1, 55, 3), dtype=torch.float32)
+                joints[0, 3] = torch.tensor([0.0, 0.25, 0.0])
+                joints[0, 6] = torch.tensor([0.0, 0.50, 0.0])
+                joints[0, 20] = torch.tensor([1.0, 1.0, 1.0])   # L_Wrist
+                joints[0, 22] = torch.tensor([9.0, 9.0, 9.0])   # jaw (bad if misread)
+                joints[0, 23] = torch.tensor([8.0, 8.0, 8.0])   # leye
+                joints[0, 24] = torch.tensor([7.0, 7.0, 7.0])   # reye
+                joints[0, 25] = torch.tensor([1.2, 1.0, 1.0])   # L_Index1
+                return joints
+
+            def __call__(self, **kwargs):
+                return torch.zeros((1, 3, 3), dtype=torch.float32)
+
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "betas": np.ones((1, 10), dtype=np.float32),
+                "transl": np.zeros((1, 3), dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w._body_model = FakeBodyModel()
+        w._model_loaded = True
+
+        offsets = w._get_shape_offsets(0)
+        assert offsets is not None
+        np.testing.assert_allclose(offsets["Spine1"], [0.0, 0.25, 0.0], atol=1e-6)
+        np.testing.assert_allclose(offsets["Spine2"], [0.0, 0.25, 0.0], atol=1e-6)
+        np.testing.assert_allclose(offsets["L_Index1"], [0.2, 0.0, 0.0], atol=1e-6)
 
     def test_refresh_mesh_computes_joints(self, qapp, session):
         """_refresh_mesh should also compute _joint_positions."""

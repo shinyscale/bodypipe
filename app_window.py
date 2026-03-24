@@ -1203,6 +1203,8 @@ class AppWindow(QMainWindow):
         if not person_dirs:
             return
 
+        manifest_offsets = self._load_multi_person_world_offsets(output_dir)
+
         for pdir in person_dirs:
             try:
                 pid = int(pdir.name.split("_")[1])
@@ -1211,6 +1213,10 @@ class AppWindow(QMainWindow):
 
             confidences, confidence_breakdown = self._load_confidences_csv(pdir)
             smplx_params, soma_params, body_model_type = self._load_motion_params(pdir)
+            world_offset = manifest_offsets.get(pid)
+            if world_offset is not None:
+                self._apply_multi_person_world_offset(smplx_params, world_offset)
+                self._apply_multi_person_world_offset(soma_params, world_offset)
 
             pt = PersonTrack(
                 person_id=pid,
@@ -1238,6 +1244,49 @@ class AppWindow(QMainWindow):
                         pass
 
         self._refresh_all_panels()
+
+    def _load_multi_person_world_offsets(self, output_dir: Path) -> dict[int, np.ndarray]:
+        """Load authoritative per-person world offsets from session metadata."""
+        import json as _json
+
+        manifest_path = output_dir / "session_manifest.json"
+        if not manifest_path.is_file():
+            return {}
+        try:
+            manifest = _json.loads(manifest_path.read_text())
+        except Exception:
+            return {}
+
+        offsets = manifest.get("offsets")
+        if not offsets:
+            assembly_path = output_dir / "assembly" / "person_offsets.json"
+            if assembly_path.is_file():
+                try:
+                    offsets = _json.loads(assembly_path.read_text()).get("offsets", {})
+                except Exception:
+                    offsets = {}
+
+        result: dict[int, np.ndarray] = {}
+        for binding in manifest.get("person_bindings", []):
+            source_index = binding.get("source_index")
+            track_id = binding.get("track_id")
+            if source_index is None or track_id is None:
+                continue
+            offset = offsets.get(str(track_id)) if isinstance(offsets, dict) else None
+            if offset is None:
+                continue
+            result[int(source_index)] = np.asarray(offset, dtype=np.float32)
+        return result
+
+    def _apply_multi_person_world_offset(self, params: dict | None, offset):
+        """Apply a scene-assembly offset to world translations in-place."""
+        if params is None:
+            return
+        transl_world = params.get("transl_world")
+        if transl_world is None:
+            return
+        offset_arr = np.asarray(offset, dtype=np.float32).reshape(1, 3)
+        params["transl_world"] = np.asarray(transl_world, dtype=np.float32).copy() + offset_arr
 
     def _hydrate_person_tracks(self):
         """Load heavy data (smplx_params, confidences) from disk for existing tracks.
@@ -1741,6 +1790,8 @@ class AppWindow(QMainWindow):
         tr[:, 0] = (f_crop_x * X + (cx_crop + x1 - cx_orig) * Z) / f_orig
         tr[:, 1] = (f_crop_y * Y + (cy_crop + y1 - cy_orig) * Z) / f_orig
         params["transl"] = tr
+        if params.get("transl_cam") is not None:
+            params["transl_cam"] = tr.copy()
 
     def _apply_world_crop_offset(self, params: dict, person_dir: Path):
         """Correct world-space transl for crop position using shared SLAM.
@@ -1777,7 +1828,9 @@ class AppWindow(QMainWindow):
         if vid_w <= 0 or vid_h <= 0:
             return
 
-        # Load shared SLAM C2W
+        # Load shared SLAM rotations. GVHMR/SimpleVO stores world->camera
+        # transforms (R_w2c), so we transpose here to rotate camera-space
+        # crop offsets into world coordinates.
         slam = self._session.slam_c2w
         if slam is None:
             output_dir = self._session.output_dir
@@ -1803,7 +1856,8 @@ class AppWindow(QMainWindow):
 
         for f in range(len(tr_w)):
             fi = min(f, len(slam) - 1)
-            R_c2w = slam[fi][:3, :3]
+            R_w2c = slam[fi][:3, :3]
+            R_c2w = R_w2c.T
             cam_offset = _np.array([dx_per_z * approx_Z, dy_per_z * approx_Z, 0.0])
             tr_w[f] += R_c2w @ cam_offset
 
@@ -1826,16 +1880,26 @@ class AppWindow(QMainWindow):
             results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
             params = results.get("smpl_params_incam")
             if params and "body_pose" in params:
+                params = {
+                    k: np.asarray(v, dtype=np.float32) if hasattr(v, "shape") else v
+                    for k, v in params.items()
+                }
                 K = results.get("K_fullimg")
                 if K is not None and self._session.camera_K is None:
                     self._session.camera_K = K[0].numpy()
 
+                params["body_pose_cam"] = np.asarray(params["body_pose"], dtype=np.float32)
+                params["global_orient_cam"] = np.asarray(params["global_orient"], dtype=np.float32)
+                params["transl_cam"] = np.asarray(params["transl"], dtype=np.float32)
+                params["coordinate_space"] = "camera"
+                params["camera_model"] = "full_image"
+
                 # Also load global-space params for orbit mode world grounding
                 g = results.get("smpl_params_global", {})
                 if "global_orient" in g:
-                    params["global_orient_world"] = np.array(g["global_orient"]).astype(np.float32)
+                    params["global_orient_world"] = np.asarray(g["global_orient"], dtype=np.float32)
                 if "transl" in g:
-                    params["transl_world"] = np.array(g["transl"]).astype(np.float32)
+                    params["transl_world"] = np.asarray(g["transl"], dtype=np.float32)
 
                 # Store K for crop offset correction later
                 if K is not None:

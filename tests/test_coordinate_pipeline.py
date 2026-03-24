@@ -35,9 +35,15 @@ def _patched_load(*args, **kwargs):
     return _orig_load(*args, **kwargs)
 torch.load = _patched_load
 
+from app_window import AppWindow
+from models.session import PersonTrack
+from views.mesh_viewport import MeshViewport
+
 
 VID_W, VID_H = 1920, 1080
 BASE = Path("/home/zacharymandrews/GVHMR/outputs/multi_person/hopeyoudo_60f")
+BASE_120 = Path("/home/zacharymandrews/GVHMR/outputs/multi_person/hopeyoudo_120f")
+BASE_120_02 = Path("/home/zacharymandrews/GVHMR/outputs/multi_person/hopeyoudo_120f_02")
 
 # Skip if test data doesn't exist
 pytestmark = pytest.mark.skipif(
@@ -228,3 +234,132 @@ class TestSomaForwardPass:
 
         ratio = max(scales) / min(scales)
         assert ratio < 2.0, f"Vertex scale mismatch: ratio={ratio:.2f}"
+
+
+@pytest.mark.skipif(
+    not (BASE_120 / "person_0").is_dir(),
+    reason="120f viewport regression data not available",
+)
+class TestViewportGroundingRegression:
+    """Regression coverage for the known failing 120-frame multi-person clip."""
+
+    @pytest.fixture(scope="class")
+    def viewport_session(self, qapp):
+        window = AppWindow()
+        window._session.img_width = VID_W
+        window._session.img_height = VID_H
+        window._session.output_dir = BASE_120
+        window._session.person_tracks.clear()
+
+        for pid in [0, 1]:
+            person_dir = BASE_120 / f"person_{pid}"
+            smplx_params, soma_params, body_model_type = window._load_motion_params(person_dir)
+            params = soma_params if soma_params is not None else smplx_params
+            assert params is not None, f"Failed to load viewport params for person {pid}"
+            window._session.person_tracks[pid] = PersonTrack(
+                person_id=pid,
+                person_dir=person_dir,
+                smplx_params=smplx_params,
+                soma_params=soma_params,
+                body_model_type=body_model_type,
+            )
+
+        yield window._session
+        window.close()
+
+    def test_orbit_roots_preserve_multi_person_separation(self, qapp, viewport_session):
+        viewport = MeshViewport()
+        viewport.resize(960, 540)
+        viewport.set_session(viewport_session)
+        viewport.set_person(0)
+        viewport.set_camera_mode("orbit")
+        viewport.on_frame_changed(0)
+
+        assert 0 in viewport._all_joint_positions
+        assert 1 in viewport._all_joint_positions
+
+        for frame_idx in [0, 30, 60, 90, 119]:
+            viewport.on_frame_changed(frame_idx)
+            roots = {
+                pid: joints[0]
+                for pid, joints in viewport._all_joint_positions.items()
+            }
+            sep = np.linalg.norm(roots[0][[0, 2]] - roots[1][[0, 2]])
+            assert sep > 0.25, f"Frame {frame_idx}: persons too close in orbit view ({sep:.3f}m)"
+
+    def test_orbit_world_grounding_keeps_mesh_near_zero(self, qapp, viewport_session):
+        viewport = MeshViewport()
+        viewport.resize(960, 540)
+        viewport.set_session(viewport_session)
+        viewport.set_camera_mode("orbit")
+
+        for pid in [0, 1]:
+            viewport.set_person(pid)
+            verts_result = viewport._compute_vertices(pid, 0)
+            if verts_result is None:
+                pytest.skip("Mesh model unavailable for grounding regression")
+            verts, _normals = verts_result
+            mesh_min_y = float(np.min(verts[:, 1]))
+            assert abs(mesh_min_y) < 0.08, (
+                f"Person {pid}: mesh not grounded in orbit view (min_y={mesh_min_y:.3f}m)"
+            )
+
+    def test_orbit_preserves_head_above_pelvis_without_sign_flip(self, qapp, viewport_session):
+        viewport = MeshViewport()
+        viewport.resize(960, 540)
+        viewport.set_session(viewport_session)
+        viewport.set_camera_mode("orbit")
+
+        for pid in [0, 1]:
+            viewport.set_person(pid)
+            viewport.on_frame_changed(0)
+            joints = viewport._joint_positions
+            assert joints is not None
+            pelvis_y = joints[0, 1]
+            head_y = joints[6, 1]
+            assert head_y > pelvis_y, f"Person {pid}: head not above pelvis in orbit/world view"
+
+
+@pytest.mark.skipif(
+    not (BASE_120_02 / "session_manifest.json").is_file(),
+    reason="120f_02 manifest regression data not available",
+)
+class TestViewportManifestOffsetRegression:
+    """Regression coverage for session-manifest world offsets on the renamed clip."""
+
+    def test_loaded_tracks_apply_manifest_world_offsets(self, qapp):
+        window = AppWindow()
+        window._session.img_width = VID_W
+        window._session.img_height = VID_H
+        window._session.output_dir = BASE_120_02
+
+        raw_loaded = {}
+        for pid in [0, 1]:
+            person_dir = BASE_120_02 / f"person_{pid}"
+            smplx_params, soma_params, _body_model_type = window._load_motion_params(person_dir)
+            params = soma_params if soma_params is not None else smplx_params
+            assert params is not None
+            raw_loaded[pid] = np.asarray(params["transl_world"], dtype=np.float32).copy()
+
+        window._session.person_tracks.clear()
+        window._load_results_from_output_dir(BASE_120_02)
+
+        manifest = json.loads((BASE_120_02 / "session_manifest.json").read_text())
+        expected_offsets = {}
+        for binding in manifest["person_bindings"]:
+            expected_offsets[int(binding["source_index"])] = np.asarray(
+                manifest["offsets"][str(binding["track_id"])], dtype=np.float32
+            )
+
+        for pid in [0, 1]:
+            track = window._session.person_tracks[pid]
+            params = track.soma_params if track.soma_params is not None else track.smplx_params
+            assert params is not None
+            loaded_world = np.asarray(params["transl_world"], dtype=np.float32)
+            np.testing.assert_allclose(
+                loaded_world[0] - raw_loaded[pid][0],
+                expected_offsets[pid],
+                atol=1e-5,
+            )
+
+        window.close()

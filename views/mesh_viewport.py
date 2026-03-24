@@ -143,6 +143,10 @@ BONE_CONNECTIONS = list(_SKEL.bone_connections)
 _N_BODY_JOINTS = _SKEL.n_body_joints
 _JOINT_PALETTE = _SKEL.joint_palette
 
+# Native SMPL-X exposes 55 joints including jaw/eyes. The viewport's 52-joint
+# skeleton skips those 3 joints and expects the hand chains to follow directly.
+_SMPLX_NATIVE_TO_VIEWPORT = list(range(22)) + list(range(25, 40)) + list(range(40, 55))
+
 # Joint picking threshold in pixels
 _JOINT_PICK_THRESHOLD = 20.0
 
@@ -404,6 +408,16 @@ def project_joints_to_screen(
     screen[:, 0] = (ndc[:, 0] + 1.0) * 0.5 * viewport_w
     screen[:, 1] = (1.0 - ndc[:, 1]) * 0.5 * viewport_h
     return screen
+
+
+def _coerce_smplx_joints_to_viewport_order(joints: np.ndarray) -> np.ndarray:
+    """Map native 55-joint SMPL-X output to the viewport's 52-joint layout."""
+    joints = np.asarray(joints)
+    if joints.ndim != 2:
+        return joints
+    if joints.shape[0] >= max(_SMPLX_NATIVE_TO_VIEWPORT) + 1:
+        return joints[_SMPLX_NATIVE_TO_VIEWPORT]
+    return joints
 
 
 def find_nearest_joint(
@@ -1086,6 +1100,7 @@ class MeshViewport(_BaseWidget):
         self._orbit_distance: float = _ORBIT_DEFAULT_DISTANCE
         self._orbit_center: np.ndarray = _ORBIT_DEFAULT_CENTER.copy()
         self._orbit_auto_centered: bool = False
+        self._orbit_center_override: np.ndarray | None = None
 
         # Mouse tracking for orbit interaction
         self._mouse_last_pos: tuple[int, int] | None = None
@@ -1218,6 +1233,8 @@ class MeshViewport(_BaseWidget):
         if person_id == self._person_id:
             return
         self._person_id = person_id
+        if self._camera_mode == "orbit" and self._orbit_center_override is None:
+            self._orbit_auto_centered = False
         # Update active skeleton def and coordinate space based on track data
         if self._session is not None:
             track = self._session.person_tracks.get(person_id)
@@ -1229,6 +1246,38 @@ class MeshViewport(_BaseWidget):
             # based on whether world-grounding transform succeeds
             self._data_is_global = False
         self._refresh_mesh()
+
+    def center_orbit_on_selected(self):
+        """Auto-center orbit around the currently selected person's geometry."""
+        self._orbit_center_override = None
+        self._orbit_auto_centered = False
+        if self._camera_mode != "orbit":
+            return
+        self._auto_center_orbit()
+        self._update_camera()
+        self.camera_changed.emit(self._camera_state())
+
+    def set_orbit_center(self, center):
+        """Set a manual orbit pivot in GL-space coordinates."""
+        center_arr = np.asarray(center, dtype=np.float32).reshape(3)
+        self._orbit_center_override = center_arr.copy()
+        self._orbit_center = center_arr.copy()
+        self._orbit_auto_centered = True
+        if self._camera_mode != "orbit":
+            return
+        self._update_camera()
+        self.camera_changed.emit(self._camera_state())
+
+    def clear_orbit_center_override(self, recenter: bool = True):
+        """Clear any manual orbit pivot override."""
+        self._orbit_center_override = None
+        self._orbit_auto_centered = False
+        if self._camera_mode != "orbit":
+            return
+        if recenter:
+            self._auto_center_orbit()
+        self._update_camera()
+        self.camera_changed.emit(self._camera_state())
 
     def on_frame_changed(self, frame_idx: int):
         """Update displayed frame."""
@@ -1449,6 +1498,69 @@ class MeshViewport(_BaseWidget):
 
         return params
 
+    def _params_have_world_motion(self, params: dict | None) -> bool:
+        """Return True when params include world-space root pose + translation."""
+        if params is None:
+            return False
+        return (
+            params.get("global_orient_world") is not None
+            and params.get("transl_world") is not None
+        )
+
+    def _resolve_track_render_context(
+        self,
+        track,
+        *,
+        apply_pose_override: bool = False,
+    ) -> dict | None:
+        """Resolve the active params and coordinate-space flags for a track.
+
+        This is the single source of truth for viewport rendering decisions:
+        selected skeleton, active params, and whether orbit mode should treat
+        the data as already world-grounded (Y-up, no CV->GL model flip).
+        """
+        if track is None:
+            return None
+
+        source = "smplx"
+        params = track.smplx_params
+        if track.soma_params is not None and track.smplx_params is None:
+            source = "soma"
+            params = track.soma_params
+
+        if params is None:
+            return None
+
+        active_params = params
+        is_global = self._camera_mode == "orbit" and self._params_have_world_motion(params)
+        if is_global:
+            active_params = dict(params)
+            active_params["global_orient"] = np.asarray(
+                params["global_orient_world"], dtype=np.float32
+            )
+            active_params["transl"] = np.asarray(
+                params["transl_world"], dtype=np.float32
+            )
+            if source == "soma" and active_params.get("poses") is not None:
+                poses = np.asarray(active_params["poses"], dtype=np.float32)
+                if poses.ndim == 3 and poses.shape[0] == len(active_params["transl"]):
+                    poses = poses.copy()
+                    poses[:, 0] = active_params["global_orient"]
+                    active_params["poses"] = poses
+
+        if apply_pose_override:
+            active_params = self._apply_override_to_params(
+                active_params, self._current_frame
+            )
+
+        return {
+            "source": source,
+            "params": active_params,
+            "is_global": is_global,
+            "needs_cv_to_gl": not is_global,
+            "skeleton": _SOMA_SKEL if source == "soma" else _SKEL,
+        }
+
     # ------------------------------------------------------------------
     # Camera modes & mouse interaction
     # ------------------------------------------------------------------
@@ -1495,6 +1607,7 @@ class MeshViewport(_BaseWidget):
         self._orbit_pitch = _ORBIT_DEFAULT_PITCH
         self._orbit_distance = _ORBIT_DEFAULT_DISTANCE
         self._orbit_center = _ORBIT_DEFAULT_CENTER.copy()
+        self._orbit_center_override = None
         self._orbit_auto_centered = False
         self._auto_center_orbit()
 
@@ -1504,12 +1617,6 @@ class MeshViewport(_BaseWidget):
         pts = self._vertices
         if pts is None:
             pts = self._joint_positions
-        # Combine all persons' joints for multi-person centering
-        if self._all_joint_positions:
-            all_pts = list(self._all_joint_positions.values())
-            if pts is not None:
-                all_pts.append(pts)
-            pts = np.concatenate(all_pts, axis=0) if all_pts else pts
         if pts is None:
             return
 
@@ -1533,6 +1640,11 @@ class MeshViewport(_BaseWidget):
             # Camera space: grid at feet, center at midpoint
             self._grid_y = foot_y
             center_y = (foot_y + head_y) / 2.0
+
+        if self._orbit_center_override is not None:
+            self._orbit_center = self._orbit_center_override.astype(np.float32).copy()
+            self._orbit_auto_centered = True
+            return
 
         centroid = gl_pts.mean(axis=0).copy()
         centroid[1] = center_y
@@ -1681,11 +1793,34 @@ class MeshViewport(_BaseWidget):
             region_name = _JOINT_TO_REGION.get(target, "")
             act_region = menu.addAction(f"Select Region ({region_name})")
 
+        act_center_selected = None
+        act_center_joint = None
+        act_reset_center = None
+        if self._camera_mode == "orbit":
+            menu.addSeparator()
+            act_center_selected = menu.addAction("Center Orbit On Selected Person")
+            if (
+                self._joint_positions is not None
+                and 0 <= target < len(self._joint_positions)
+            ):
+                act_center_joint = menu.addAction(f"Center Orbit On {JOINT_NAMES[target]}")
+            act_reset_center = menu.addAction("Reset Orbit Center")
+
         action = menu.exec_(event.globalPos())
         if action is None:
             return
 
-        if action == act_chain:
+        if action == act_center_selected:
+            self.center_orbit_on_selected()
+        elif action == act_center_joint and self._joint_positions is not None:
+            center = np.asarray(self._joint_positions[target], dtype=np.float32).copy()
+            if not self._data_is_global:
+                center[1] *= -1.0
+                center[2] *= -1.0
+            self.set_orbit_center(center)
+        elif action == act_reset_center:
+            self.clear_orbit_center_override(recenter=True)
+        elif action == act_chain:
             # Select the root of the chain — visually highlights the full path
             # (The chain is highlighted via _draw_skeleton whenever the
             # selected joint is set; selecting the tip highlights the whole chain.)
@@ -1800,8 +1935,16 @@ class MeshViewport(_BaseWidget):
                 elif isinstance(out, dict) and "joints" in out:
                     joints_np = out["joints"][0].cpu().numpy()
                 else:
-                    # SmplxLite returns only vertices; joints not directly available
-                    return None
+                    # SmplxLite exposes beta-dependent rest joints via
+                    # get_skeleton(); use those so FK matches the mesh scale.
+                    if hasattr(self._body_model, "get_skeleton"):
+                        joints_np = (
+                            self._body_model.get_skeleton(be_t)[0].cpu().numpy()
+                        )
+                    else:
+                        return None
+
+                joints_np = _coerce_smplx_joints_to_viewport_order(joints_np)
 
                 for i, name in enumerate(JOINT_NAMES):
                     if i == 0 or i >= len(joints_np):
@@ -1836,23 +1979,21 @@ class MeshViewport(_BaseWidget):
         if track is None:
             logger.debug("_compute_joints: no track for pid=%d", self._person_id)
             return None
-        params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
-        if params is None:
+        ctx = self._resolve_track_render_context(
+            track,
+            apply_pose_override=self._pose_override is not None,
+        )
+        if ctx is None:
             logger.debug(
                 "_compute_joints: no params for pid=%d (model=%s, soma=%s, smplx=%s)",
                 self._person_id, track.body_model_type,
                 track.soma_params is not None, track.smplx_params is not None,
             )
             return None
-
-        # Apply pose override for real-time preview
-        if self._pose_override is not None:
-            ov_frame = self._pose_override.get("frame_idx", self._current_frame)
-            if ov_frame == self._current_frame:
-                params = self._apply_override_to_params(params, self._current_frame)
+        params = ctx["params"]
 
         # Use shape-dependent offsets when available
-        shape_off = self._get_shape_offsets(self._person_id)
+        shape_off = self._get_shape_offsets(self._person_id) if ctx["source"] == "smplx" else None
 
         try:
             joints = forward_kinematics(params, self._current_frame, shape_off)
@@ -1862,22 +2003,6 @@ class MeshViewport(_BaseWidget):
             return None
         if joints is None:
             return None
-
-        # In orbit mode, use world-grounded global_orient + transl
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
-            p2 = dict(params)
-            p2["global_orient"] = p2["global_orient_world"]
-            p2["transl"] = p2["transl_world"]
-            try:
-                world_joints = forward_kinematics(
-                    p2, self._current_frame, shape_off,
-                )
-                if world_joints is not None:
-                    return world_joints
-            except Exception:
-                pass
 
         return joints
 
@@ -2149,9 +2274,9 @@ class MeshViewport(_BaseWidget):
             import torch
 
             with torch.no_grad():
-                # Use incam params — crop→original transform was already applied
-                # during loading, so all persons are in original camera space.
-                # The CV→GL model matrix handles the Y-flip for rendering.
+                # soma_params already reflects the active render context chosen
+                # by _resolve_track_render_context(), so orbit mode can pass
+                # world-grounded root motion while incam keeps camera-space data.
                 poses = soma_params.get("poses")  # (N, 77, 3)
                 transl = soma_params.get("transl")  # (N, 3)
                 identity_coeffs = soma_params.get("identity_coeffs")  # (1, C)
@@ -2239,16 +2364,11 @@ class MeshViewport(_BaseWidget):
         Returns ``(vertices, normals)`` each (V, 3) float32, or ``None``
         when the model / params are unavailable.
         """
-        cache_key = (person_id, frame_idx)
-
         # Skip cache when pose override is active for this frame
         override_active = (
             self._pose_override is not None
             and self._pose_override.get("frame_idx", self._current_frame) == frame_idx
         )
-
-        if not override_active and cache_key in self._vertex_cache:
-            return self._vertex_cache[cache_key]
 
         if self._session is None:
             return None
@@ -2257,31 +2377,37 @@ class MeshViewport(_BaseWidget):
         if track is None:
             return None
 
+        ctx = self._resolve_track_render_context(
+            track,
+            apply_pose_override=override_active,
+        )
+        if ctx is None:
+            return None
+
+        cache_key = (
+            person_id,
+            frame_idx,
+            self._camera_mode,
+            ctx["source"],
+            int(ctx["is_global"]),
+        )
+
+        if not override_active and cache_key in self._vertex_cache:
+            return self._vertex_cache[cache_key]
+
         # SOMA track with no SMPL-X fallback — use SOMA body model
-        if track.soma_params is not None and track.smplx_params is None:
+        if ctx["source"] == "soma":
             return self._compute_soma_vertices(
-                track.soma_params, frame_idx, override_active
+                ctx["params"], frame_idx, override_active
             )
 
         # SMPL-X path (includes SOMA tracks with SMPL-X fallback from GVHMR)
         if not self._load_model():
             return None
 
-        params = track.smplx_params
+        params = ctx["params"]
         if params is None:
             return None
-
-        # In orbit mode, use world-grounded params
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
-            params = dict(params)
-            params["global_orient"] = params["global_orient_world"]
-            params["transl"] = params["transl_world"]
-
-        # Apply pose override for real-time preview
-        if override_active:
-            params = self._apply_override_to_params(params, frame_idx)
 
         try:
             import torch
@@ -2995,17 +3121,17 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        # Determine coordinate space: SMPL-X tracks with world params use
-        # Y-up world space (_data_is_global=True, identity model matrix).
-        # Other tracks use camera space (_data_is_global=False, CV→GL flip).
+        selected_track = None
+        selected_ctx = None
+        if self._session is not None:
+            selected_track = self._session.person_tracks.get(self._person_id)
+            selected_ctx = self._resolve_track_render_context(selected_track)
+
+        if selected_ctx is not None:
+            self._active_skel = selected_ctx["skeleton"]
+
         old_is_global = self._data_is_global
-        self._data_is_global = False
-        if self._camera_mode == "orbit" and self._session is not None:
-            track = self._session.person_tracks.get(self._person_id)
-            if track is not None and track.body_model_type == "smplx":
-                params = track.smplx_params
-                if params and "global_orient_world" in params and "transl_world" in params:
-                    self._data_is_global = True
+        self._data_is_global = bool(selected_ctx and selected_ctx["is_global"])
         if self._data_is_global != old_is_global:
             self._update_camera()
         # Skip expensive body model forward pass in wireframe mode and
@@ -3045,24 +3171,18 @@ class MeshViewport(_BaseWidget):
         self._all_active_skels.clear()
         if self._show_all_persons and self._session is not None:
             for pid, track in self._session.person_tracks.items():
-                skel = _SOMA_SKEL if track.body_model_type == "soma" else _SKEL
-                params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
-                if params is None:
+                ctx = self._resolve_track_render_context(track)
+                if ctx is None:
                     continue
                 try:
-                    # In orbit mode, use world params for grounded positioning
-                    fk_params = params
-                    if (self._camera_mode == "orbit"
-                            and "global_orient_world" in params
-                            and "transl_world" in params):
-                        fk_params = dict(params)
-                        fk_params["global_orient"] = fk_params["global_orient_world"]
-                        fk_params["transl"] = fk_params["transl_world"]
-                    joints = forward_kinematics(fk_params, self._current_frame)
+                    shape_off = self._get_shape_offsets(pid) if ctx["source"] == "smplx" else None
+                    joints = forward_kinematics(
+                        ctx["params"], self._current_frame, shape_off
+                    )
                     if joints is None:
                         continue
                     self._all_joint_positions[pid] = joints
-                    self._all_active_skels[pid] = skel
+                    self._all_active_skels[pid] = ctx["skeleton"]
                 except Exception:
                     pass
 

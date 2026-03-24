@@ -127,6 +127,35 @@ class TestLoadGemxSomaOutput:
         loaded = load_gemx_soma_output(tmp_path)
         assert loaded["poses"].dtype == np.float32
 
+    def test_loads_camera_and_world_aliases_from_pt(self, tmp_path):
+        torch = pytest.importorskip("torch")
+
+        data = {
+            "body_params_incam": {
+                "body_pose": torch.zeros(3, 228),
+                "global_orient": torch.zeros(3, 3),
+                "transl": torch.tensor([[0.0, 1.0, 2.0]] * 3),
+            },
+            "body_params_global": {
+                "global_orient": torch.tensor([[0.0, 0.5, 0.0]] * 3),
+                "transl": torch.tensor([[1.0, 0.0, -1.0]] * 3),
+            },
+            "K_fullimg": torch.eye(3).unsqueeze(0).repeat(3, 1, 1),
+        }
+        torch.save(data, tmp_path / "hpe_results.pt")
+
+        loaded = load_gemx_soma_output(tmp_path)
+        assert loaded is not None
+        assert loaded["coordinate_space"] == "camera"
+        assert loaded["camera_model"] == "crop_camera"
+        np.testing.assert_allclose(loaded["transl"], loaded["transl_cam"])
+        np.testing.assert_allclose(
+            loaded["global_orient_world"][0], [0.0, 0.5, 0.0], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            loaded["transl_world"][0], [1.0, 0.0, -1.0], atol=1e-6
+        )
+
 
 class TestGEMXWorker:
     """GEMXWorker construction and interface."""

@@ -56,9 +56,9 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                 if bp is None:
                     continue
 
-                body_pose = np.array(bp["body_pose"])    # (L, J*3) — 63 or 228
-                global_orient = np.array(bp["global_orient"])  # (L, 3)
-                transl = np.array(bp["transl"])            # (L, 3)
+                body_pose = np.asarray(bp["body_pose"])    # (L, J*3) — 63 or 228
+                global_orient = np.asarray(bp["global_orient"])  # (L, 3)
+                transl = np.asarray(bp["transl"])            # (L, 3)
                 n_frames = body_pose.shape[0]
                 n_pose_joints = body_pose.shape[1] // 3   # 21 or 76
 
@@ -70,7 +70,7 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                 net_out = data.get("net_outputs", {})
                 conf_logits = net_out.get("static_conf_logits")
                 if conf_logits is not None:
-                    conf_logits = np.array(conf_logits)
+                    conf_logits = np.asarray(conf_logits)
                     if conf_logits.ndim == 3:
                         conf_logits = conf_logits[0]  # (N, 6)
                     conf_probs = 1.0 / (1.0 + np.exp(-conf_logits.astype(np.float64)))
@@ -78,41 +78,55 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
 
                 # Also load global-space orient/transl for orbit mode
                 bp_global = data.get("body_params_global", {})
-                go_world = np.array(bp_global.get("global_orient", global_orient)).astype(np.float32)
-                tr_world = np.array(bp_global.get("transl", transl)).astype(np.float32)
+                go_world = np.asarray(bp_global.get("global_orient", global_orient)).astype(np.float32)
+                tr_world = np.asarray(bp_global.get("transl", transl)).astype(np.float32)
 
                 if n_pose_joints <= 21:
                     # SMPL-X format (21 body joints) — use smplx_params path
+                    body_pose_3 = body_pose.reshape(n_frames, n_pose_joints, 3).astype(np.float32)
+                    global_orient_cam = global_orient.astype(np.float32)
+                    transl_cam = transl.astype(np.float32)
                     result = {
-                        "body_pose": body_pose.reshape(n_frames, n_pose_joints, 3).astype(np.float32),
-                        "global_orient": global_orient.astype(np.float32),
-                        "transl": transl.astype(np.float32),
+                        "body_pose": body_pose_3,
+                        "body_pose_cam": body_pose_3.copy(),
+                        "global_orient": global_orient_cam,
+                        "global_orient_cam": global_orient_cam.copy(),
+                        "transl": transl_cam,
+                        "transl_cam": transl_cam.copy(),
                         "global_orient_world": go_world,
                         "transl_world": tr_world,
+                        "coordinate_space": "camera",
+                        "camera_model": "crop_camera",
                         "body_model_type": "smplx",
                     }
                 else:
                     # True SOMA format (76 body joints) — build poses (L, 77, 3)
                     body_pose_3 = body_pose.reshape(n_frames, n_pose_joints, 3)
                     go_3 = global_orient.reshape(n_frames, 1, 3)
+                    global_orient_cam = global_orient.astype(np.float32)
+                    transl_cam = transl.astype(np.float32)
                     poses = np.concatenate(
                         [go_3, body_pose_3[:, :76]], axis=1
                     ).astype(np.float32)
                     result = {
                         "poses": poses,
-                        "transl": transl.astype(np.float32),
-                        "global_orient": global_orient.astype(np.float32),
+                        "transl": transl_cam,
+                        "transl_cam": transl_cam.copy(),
+                        "global_orient": global_orient_cam,
+                        "global_orient_cam": global_orient_cam.copy(),
                         "global_orient_world": go_world,
                         "transl_world": tr_world,
+                        "coordinate_space": "camera",
+                        "camera_model": "crop_camera",
                         "body_model_type": "soma",
                     }
 
                 if "identity_coeffs" in bp:
-                    result["identity_coeffs"] = np.array(bp["identity_coeffs"]).astype(np.float32)
+                    result["identity_coeffs"] = np.asarray(bp["identity_coeffs"]).astype(np.float32)
                 if "scale_params" in bp:
-                    result["scale_params"] = np.array(bp["scale_params"]).astype(np.float32)
+                    result["scale_params"] = np.asarray(bp["scale_params"]).astype(np.float32)
                 if "K_fullimg" in data:
-                    result["K_fullimg"] = np.array(data["K_fullimg"]).astype(np.float32)
+                    result["K_fullimg"] = np.asarray(data["K_fullimg"]).astype(np.float32)
                 if confidences is not None:
                     result["confidences"] = confidences
 

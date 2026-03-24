@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import numpy as np
 import pytest
 
 from app_window import AppWindow, LogPanel
@@ -828,7 +829,7 @@ class TestWorkspacePresets:
     def test_non_pipeline_preset_hides_log(self, app_window):
         """Non-Pipeline presets hide the log dock."""
         app_window._apply_preset("Review")
-        assert app_window._log_dock.isHidden()
+        assert not app_window._log_dock.isVisible()
 
     def test_apply_preset_updates_status(self, app_window):
         """Applying a preset updates the status bar."""
@@ -1305,6 +1306,48 @@ class TestLoadResultsFromOutputDir:
         assert 0 in app_window._session.crossing_spans
         assert app_window._session.crossing_spans[0] == [(10, 20), (50, 60)]
 
+    def test_applies_manifest_world_offsets_to_loaded_tracks(self, app_window, tmp_path):
+        """Session manifest offsets should be applied to world-space translations."""
+        (tmp_path / "person_0").mkdir()
+        (tmp_path / "person_1").mkdir()
+        (tmp_path / "session_manifest.json").write_text(json.dumps({
+            "offsets": {
+                "10": [0.0, 0.0, 0.0],
+                "20": [-1.0, 0.0, 2.0],
+            },
+            "person_bindings": [
+                {"source_index": 0, "track_id": 10},
+                {"source_index": 1, "track_id": 20},
+            ],
+        }))
+
+        params0 = {
+            "transl_world": np.zeros((1, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+        }
+        params1 = {
+            "transl_world": np.zeros((1, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+        }
+
+        with patch.object(
+            app_window,
+            "_load_motion_params",
+            side_effect=[(params0, None, "smplx"), (params1, None, "smplx")],
+        ), patch.object(app_window, "_refresh_all_panels"):
+            app_window._load_results_from_output_dir(tmp_path)
+
+        np.testing.assert_allclose(
+            app_window._session.person_tracks[0].smplx_params["transl_world"][0],
+            [0.0, 0.0, 0.0],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            app_window._session.person_tracks[1].smplx_params["transl_world"][0],
+            [-1.0, 0.0, 2.0],
+            atol=1e-6,
+        )
+
 
 class TestMultiPipelineFinishedUsesRefresh:
     """_on_multi_pipeline_finished uses _refresh_all_panels."""
@@ -1759,3 +1802,99 @@ class TestLoadMotionParams:
         assert smplx is None
         assert soma is None
         assert bmt == "smplx"
+
+
+class TestViewportLoaderContract:
+    """Loader helpers should expose consistent camera/world metadata."""
+
+    def test_crop_to_original_updates_transl_cam_alias(self, app_window, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        (person_dir / "person_meta.json").write_text(
+            json.dumps({"crop_bbox": [100, 50, 300, 350]})
+        )
+
+        app_window._session.img_width = 1920
+        app_window._session.img_height = 1080
+
+        params = {
+            "K_fullimg": np.array(
+                [[[1000.0, 0.0, 160.0], [0.0, 1000.0, 120.0], [0.0, 0.0, 1.0]]],
+                dtype=np.float32,
+            ),
+            "transl": np.array([[0.1, 0.2, 2.0]], dtype=np.float32),
+            "transl_cam": np.array([[0.1, 0.2, 2.0]], dtype=np.float32),
+        }
+
+        app_window._crop_to_original_camera(params, person_dir)
+
+        np.testing.assert_allclose(params["transl"], params["transl_cam"], atol=1e-6)
+
+    def test_load_smplx_params_legacy_adds_camera_and_world_aliases(self, app_window, tmp_path):
+        torch = pytest.importorskip("torch")
+
+        person_dir = tmp_path / "person_0"
+        target_dir = person_dir / "demo" / "isolated_video"
+        target_dir.mkdir(parents=True)
+
+        results = {
+            "smpl_params_incam": {
+                "global_orient": torch.zeros(2, 3),
+                "body_pose": torch.zeros(2, 63),
+                "betas": torch.zeros(1, 10),
+                "transl": torch.tensor([[0.0, 1.0, 2.0], [0.0, 1.1, 2.1]]),
+            },
+            "smpl_params_global": {
+                "global_orient": torch.tensor([[0.0, 0.25, 0.0], [0.0, 0.5, 0.0]]),
+                "transl": torch.tensor([[1.0, 0.0, -1.0], [1.1, 0.0, -1.2]]),
+            },
+            "K_fullimg": torch.eye(3).unsqueeze(0).repeat(2, 1, 1),
+        }
+        torch.save(results, target_dir / "hmr4d_results.pt")
+
+        params = app_window._load_smplx_params_legacy(person_dir)
+
+        assert params is not None
+        assert params["coordinate_space"] == "camera"
+        assert params["camera_model"] == "full_image"
+        np.testing.assert_allclose(params["transl"], params["transl_cam"], atol=1e-6)
+        np.testing.assert_allclose(
+            params["global_orient_world"][1], [0.0, 0.5, 0.0], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            params["transl_world"][0], [1.0, 0.0, -1.0], atol=1e-6
+        )
+
+    def test_apply_world_crop_offset_uses_inverse_slam_rotation(self, app_window, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        (person_dir / "person_meta.json").write_text(
+            json.dumps({"crop_bbox": [200, 0, 400, 400]})
+        )
+
+        app_window._session.img_width = 1000
+        app_window._session.img_height = 1000
+        # 90deg yaw world->camera; transpose should rotate +Xcam to +Zworld.
+        R_w2c = np.array(
+            [[0.0, 0.0, 1.0],
+             [0.0, 1.0, 0.0],
+             [-1.0, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+        slam = np.repeat(np.eye(4, dtype=np.float32)[None], 1, axis=0)
+        slam[0, :3, :3] = R_w2c
+        app_window._session.slam_c2w = slam
+
+        params = {
+            "K_fullimg": np.array(
+                [[[1000.0, 0.0, 100.0], [0.0, 1000.0, 500.0], [0.0, 0.0, 1.0]]],
+                dtype=np.float32,
+            ),
+            "transl_world": np.zeros((1, 3), dtype=np.float32),
+        }
+
+        app_window._apply_world_crop_offset(params, person_dir)
+
+        # dx_per_z = (100 + 200 - 500) / 1000 = -0.2, approx_Z = 2.5 => -0.5 X_cam
+        # With R_c2w = R_w2c.T, this becomes -0.5 Z_world.
+        np.testing.assert_allclose(params["transl_world"][0], [0.0, 0.0, -0.5], atol=1e-6)
