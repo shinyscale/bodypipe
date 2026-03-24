@@ -2960,9 +2960,13 @@ class MeshViewport(_BaseWidget):
         if self._data_is_global:
             self._data_is_global = False
             self._update_camera()
-        # In wireframe mode skip the expensive SMPL-X forward pass —
-        # only compute FK joint positions for the skeleton overlay.
-        if self._render_mode != RenderMode.WIREFRAME:
+        # Skip expensive body model forward pass in wireframe mode and
+        # during scrubbing (SOMA on CPU takes ~1s/frame).
+        skip_mesh = (
+            self._render_mode == RenderMode.WIREFRAME
+            or self._pre_scrub_mode is not None  # actively scrubbing/playing
+        )
+        if not skip_mesh:
             result = self._compute_vertices(self._person_id, self._current_frame)
             if result is not None:
                 self._vertices, self._normals = result
