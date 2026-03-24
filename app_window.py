@@ -1660,9 +1660,9 @@ class AppWindow(QMainWindow):
                     continue
                 gemx_result = load_gemx_soma_output(search_dir)
                 if gemx_result is not None:
-                    # Apply crop→original offset so multi-person positions
-                    # are relative to the original video, not each crop.
-                    self._apply_crop_offset(gemx_result, person_dir)
+                    # Transform from crop camera → original video camera so
+                    # multi-person positions are correct relative to each other.
+                    self._crop_to_original_camera(gemx_result, person_dir)
 
                     bmt = gemx_result.pop("body_model_type", "soma")
                     if bmt == "smplx":
@@ -1677,17 +1677,16 @@ class AppWindow(QMainWindow):
             return smplx_params, None, "smplx"
         return None, None, "smplx"
 
-    def _apply_crop_offset(self, params: dict, person_dir: Path):
-        """Offset translation from crop camera space to original video space.
+    def _crop_to_original_camera(self, params: dict, person_dir: Path):
+        """Transform translation from crop camera space to original video camera.
 
-        Each person's GEM-X/GVHMR estimation runs on an isolated crop.
-        The resulting ``transl`` is in that crop's camera coordinate system.
-        To position multiple people correctly relative to each other, we
-        shift each person's translation by the crop center offset.
+        Each person's GEM-X estimation runs on an isolated crop video with its
+        own camera intrinsics.  This transforms the 3D translation so all
+        persons are in the original video's camera coordinate system, enabling
+        correct relative positioning.
 
-        The correction uses the perspective projection relation:
-            X_orig = X_crop + (crop_cx - video_cx) * Z / focal
-        where Z is depth and focal is from the crop intrinsics (K_fullimg).
+        Uses the perspective relation:
+            X_orig = (f_crop * X_crop + (cx_crop + crop_x1 - cx_orig) * Z) / f_orig
         """
         import json
 
@@ -1699,51 +1698,42 @@ class AppWindow(QMainWindow):
         except Exception:
             return
 
-        crop_bbox = meta.get("crop_bbox")  # [x1, y1, x2, y2] in original video
+        crop_bbox = meta.get("crop_bbox")
         if not crop_bbox or len(crop_bbox) != 4:
             return
 
-        # Original video dimensions
         vid_w = self._session.img_width if self._session else 0
         vid_h = self._session.img_height if self._session else 0
         if vid_w <= 0 or vid_h <= 0:
             return
 
-        cx1, cy1, cx2, cy2 = crop_bbox
-        crop_cx = (cx1 + cx2) / 2.0
-        crop_cy = (cy1 + cy2) / 2.0
-        vid_cx = vid_w / 2.0
-        vid_cy = vid_h / 2.0
+        import numpy as _np
 
-        # Pixel offset of crop center from video center
-        dx_px = crop_cx - vid_cx
-        dy_px = crop_cy - vid_cy
+        x1, y1 = float(crop_bbox[0]), float(crop_bbox[1])
+        cx_orig = vid_w / 2.0
+        cy_orig = vid_h / 2.0
+        f_orig = float(max(vid_w, vid_h))
 
-        # Use K_fullimg focal length if available, else estimate from crop size
         K = params.get("K_fullimg")
         if K is not None:
-            import numpy as _np
             K_arr = _np.asarray(K)
             if K_arr.ndim == 3:
-                K_arr = K_arr[0]  # (3, 3)
-            focal = float(K_arr[0, 0])
+                K_arr = K_arr[0]
+            f_crop_x = float(K_arr[0, 0])
+            f_crop_y = float(K_arr[1, 1])
+            cx_crop = float(K_arr[0, 2])
+            cy_crop = float(K_arr[1, 2])
         else:
-            focal = float(max(cx2 - cx1, cy2 - cy1))
-
-        if focal <= 0:
             return
 
-        # Apply offset to transl: shift X and Y based on depth Z
-        for key in ("transl", "transl_world"):
-            tr = params.get(key)
-            if tr is None:
-                continue
-            import numpy as _np
-            tr = _np.asarray(tr, dtype=_np.float32).copy()
-            Z = tr[:, 2].clip(min=0.1)  # depth, avoid div by zero
-            tr[:, 0] += dx_px * Z / focal
-            tr[:, 1] += dy_px * Z / focal
-            params[key] = tr
+        tr = params.get("transl")
+        if tr is None:
+            return
+        tr = _np.asarray(tr, dtype=_np.float32).copy()
+        X, Y, Z = tr[:, 0], tr[:, 1], tr[:, 2]
+        tr[:, 0] = (f_crop_x * X + (cx_crop + x1 - cx_orig) * Z) / f_orig
+        tr[:, 1] = (f_crop_y * Y + (cy_crop + y1 - cy_orig) * Z) / f_orig
+        params["transl"] = tr
 
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
         """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering.
