@@ -2936,18 +2936,18 @@ class TestSetScrubbing:
     restoring the user's chosen quality when scrubbing stops.
     """
 
-    def test_scrubbing_switches_to_fast(self, qapp):
+    def test_scrubbing_switches_to_wireframe(self, qapp):
         w = MeshViewport()
         assert w._render_mode is RenderMode.FULL
         w.set_scrubbing(True)
-        assert w._render_mode is RenderMode.FAST
+        assert w._render_mode is RenderMode.WIREFRAME
 
     def test_scrubbing_saves_previous_mode(self, qapp):
         w = MeshViewport()
         w.set_render_mode("fast")
         w.set_scrubbing(True)
         assert w._pre_scrub_mode is RenderMode.FAST
-        assert w._render_mode is RenderMode.FAST  # already fast, no change
+        assert w._render_mode is RenderMode.WIREFRAME
 
     def test_scrub_end_restores_mode(self, qapp):
         w = MeshViewport()
@@ -2995,11 +2995,11 @@ class TestSetScrubbing:
         assert w._pre_scrub_mode is None
 
     def test_scrub_cycle_full(self, qapp):
-        """Full scrub cycle: full → fast → full."""
+        """Full scrub cycle: full → wireframe → full."""
         w = MeshViewport()
         assert w._render_mode is RenderMode.FULL
         w.set_scrubbing(True)
-        assert w._render_mode is RenderMode.FAST
+        assert w._render_mode is RenderMode.WIREFRAME
         w.set_scrubbing(False)
         assert w._render_mode is RenderMode.FULL
 

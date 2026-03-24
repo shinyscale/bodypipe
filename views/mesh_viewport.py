@@ -1360,18 +1360,19 @@ class MeshViewport(_BaseWidget):
         self._refresh_mesh()
 
     def set_scrubbing(self, active: bool):
-        """Auto-switch to fast shading during active scrubbing/playback.
+        """Auto-switch to wireframe during active scrubbing/playback.
 
         When *active* is True the current render mode is saved and the
-        viewport switches to FAST (ambient-only shading — mesh stays visible
-        but lighting is simplified for speed).  When *active* becomes False
-        the previous mode is restored.
+        viewport switches to wireframe (skeleton only — SOMA/SMPL-X forward
+        pass is too slow for real-time on CPU).  When *active* becomes False
+        the previous mode is restored, re-computing the mesh for the current
+        frame.
         """
         if active:
             if self._pre_scrub_mode is None:
                 self._pre_scrub_mode = self._render_mode
-                if self._render_mode == RenderMode.FULL:
-                    self._render_mode = RenderMode.FAST
+                if self._render_mode != RenderMode.WIREFRAME:
+                    self._render_mode = RenderMode.WIREFRAME
                     self._refresh_mesh()
         else:
             if self._pre_scrub_mode is not None:
@@ -2137,6 +2138,16 @@ class MeshViewport(_BaseWidget):
                 transl = soma_params.get("transl")  # (N, 3)
                 identity_coeffs = soma_params.get("identity_coeffs")  # (1, C)
                 scale_params = soma_params.get("scale_params")  # (1, S)
+
+                # In orbit mode, use world-space params so mesh matches skeleton.
+                # Replace global_orient (poses[:, 0]) and transl with world versions.
+                if self._camera_mode == "orbit":
+                    go_w = soma_params.get("global_orient_world")
+                    tr_w = soma_params.get("transl_world")
+                    if go_w is not None and tr_w is not None:
+                        poses = np.array(poses).copy()
+                        poses[:, 0] = np.asarray(go_w).reshape(-1, 3)
+                        transl = tr_w
 
                 if poses is None:
                     return None
