@@ -62,7 +62,10 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                 n_frames = body_pose.shape[0]
                 n_pose_joints = body_pose.shape[1] // 3   # 21 or 76
 
-                # Extract per-frame confidence from GEM-X logits
+                # Extract per-frame confidence from GEM-X logits.
+                # GEM-X static_conf_logits are 6-channel internal scores with
+                # a wide range ([-10, 4]). Using max-sigmoid per frame gives
+                # a 0–1 quality metric that correlates with estimation quality.
                 confidences = None
                 net_out = data.get("net_outputs", {})
                 conf_logits = net_out.get("static_conf_logits")
@@ -71,7 +74,7 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                     if conf_logits.ndim == 3:
                         conf_logits = conf_logits[0]  # (N, 6)
                     conf_probs = 1.0 / (1.0 + np.exp(-conf_logits.astype(np.float64)))
-                    confidences = conf_probs.mean(axis=1).astype(np.float32)
+                    confidences = conf_probs.max(axis=1).astype(np.float32)
 
                 # Also load global-space orient/transl for orbit mode
                 bp_global = data.get("body_params_global", {})
@@ -99,6 +102,8 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                         "poses": poses,
                         "transl": transl.astype(np.float32),
                         "global_orient": global_orient.astype(np.float32),
+                        "global_orient_world": go_world,
+                        "transl_world": tr_world,
                         "body_model_type": "soma",
                     }
 
