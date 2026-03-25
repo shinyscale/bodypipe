@@ -1743,6 +1743,28 @@ class TestMeshViewportSkeleton:
         )
         assert not np.allclose(joints[3], camera_joints[3])
 
+    def test_compute_joints_prefers_smplx_model_joints(self, qapp, session):
+        """SMPL-X joints should use the body-model path when available."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": np.zeros((1, 3), dtype=np.float32),
+                "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+                "betas": np.zeros((1, 10), dtype=np.float32),
+                "transl": np.array([[0.0, 0.0, 2.0]], dtype=np.float32),
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        expected = np.ones((52, 3), dtype=np.float32)
+        w._compute_smplx_model_joints = MagicMock(return_value=expected)
+
+        joints = w._compute_joints()
+
+        assert joints is expected
+        w._compute_smplx_model_joints.assert_called_once()
+
     def test_compute_joints_uses_world_soma_in_orbit(self, qapp, session):
         """Orbit mode should update SOMA root orientation and translation together."""
         w = MeshViewport()

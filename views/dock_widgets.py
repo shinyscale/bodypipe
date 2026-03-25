@@ -15,11 +15,12 @@ from typing import TYPE_CHECKING
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 
 if TYPE_CHECKING:
     from views.identity_inspector import IdentityInspector
@@ -49,6 +50,16 @@ class VideoDock(QDockWidget):
         return self._video_player
 
 
+def _wrap_scrollable(widget: QWidget) -> QScrollArea:
+    """Wrap a dock widget in a vertical scroll area."""
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setWidget(widget)
+    return scroll
+
+
 class MeshViewportDock(QDockWidget):
     """Dock wrapping a MeshViewport widget."""
 
@@ -70,7 +81,7 @@ class IdentityDock(QDockWidget):
         super().__init__("Identity Inspector", parent)
         self.setObjectName("IdentityDock")
         self._identity_inspector = identity_inspector
-        self.setWidget(identity_inspector)
+        self.setWidget(_wrap_scrollable(identity_inspector))
 
     @property
     def identity_inspector(self) -> IdentityInspector:
@@ -93,7 +104,7 @@ class PoseCorrectorDock(QDockWidget):
         self._pose_corrector = PoseCorrectorPanel(
             session=session, gvhmr_root=gvhmr_root, viewport=viewport, parent=self,
         )
-        self.setWidget(self._pose_corrector)
+        self.setWidget(_wrap_scrollable(self._pose_corrector))
 
     @property
     def pose_corrector(self) -> PoseCorrectorPanel:

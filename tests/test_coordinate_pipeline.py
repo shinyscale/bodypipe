@@ -304,6 +304,28 @@ class TestViewportGroundingRegression:
                 f"Person {pid}: mesh not grounded in orbit view (min_y={mesh_min_y:.3f}m)"
             )
 
+    def test_orbit_skeleton_ground_height_tracks_mesh(self, qapp, viewport_session):
+        viewport = MeshViewport()
+        viewport.resize(960, 540)
+        viewport.set_session(viewport_session)
+        viewport.set_camera_mode("orbit")
+
+        for pid in [0, 1]:
+            viewport.set_person(pid)
+            viewport.on_frame_changed(0)
+            verts_result = viewport._compute_vertices(pid, 0)
+            if verts_result is None:
+                pytest.skip("Mesh model unavailable for grounding regression")
+            joints = viewport._joint_positions
+            assert joints is not None
+            verts, _normals = verts_result
+            mesh_min_y = float(np.min(verts[:, 1]))
+            skel_min_y = float(np.min(joints[:, 1]))
+            assert abs(skel_min_y - mesh_min_y) < 0.15, (
+                f"Person {pid}: skeleton/mesh grounding mismatch "
+                f"(skel_min_y={skel_min_y:.3f}m, mesh_min_y={mesh_min_y:.3f}m)"
+            )
+
     def test_orbit_preserves_head_above_pelvis_without_sign_flip(self, qapp, viewport_session):
         viewport = MeshViewport()
         viewport.resize(960, 540)

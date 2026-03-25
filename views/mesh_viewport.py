@@ -420,6 +420,18 @@ def _coerce_smplx_joints_to_viewport_order(joints: np.ndarray) -> np.ndarray:
     return joints
 
 
+def _frame_slice_array(arr, idx: int):
+    """Return a single-frame slice from an array-like param."""
+    if arr is None:
+        return None
+    arr = np.asarray(arr)
+    if arr.ndim >= 2 and idx < arr.shape[0]:
+        return arr[idx : idx + 1]
+    if arr.ndim == 1:
+        return arr[None]
+    return None
+
+
 def find_nearest_joint(
     click_x: float,
     click_y: float,
@@ -1992,6 +2004,11 @@ class MeshViewport(_BaseWidget):
             return None
         params = ctx["params"]
 
+        if ctx["source"] == "smplx":
+            model_joints = self._compute_smplx_model_joints(params, self._current_frame)
+            if model_joints is not None:
+                return model_joints
+
         # Use shape-dependent offsets when available
         shape_off = self._get_shape_offsets(self._person_id) if ctx["source"] == "smplx" else None
 
@@ -2005,6 +2022,59 @@ class MeshViewport(_BaseWidget):
             return None
 
         return joints
+
+    def _compute_smplx_model_joints(
+        self,
+        params: dict,
+        frame_idx: int,
+    ) -> np.ndarray | None:
+        """Compute posed SMPL-X joints from the same model path as the mesh."""
+        if not self._load_model() or self._body_model is None:
+            return None
+
+        try:
+            import torch
+            from pytorch3d.transforms import axis_angle_to_matrix
+            from hmr4d.utils.body_model.smplx_lite import batch_rigid_transform_v2
+
+            go_frame = _frame_slice_array(params.get("global_orient"), frame_idx)
+            bp_frame = _frame_slice_array(params.get("body_pose"), frame_idx)
+            be_frame = _frame_slice_array(params.get("betas"), frame_idx)
+            tr_frame = _frame_slice_array(params.get("transl"), frame_idx)
+
+            if go_frame is None or bp_frame is None or be_frame is None:
+                return None
+
+            go_t = torch.tensor(go_frame, dtype=torch.float32)
+            bp_t = torch.tensor(bp_frame, dtype=torch.float32)
+            be_t = torch.tensor(be_frame, dtype=torch.float32)
+            tr_t = (
+                torch.tensor(tr_frame, dtype=torch.float32)
+                if tr_frame is not None
+                else None
+            )
+
+            if bp_t.ndim == 3:
+                bp_t = bp_t.reshape(bp_t.shape[0], -1)
+
+            with torch.no_grad():
+                other_default_pose = self._body_model.other_default_pose.expand(
+                    *bp_t.shape[:-1], -1
+                )
+                full_pose = torch.cat([go_t, bp_t, other_default_pose], dim=-1)
+                rot_mats = axis_angle_to_matrix(full_pose.reshape(*full_pose.shape[:-1], 55, 3))
+                joints_native = self._body_model.get_skeleton(be_t)
+                posed_joints = batch_rigid_transform_v2(
+                    rot_mats, joints_native, self._body_model.parents
+                )[0]
+                if tr_t is not None:
+                    posed_joints = posed_joints + tr_t[:, None, :]
+
+            joints_np = posed_joints[0].cpu().numpy()
+            return _coerce_smplx_joints_to_viewport_order(joints_np)
+        except Exception as e:
+            logger.debug("SMPL-X model joint computation failed (f=%d): %s", frame_idx, e)
+            return None
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
         """Pick the joint at screen position, using the active picking mode.
@@ -3175,10 +3245,20 @@ class MeshViewport(_BaseWidget):
                 if ctx is None:
                     continue
                 try:
-                    shape_off = self._get_shape_offsets(pid) if ctx["source"] == "smplx" else None
-                    joints = forward_kinematics(
-                        ctx["params"], self._current_frame, shape_off
-                    )
+                    joints = None
+                    if ctx["source"] == "smplx":
+                        joints = self._compute_smplx_model_joints(
+                            ctx["params"], self._current_frame
+                        )
+                    if joints is None:
+                        shape_off = (
+                            self._get_shape_offsets(pid)
+                            if ctx["source"] == "smplx"
+                            else None
+                        )
+                        joints = forward_kinematics(
+                            ctx["params"], self._current_frame, shape_off
+                        )
                     if joints is None:
                         continue
                     self._all_joint_positions[pid] = joints

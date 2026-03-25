@@ -43,12 +43,11 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
 
     Returns dict matching PersonTrack.soma_params format, or None.
     """
-    import torch
-
     # Primary: look for hpe_results.pt (the real GEM-X output)
     for pattern in ["**/hpe_results.pt", "**/preprocess/hpe_results.pt", "hpe_results.pt"]:
         for f in sorted(output_dir.glob(pattern)):
             try:
+                import torch
                 data = torch.load(str(f), map_location="cpu", weights_only=False)
                 # Use incam (camera-space) params — matches GVHMR convention
                 # and the viewport's CV→GL coordinate pipeline.

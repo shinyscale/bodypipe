@@ -516,6 +516,22 @@ class TestStatusBarWiring:
         assert not app_window._pose_corrector_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
 
+    def test_identity_dock_uses_scroll_area(self, app_window):
+        """Identity inspector dock should be vertically scrollable."""
+        from PySide6.QtWidgets import QScrollArea
+
+        widget = app_window._identity_dock.widget()
+        assert isinstance(widget, QScrollArea)
+        assert widget.widget() is app_window._identity_inspector
+
+    def test_pose_corrector_dock_uses_scroll_area(self, app_window):
+        """Pose corrector dock should be vertically scrollable."""
+        from PySide6.QtWidgets import QScrollArea
+
+        widget = app_window._pose_corrector_dock.widget()
+        assert isinstance(widget, QScrollArea)
+        assert widget.widget() is app_window._pose_corrector
+
     def test_mode_switch_hides_multi_docks(self, app_window):
         """Switching back to single mode hides multi-only docks."""
         app_window._pipeline_dock.set_mode("multi")
