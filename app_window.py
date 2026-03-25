@@ -588,14 +588,19 @@ class AppWindow(QMainWindow):
         """Ensure bottom docks have a usable minimum height.
 
         Qt's restoreState() and dock splitter dragging can collapse docks
-        below their minimum size.  This re-applies constraints and gives
-        bottom docks a reasonable initial height if they were crushed.
+        below a usable size. Give bottom docks a reasonable initial height
+        if they were crushed, but do not pin a hard minimum that prevents
+        the user from resizing the panel back down.
         """
         min_h = 120
+        visible = [
+            dock for dock in (self._track_overview_dock, self._log_dock)
+            if dock.isVisible()
+        ]
         for dock in (self._track_overview_dock, self._log_dock):
-            dock.setMinimumHeight(min_h)
-            if dock.height() < min_h and dock.isVisible():
-                dock.resize(dock.width(), min_h)
+            dock.setMinimumHeight(0)
+        if visible and any(dock.height() < min_h for dock in visible):
+            self.resizeDocks(visible, [min_h] * len(visible), Qt.Vertical)
 
     # ------------------------------------------------------------------
     # Workspace presets

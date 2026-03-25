@@ -564,9 +564,10 @@ class TrackOverview(QWidget):
         self._view.set_lanes(self._lanes)
         self._view.set_num_frames(self._num_frames)
 
-        # Resize widget to fit all tracks + scrollbar
-        sb_h = self._view.horizontalScrollBar().height() if self._view.horizontalScrollBar() else 0
-        self.setMinimumHeight(max(40, int(y) + sb_h + 4))
+        # Keep the widget shrinkable inside its dock. The internal graphics view
+        # already handles scrolling/clip, so the dock splitter should not be
+        # forced to grow with the number of visible lanes.
+        self.setMinimumHeight(40)
 
     def set_current_frame(self, frame: int):
         """Move the playhead to *frame*."""

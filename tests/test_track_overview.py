@@ -294,6 +294,11 @@ class TestTrackOverview:
         w.set_tracks({0: np.ones(50), 1: np.ones(100)})
         assert w._num_frames == 100
 
+    def test_set_tracks_keeps_widget_shrinkable(self, qapp):
+        w = TrackOverview()
+        w.set_tracks({0: np.ones(50), 1: np.ones(100), 2: np.ones(80)})
+        assert w.minimumHeight() == 40
+
     def test_set_current_frame(self, qapp):
         w = TrackOverview()
         w.set_tracks({0: np.ones(100)})

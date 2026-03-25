@@ -532,6 +532,16 @@ class TestStatusBarWiring:
         assert isinstance(widget, QScrollArea)
         assert widget.widget() is app_window._pose_corrector
 
+    def test_bottom_docks_are_not_pinned_to_hard_minimum(self, app_window):
+        """Bottom docks should remain user-resizable after size enforcement."""
+        app_window._track_overview_dock.setMinimumHeight(999)
+        app_window._log_dock.setMinimumHeight(999)
+
+        app_window._enforce_bottom_dock_sizes()
+
+        assert app_window._track_overview_dock.minimumHeight() == 0
+        assert app_window._log_dock.minimumHeight() == 0
+
     def test_mode_switch_hides_multi_docks(self, app_window):
         """Switching back to single mode hides multi-only docks."""
         app_window._pipeline_dock.set_mode("multi")
