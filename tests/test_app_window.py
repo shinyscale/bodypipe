@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 
 from app_window import AppWindow, LogPanel
 from models.pipeline_config import PipelineConfig
@@ -541,6 +542,37 @@ class TestStatusBarWiring:
 
         assert app_window._track_overview_dock.minimumHeight() == 0
         assert app_window._log_dock.minimumHeight() == 0
+
+    def test_bottom_dock_resize_handle_actually_changes_height(self, app_window):
+        """Bottom docks should participate in vertical resizing."""
+        from PySide6.QtWidgets import QApplication
+
+        app_window.restoreState(app_window._default_state, app_window._DOCK_VERSION)
+        app_window.resize(1600, 900)
+        app_window.show()
+        QApplication.processEvents()
+
+        before = app_window._track_overview_dock.height()
+        app_window.resizeDocks(
+            [app_window._video_dock, app_window._track_overview_dock],
+            [700, 50],
+            Qt.Vertical,
+        )
+        QApplication.processEvents()
+        after = app_window._track_overview_dock.height()
+
+        assert after < before
+
+    def test_central_placeholder_does_not_consume_width(self, app_window):
+        """The central placeholder should not steal visible width from docks."""
+        from PySide6.QtWidgets import QApplication
+
+        app_window.restoreState(app_window._default_state, app_window._DOCK_VERSION)
+        app_window.resize(1600, 900)
+        app_window.show()
+        QApplication.processEvents()
+
+        assert app_window.centralWidget().width() == 0
 
     def test_mode_switch_hides_multi_docks(self, app_window):
         """Switching back to single mode hides multi-only docks."""
@@ -1924,3 +1956,82 @@ class TestViewportLoaderContract:
         # dx_per_z = (100 + 200 - 500) / 1000 = -0.2, approx_Z = 2.5 => -0.5 X_cam
         # With R_c2w = R_w2c.T, this becomes -0.5 Z_world.
         np.testing.assert_allclose(params["transl_world"][0], [0.0, 0.0, -0.5], atol=1e-6)
+
+
+class TestReprocessRefresh:
+    """Reprocess should refresh bbox truth in the UI state."""
+
+    def test_load_results_from_output_dir_loads_cached_bboxes(self, app_window, tmp_path):
+        torch = pytest.importorskip("torch")
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        (person_dir / "person_meta.json").write_text(
+            json.dumps({"source_index": 1, "track_id": 20})
+        )
+
+        detection_dir = tmp_path / "detection"
+        detection_dir.mkdir()
+        torch.save(
+            {
+                "tracks": [
+                    {"track_id": 10, "bbx_xyxy": torch.zeros(2, 4)},
+                    {
+                        "track_id": 20,
+                        "bbx_xyxy": torch.tensor(
+                            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
+                        ),
+                    },
+                ]
+            },
+            detection_dir / "all_tracks.pt",
+        )
+
+        with patch.object(
+            app_window,
+            "_load_motion_params",
+            return_value=(None, None, "smplx"),
+        ), patch.object(app_window, "_refresh_all_panels"):
+            app_window._load_results_from_output_dir(tmp_path)
+
+        np.testing.assert_allclose(
+            app_window._session.person_tracks[0].bboxes,
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            atol=1e-6,
+        )
+
+    def test_on_reprocess_finished_keeps_existing_bbox_truth(
+        self, app_window, tmp_path
+    ):
+        from models.session import PersonTrack
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+
+        old_bboxes = np.array([[10.0, 20.0, 30.0, 40.0]], dtype=np.float32)
+        corrections = np.array([[11.0, 21.0, 31.0, 41.0]], dtype=np.float32)
+        track = PersonTrack(
+            person_id=0,
+            person_dir=person_dir,
+            bboxes=old_bboxes.copy(),
+            original_bboxes=old_bboxes.copy(),
+            bbox_corrections=corrections.copy(),
+            smplx_params={},
+            body_model_type="smplx",
+        )
+        app_window._session.person_tracks = {0: track}
+        app_window._session.selected_person = 0
+        app_window._session.dirty_persons = {0}
+        app_window._session.output_dir = tmp_path
+
+        with patch.object(app_window, "_hydrate_person_tracks"), \
+             patch.object(app_window, "_populate_tracks"), \
+             patch.object(app_window._identity_inspector, "refresh"), \
+             patch.object(app_window._mesh_viewport, "set_person"), \
+             patch.object(app_window, "_show_frame"):
+            app_window._on_reprocess_finished({"reprocessed": [0]})
+
+        np.testing.assert_allclose(track.bboxes, old_bboxes, atol=1e-6)
+        np.testing.assert_allclose(track.original_bboxes, old_bboxes, atol=1e-6)
+        np.testing.assert_allclose(track.bbox_corrections, corrections, atol=1e-6)
+        assert app_window._session.dirty_persons == set()

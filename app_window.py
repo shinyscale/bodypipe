@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QMenu,
+    QSizePolicy,
 )
 from PySide6.QtCore import Signal, QSettings, Qt, QByteArray
 from PySide6.QtGui import QAction, QPalette, QColor
@@ -361,7 +362,13 @@ class AppWindow(QMainWindow):
         """
         # Empty central widget — all content in docks
         central = QWidget()
-        central.setMaximumSize(0, 0)
+        # Keep the central widget effectively zero-width so docks still span
+        # the workspace, but leave it vertically expandable so QMainWindow's
+        # dock splitters can redistribute height. A hard 0x0 maximum in both
+        # dimensions makes the bottom handle appear draggable but immovable.
+        central.setMinimumSize(0, 0)
+        central.setMaximumWidth(0)
+        central.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setCentralWidget(central)
         self.setDockNestingEnabled(True)
 
@@ -1227,6 +1234,7 @@ class AppWindow(QMainWindow):
                 person_id=pid,
                 person_dir=pdir,
                 confidences=confidences,
+                bboxes=self._load_cached_bboxes(pdir, pid, output_dir=output_dir),
                 confidence_breakdown=confidence_breakdown,
                 smplx_params=smplx_params,
                 soma_params=soma_params,
@@ -1283,6 +1291,89 @@ class AppWindow(QMainWindow):
             result[int(source_index)] = np.asarray(offset, dtype=np.float32)
         return result
 
+    def _load_cached_all_tracks(self, output_dir: Path | None) -> list[dict]:
+        """Load the detection-stage track cache used as bbox truth."""
+        if output_dir is None:
+            return []
+        tracks_path = output_dir / "detection" / "all_tracks.pt"
+        if not tracks_path.is_file():
+            return []
+        try:
+            import torch
+
+            payload = torch.load(str(tracks_path), map_location="cpu", weights_only=False)
+        except Exception:
+            return []
+        if isinstance(payload, dict) and "tracks" in payload:
+            payload = payload["tracks"]
+        return payload if isinstance(payload, list) else []
+
+    def _load_cached_bboxes(
+        self,
+        person_dir: Path | None,
+        fallback_person_id: int,
+        *,
+        output_dir: Path | None = None,
+    ) -> np.ndarray | None:
+        """Load cached bbox track for a person using source_index/track_id bindings."""
+        if person_dir is None:
+            return None
+
+        resolved_output_dir = output_dir or self._session.output_dir or person_dir.parent
+        all_tracks = self._load_cached_all_tracks(resolved_output_dir)
+        if not all_tracks:
+            return None
+
+        meta = None
+        meta_path = person_dir / "person_meta.json"
+        if meta_path.is_file():
+            try:
+                import json as _json
+
+                meta = _json.loads(meta_path.read_text())
+            except Exception:
+                meta = None
+
+        source_index = meta.get("source_index") if isinstance(meta, dict) else None
+        track_id = meta.get("track_id") if isinstance(meta, dict) else None
+
+        candidate = None
+        if source_index is not None:
+            source_index = int(source_index)
+            if 0 <= source_index < len(all_tracks):
+                candidate = all_tracks[source_index]
+                candidate_track_id = candidate.get("track_id", source_index)
+                if track_id is not None and int(candidate_track_id) != int(track_id):
+                    candidate = None
+
+        if candidate is None and track_id is not None:
+            wanted_track_id = int(track_id)
+            for idx, track in enumerate(all_tracks):
+                if int(track.get("track_id", idx)) == wanted_track_id:
+                    candidate = track
+                    break
+
+        if candidate is None:
+            for idx, track in enumerate(all_tracks):
+                if track.get("track_id", idx) == fallback_person_id:
+                    candidate = track
+                    break
+
+        if candidate is None and 0 <= fallback_person_id < len(all_tracks):
+            candidate = all_tracks[fallback_person_id]
+
+        if candidate is None:
+            return None
+
+        bboxes_raw = candidate.get("bbx_xyxy")
+        if bboxes_raw is None:
+            return None
+        if hasattr(bboxes_raw, "detach"):
+            bboxes_raw = bboxes_raw.detach().cpu().numpy()
+        elif hasattr(bboxes_raw, "cpu") and hasattr(bboxes_raw, "numpy"):
+            bboxes_raw = bboxes_raw.cpu().numpy()
+        return np.asarray(bboxes_raw, dtype=np.float32)
+
     def _apply_multi_person_world_offset(self, params: dict | None, offset):
         """Apply a scene-assembly offset to world translations in-place."""
         if params is None:
@@ -1304,6 +1395,8 @@ class AppWindow(QMainWindow):
         for _pid, track in self._session.person_tracks.items():
             if not track.person_dir or not track.person_dir.is_dir():
                 continue
+            if track.bboxes is None:
+                track.bboxes = self._load_cached_bboxes(track.person_dir, track.person_id)
             if track.smplx_params is None and track.soma_params is None:
                 smplx, soma, bmt = self._load_motion_params(track.person_dir)
                 track.smplx_params = smplx
@@ -1602,8 +1695,17 @@ class AppWindow(QMainWindow):
         self._mesh_viewport.set_person(pid)
         self._show_frame(self._session.current_frame)
 
-        self.set_status(f"Reprocess complete: {len(reprocessed)} person(s) updated")
-        self._log_panel.append_line(f"Reprocess finished: {reprocessed}", "info")
+        failed = result.get("failed", [])
+        if failed:
+            self.set_status(
+                f"Reprocess: {len(reprocessed)} updated, {len(failed)} failed"
+            )
+            self._log_panel.append_line(
+                f"Reprocess finished: updated={reprocessed}, failed={failed}", "warning",
+            )
+        else:
+            self.set_status(f"Reprocess complete: {len(reprocessed)} person(s) updated")
+            self._log_panel.append_line(f"Reprocess finished: {reprocessed}", "info")
 
     def _on_reprocess_error(self, message: str):
         if self._reprocess_worker is not None:
