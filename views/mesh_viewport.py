@@ -1087,9 +1087,9 @@ class MeshViewport(_BaseWidget):
         self._view = _CV_TO_GL.copy()
         self._model_mat = np.eye(4, dtype=np.float32)
 
-        # Vertex cache  {(person_id, frame_idx): (vertices, normals)}
+        # Vertex cache keyed by person/frame/render context.
         self._vertex_cache: dict[
-            tuple[int, int], tuple[np.ndarray, np.ndarray]
+            tuple[object, ...], tuple[np.ndarray, np.ndarray]
         ] = {}
 
         # GL state
@@ -1461,19 +1461,39 @@ class MeshViewport(_BaseWidget):
         # Invalidate cache for affected frame to force recomputation
         if override is not None and self._person_id >= 0:
             frame_idx = override.get("frame_idx", self._current_frame)
-            self._vertex_cache.pop((self._person_id, frame_idx), None)
+            self.invalidate_cache(self._person_id, frame_idx)
         self._refresh_mesh()
 
-    def invalidate_cache(self, person_id: int | None = None, frame_idx: int | None = None):
+    def invalidate_cache(
+        self,
+        person_id: int | None = None,
+        frame_idx: int | None = None,
+        *,
+        include_shape: bool = False,
+    ):
         """Invalidate vertex cache entries.
 
         If both person_id and frame_idx are given, removes that single entry.
         Otherwise clears the entire cache.
         """
         if person_id is not None and frame_idx is not None:
-            self._vertex_cache.pop((person_id, frame_idx), None)
+            for key in list(self._vertex_cache.keys()):
+                if len(key) >= 2 and key[0] == person_id and key[1] == frame_idx:
+                    del self._vertex_cache[key]
+        elif person_id is not None:
+            for key in list(self._vertex_cache.keys()):
+                if len(key) >= 1 and key[0] == person_id:
+                    del self._vertex_cache[key]
+            if include_shape:
+                self._shape_offsets_cache.pop(person_id, None)
+        elif frame_idx is not None:
+            for key in list(self._vertex_cache.keys()):
+                if len(key) >= 2 and key[1] == frame_idx:
+                    del self._vertex_cache[key]
         else:
             self._vertex_cache.clear()
+            if include_shape:
+                self._shape_offsets_cache.clear()
 
     def _apply_override_to_params(self, params: dict, frame_idx: int) -> dict:
         """Create a modified copy of params with pose override applied.
@@ -2460,6 +2480,7 @@ class MeshViewport(_BaseWidget):
             self._camera_mode,
             ctx["source"],
             int(ctx["is_global"]),
+            id(ctx["params"]),
         )
 
         if not override_active and cache_key in self._vertex_cache:

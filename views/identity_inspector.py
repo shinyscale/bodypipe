@@ -1074,17 +1074,23 @@ class IdentityInspector(QWidget):
             t = self._session.person_tracks.get(p)
             if t:
                 t.keyframes = [dict(kf) for kf in old_kf]
+            self._session.dirty_persons.discard(p)
             self._refresh_for_person()
+            self.person_dirty.emit(p)
             self.keyframe_changed.emit(p, f)
 
         def redo(new_kf=new_keyframes, p=pid, f=frame):
             t = self._session.person_tracks.get(p)
             if t:
                 t.keyframes = [dict(kf) for kf in new_kf]
+            self._session.dirty_persons.add(p)
             self._refresh_for_person()
+            self.person_dirty.emit(p)
             self.keyframe_changed.emit(p, f)
 
         self._session.undo_stack.push(UndoEntry("Verify keyframe", undo, redo))
+        self._session.dirty_persons.add(pid)
+        self.person_dirty.emit(pid)
 
         self._update_timeline()
         self._update_keyframe_table()

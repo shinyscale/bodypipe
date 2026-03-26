@@ -301,6 +301,19 @@ class TestMeshViewportWidget:
         w.set_session(Session())
         assert len(w._vertex_cache) == 0
 
+    def test_invalidate_cache_for_person_clears_shape_cache(self, qapp):
+        w = MeshViewport()
+        w._vertex_cache[(0, 0, "orbit", "smplx", 1, 123)] = (
+            np.zeros((3, 3)),
+            np.zeros((3, 3)),
+        )
+        w._shape_offsets_cache[0] = {"pelvis": [0.0, 0.0, 0.0]}
+
+        w.invalidate_cache(0, include_shape=True)
+
+        assert len(w._vertex_cache) == 0
+        assert 0 not in w._shape_offsets_cache
+
     def test_set_person(self, qapp):
         w = MeshViewport()
         w.set_person(2)
@@ -475,6 +488,40 @@ class TestMeshViewportVertexComputation:
         r1 = w._compute_vertices(0, 0)
         r2 = w._compute_vertices(0, 0)
         assert r1 is r2  # same object from cache
+
+    def test_vertex_cache_misses_after_motion_payload_replaced(self, qapp, session):
+        """Replacing motion params should bypass stale cached vertices."""
+        pytest.importorskip("torch")
+
+        import torch
+
+        mock_model = self._make_mock_model()
+
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": torch.randn(10, 3),
+                "body_pose": torch.randn(10, 63),
+                "betas": torch.randn(1, 10),
+                "transl": torch.randn(10, 3),
+            },
+        )
+        w.set_session(session)
+        w._model_loaded = True
+        w._body_model = mock_model
+        w._faces = mock_model.faces
+
+        r1 = w._compute_vertices(0, 0)
+        session.person_tracks[0].smplx_params = {
+            "global_orient": torch.randn(10, 3),
+            "body_pose": torch.randn(10, 63),
+            "betas": torch.randn(1, 10),
+            "transl": torch.randn(10, 3),
+        }
+        r2 = w._compute_vertices(0, 0)
+
+        assert r1 is not r2
 
     def test_vertex_cache_eviction(self, qapp, session):
         """Cache should evict entries when full."""

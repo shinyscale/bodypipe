@@ -1861,6 +1861,41 @@ class TestLoadMotionParams:
         assert soma is None
         assert bmt == "smplx"
 
+    def test_prefers_requested_backend_over_stale_alternative(self, app_window, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+
+        gemx_payload = {
+            "body_model_type": "soma",
+            "poses": np.zeros((1, 77, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+            "K_fullimg": np.eye(3, dtype=np.float32)[None],
+        }
+        gvhmr_payload = {
+            "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+            "global_orient": np.zeros((1, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+            "transl_world": np.zeros((1, 3), dtype=np.float32),
+            "K_fullimg": np.eye(3, dtype=np.float32)[None],
+        }
+
+        with patch(
+            "workers.gemx_worker.load_gemx_soma_output",
+            return_value=gemx_payload.copy(),
+        ), patch.object(
+            app_window,
+            "_load_smplx_params_legacy",
+            return_value=gvhmr_payload.copy(),
+        ):
+            smplx, soma, bmt = app_window._load_motion_params(
+                person_dir,
+                preferred_backend="gvhmr",
+            )
+
+        assert smplx is not None
+        assert soma is None
+        assert bmt == "smplx"
+
 
 class TestViewportLoaderContract:
     """Loader helpers should expose consistent camera/world metadata."""
@@ -2000,7 +2035,7 @@ class TestReprocessRefresh:
             atol=1e-6,
         )
 
-    def test_on_reprocess_finished_keeps_existing_bbox_truth(
+    def test_on_reprocess_finished_reloads_regenerated_bbox_truth(
         self, app_window, tmp_path
     ):
         from models.session import PersonTrack
@@ -2024,14 +2059,58 @@ class TestReprocessRefresh:
         app_window._session.dirty_persons = {0}
         app_window._session.output_dir = tmp_path
 
-        with patch.object(app_window, "_hydrate_person_tracks"), \
+        regenerated = np.array([[50.0, 60.0, 70.0, 80.0]], dtype=np.float32)
+        with patch.object(app_window, "_load_cached_bboxes", return_value=regenerated), \
+             patch.object(app_window, "_load_identity_track_from_disk", return_value=None), \
+             patch.object(app_window, "_load_motion_params", return_value=({}, None, "smplx")), \
+             patch.object(app_window, "_load_confidences_csv", return_value=([0.9], {})), \
              patch.object(app_window, "_populate_tracks"), \
              patch.object(app_window._identity_inspector, "refresh"), \
              patch.object(app_window._mesh_viewport, "set_person"), \
              patch.object(app_window, "_show_frame"):
             app_window._on_reprocess_finished({"reprocessed": [0]})
 
-        np.testing.assert_allclose(track.bboxes, old_bboxes, atol=1e-6)
-        np.testing.assert_allclose(track.original_bboxes, old_bboxes, atol=1e-6)
-        np.testing.assert_allclose(track.bbox_corrections, corrections, atol=1e-6)
+        np.testing.assert_allclose(track.bboxes, regenerated, atol=1e-6)
+        np.testing.assert_allclose(track.original_bboxes, regenerated, atol=1e-6)
+        assert track.bbox_corrections is None
         assert app_window._session.dirty_persons == set()
+
+    def test_on_reprocess_finished_reloads_crop_metadata_and_invalidates_viewport_cache(
+        self, app_window, tmp_path
+    ):
+        from models.session import PersonTrack
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        (person_dir / "person_meta.json").write_text(
+            json.dumps({"crop_bbox": [100, 50, 300, 350], "estimation_backend": "gvhmr"})
+        )
+
+        track = PersonTrack(
+            person_id=0,
+            person_dir=person_dir,
+            bboxes=np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32),
+            original_bboxes=np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32),
+            smplx_params={"K_fullimg": np.eye(3, dtype=np.float32)[None]},
+            crop_bbox=[0, 0, 1, 1],
+            K_crop=np.zeros((3, 3), dtype=np.float32),
+            body_model_type="smplx",
+        )
+        app_window._session.person_tracks = {0: track}
+        app_window._session.selected_person = 0
+
+        fresh_params = {"K_fullimg": np.array([np.eye(3, dtype=np.float32) * 2.0])}
+        with patch.object(app_window, "_load_cached_bboxes", return_value=track.bboxes.copy()), \
+             patch.object(app_window, "_load_identity_track_from_disk", return_value=None), \
+             patch.object(app_window, "_load_motion_params", return_value=(fresh_params, None, "smplx")), \
+             patch.object(app_window, "_load_confidences_csv", return_value=(None, None)), \
+             patch.object(app_window, "_populate_tracks"), \
+             patch.object(app_window._identity_inspector, "refresh"), \
+             patch.object(app_window._mesh_viewport, "set_person"), \
+             patch.object(app_window._mesh_viewport, "invalidate_cache") as mock_invalidate, \
+             patch.object(app_window, "_show_frame"):
+            app_window._on_reprocess_finished({"reprocessed": [0]})
+
+        assert track.crop_bbox == [100, 50, 300, 350]
+        np.testing.assert_allclose(track.K_crop, np.eye(3, dtype=np.float32) * 2.0, atol=1e-6)
+        mock_invalidate.assert_called_with(0, include_shape=True)

@@ -1224,7 +1224,10 @@ class AppWindow(QMainWindow):
                 continue
 
             confidences, confidence_breakdown = self._load_confidences_csv(pdir)
-            smplx_params, soma_params, body_model_type = self._load_motion_params(pdir)
+            smplx_params, soma_params, body_model_type = self._load_motion_params(
+                pdir,
+                preferred_backend=self._preferred_motion_backend(pdir),
+            )
             world_offset = manifest_offsets.get(pid)
             if world_offset is not None:
                 self._apply_multi_person_world_offset(smplx_params, world_offset)
@@ -1235,11 +1238,21 @@ class AppWindow(QMainWindow):
                 person_dir=pdir,
                 confidences=confidences,
                 bboxes=self._load_cached_bboxes(pdir, pid, output_dir=output_dir),
+                identity_track=self._load_identity_track_from_disk(pdir),
                 confidence_breakdown=confidence_breakdown,
                 smplx_params=smplx_params,
                 soma_params=soma_params,
                 body_model_type=body_model_type,
             )
+            if pt.identity_track is not None and hasattr(pt.identity_track, "keyframes"):
+                pt.keyframes = [
+                    {
+                        "frame": int(kf.frame_index),
+                        "verified": bool(getattr(kf, "verified", False)),
+                        "confidence": getattr(kf, "confidence", None),
+                    }
+                    for kf in pt.identity_track.keyframes
+                ]
             self._session.person_tracks[pid] = pt
 
         # Load crossing spans
@@ -1374,6 +1387,50 @@ class AppWindow(QMainWindow):
             bboxes_raw = bboxes_raw.cpu().numpy()
         return np.asarray(bboxes_raw, dtype=np.float32)
 
+    def _load_identity_track_from_disk(self, person_dir: Path | None):
+        """Load identity track JSON if a reprocess wrote one."""
+        if person_dir is None:
+            return None
+        track_path = person_dir / "identity_track.json"
+        if not track_path.is_file():
+            return None
+        try:
+            from identity_tracking import IdentityTrack
+
+            return IdentityTrack.load_json(track_path)
+        except Exception:
+            return None
+
+    def _load_person_meta(self, person_dir: Path | None) -> dict | None:
+        """Load lightweight per-person metadata from disk."""
+        if person_dir is None:
+            return None
+        meta_path = person_dir / "person_meta.json"
+        if not meta_path.is_file():
+            return None
+        try:
+            import json
+
+            return json.loads(meta_path.read_text())
+        except Exception:
+            return None
+
+    def _preferred_motion_backend(
+        self,
+        person_dir: Path,
+        fallback_body_model_type: str | None = None,
+    ) -> str | None:
+        """Prefer the backend that actually produced this person's artifacts."""
+        meta = self._load_person_meta(person_dir)
+        backend = meta.get("estimation_backend") if isinstance(meta, dict) else None
+        if backend in {"gvhmr", "gemx"}:
+            return backend
+        if fallback_body_model_type == "soma":
+            return "gemx"
+        if fallback_body_model_type == "smplx":
+            return "gvhmr"
+        return None
+
     def _apply_multi_person_world_offset(self, params: dict | None, offset):
         """Apply a scene-assembly offset to world translations in-place."""
         if params is None:
@@ -1397,8 +1454,25 @@ class AppWindow(QMainWindow):
                 continue
             if track.bboxes is None:
                 track.bboxes = self._load_cached_bboxes(track.person_dir, track.person_id)
+            if track.identity_track is None:
+                track.identity_track = self._load_identity_track_from_disk(track.person_dir)
+                if track.identity_track is not None and hasattr(track.identity_track, "keyframes"):
+                    track.keyframes = [
+                        {
+                            "frame": int(kf.frame_index),
+                            "verified": bool(getattr(kf, "verified", False)),
+                            "confidence": getattr(kf, "confidence", None),
+                        }
+                        for kf in track.identity_track.keyframes
+                    ]
             if track.smplx_params is None and track.soma_params is None:
-                smplx, soma, bmt = self._load_motion_params(track.person_dir)
+                smplx, soma, bmt = self._load_motion_params(
+                    track.person_dir,
+                    preferred_backend=self._preferred_motion_backend(
+                        track.person_dir,
+                        fallback_body_model_type=track.body_model_type,
+                    ),
+                )
                 track.smplx_params = smplx
                 track.soma_params = soma
                 track.body_model_type = bmt
@@ -1681,11 +1755,23 @@ class AppWindow(QMainWindow):
             if track is None or track.person_dir is None:
                 continue
             # Clear stale params so _hydrate reloads from new output
+            track.bboxes = None
+            track.original_bboxes = None
+            track.bbox_corrections = None
+            track.identity_track = None
+            track.keyframes = []
             track.smplx_params = None
             track.soma_params = None
             track.confidences = None
             track.confidence_breakdown = None
+            track.crop_bbox = None
+            track.K_crop = None
         self._hydrate_person_tracks()
+        for pid in reprocessed:
+            track = self._session.person_tracks.get(pid)
+            if track is not None and track.bboxes is not None:
+                track.original_bboxes = np.asarray(track.bboxes, dtype=np.float32).copy()
+            self._mesh_viewport.invalidate_cache(pid, include_shape=True)
 
         # Update all panels with new data
         self._populate_tracks()
@@ -1764,7 +1850,15 @@ class AppWindow(QMainWindow):
             soma_params = None
             body_model_type = "smplx"
             if person_dir:
-                smplx_params, soma_params, body_model_type = self._load_motion_params(person_dir)
+                smplx_params, soma_params, body_model_type = self._load_motion_params(
+                    person_dir,
+                    preferred_backend=self._preferred_motion_backend(
+                        person_dir,
+                        fallback_body_model_type=track.get("body_model_type")
+                        if isinstance(track, dict)
+                        else None,
+                    ),
+                )
 
             # Use GEM-X embedded confidences if no CSV exists
             if confidences is None:
@@ -1809,16 +1903,23 @@ class AppWindow(QMainWindow):
                     except Exception:
                         pass
 
-    def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
-        """Load motion params — tries GEM-X first, falls back to GVHMR."""
-        # GEM-X primary: hpe_results.pt
-        try:
-            from workers.gemx_worker import load_gemx_soma_output
-            for search_dir in [person_dir, person_dir / "gemx_demo"]:
-                if not search_dir.is_dir():
-                    continue
-                gemx_result = load_gemx_soma_output(search_dir)
-                if gemx_result is not None:
+    def _load_motion_params(
+        self,
+        person_dir: Path,
+        preferred_backend: str | None = None,
+    ) -> tuple[dict | None, dict | None, str]:
+        """Load motion params, preferring the backend that owns this track."""
+
+        def _load_gemx() -> tuple[dict | None, dict | None, str] | None:
+            try:
+                from workers.gemx_worker import load_gemx_soma_output
+
+                for search_dir in [person_dir, person_dir / "gemx_demo"]:
+                    if not search_dir.is_dir():
+                        continue
+                    gemx_result = load_gemx_soma_output(search_dir)
+                    if gemx_result is None:
+                        continue
                     # Transform from crop camera → original video camera so
                     # multi-person positions are correct relative to each other.
                     self._crop_to_original_camera(gemx_result, person_dir)
@@ -1826,18 +1927,32 @@ class AppWindow(QMainWindow):
                     bmt = gemx_result.pop("body_model_type", "soma")
                     if bmt == "smplx":
                         return gemx_result, None, "smplx"
-                    else:
-                        return None, gemx_result, "soma"
-        except Exception:
-            pass
-        # GVHMR fallback: hmr4d_results.pt
-        smplx_params = self._load_smplx_params_legacy(person_dir)
-        if smplx_params is not None:
+                    return None, gemx_result, "soma"
+            except Exception:
+                return None
+            return None
+
+        def _load_gvhmr() -> tuple[dict | None, dict | None, str] | None:
+            smplx_params = self._load_smplx_params_legacy(person_dir)
+            if smplx_params is None:
+                return None
             # Apply crop→original transform to incam transl
             self._crop_to_original_camera(smplx_params, person_dir)
             # Apply crop offset to world transl using shared SLAM
             self._apply_world_crop_offset(smplx_params, person_dir)
             return smplx_params, None, "smplx"
+
+        if preferred_backend == "gvhmr":
+            loaders = (_load_gvhmr, _load_gemx)
+        elif preferred_backend == "gemx":
+            loaders = (_load_gemx, _load_gvhmr)
+        else:
+            loaders = (_load_gemx, _load_gvhmr)
+
+        for loader in loaders:
+            result = loader()
+            if result is not None:
+                return result
         return None, None, "smplx"
 
     def _crop_to_original_camera(self, params: dict, person_dir: Path):

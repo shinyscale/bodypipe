@@ -153,6 +153,17 @@ def extract_verified_identity_keyframes(track) -> list[dict]:
     return verified
 
 
+def extract_manual_bbox_keyframes(track) -> dict[int, np.ndarray]:
+    """Collect sparse manual bbox edits as exact anchor boxes."""
+    if track is None or track.bbox_corrections is None:
+        return {}
+    corrections = np.asarray(track.bbox_corrections, dtype=np.float32)
+    result = {}
+    for frame_idx in np.flatnonzero(~np.all(corrections == 0, axis=1)):
+        result[int(frame_idx)] = corrections[int(frame_idx)].copy()
+    return result
+
+
 class ReprocessWorker(QThread):
     """Runs reprocess_person() for each dirty person."""
 
@@ -170,7 +181,11 @@ class ReprocessWorker(QThread):
     def run(self):
         try:
             import torch
-            from multi_person_split import reprocess_person
+            from multi_person_split import (
+                reprocess_person,
+                _merge_duplicate_tracks,
+                _stitch_fragmented_tracks,
+            )
 
             output_dir = self._session.output_dir
             if output_dir is None:
@@ -194,6 +209,21 @@ class ReprocessWorker(QThread):
             else:
                 all_tracks = all_tracks_data  # legacy format: bare list
 
+            merged_tracks, merged_pairs = _merge_duplicate_tracks(all_tracks)
+            if len(merged_tracks) != len(all_tracks):
+                log.info(
+                    "[ReprocessWorker] Merged duplicate cached tracks before rerun: %s",
+                    merged_pairs,
+                )
+                all_tracks = merged_tracks
+            stitched_tracks, stitched_pairs = _stitch_fragmented_tracks(all_tracks)
+            if len(stitched_tracks) != len(all_tracks):
+                log.info(
+                    "[ReprocessWorker] Stitched sequential cached track fragments before rerun: %s",
+                    stitched_pairs,
+                )
+                all_tracks = stitched_tracks
+
             slam_path = str(output_dir / "shared_slam.pt")
             masks_dir = str(output_dir / "masks")
 
@@ -209,6 +239,7 @@ class ReprocessWorker(QThread):
                     log.warning("[ReprocessWorker] Person %d: no track or person_dir, skipping", pid)
                     continue
                 verified_identity_keyframes = extract_verified_identity_keyframes(track)
+                manual_bbox_keyframes = extract_manual_bbox_keyframes(track)
 
                 self.progress.emit(i / total, f"Reprocessing person {pid}...")
 
@@ -222,7 +253,7 @@ class ReprocessWorker(QThread):
                     )
                     continue
 
-                # Build fully-interpolated bboxes from keyframe corrections
+                # Resolve the original bbox stream used as the re-tracking baseline.
                 orig = track.original_bboxes if track.original_bboxes is not None else track.bboxes
                 if orig is None:
                     log.warning("[ReprocessWorker] Person %d: no bbox data", pid)
@@ -232,28 +263,11 @@ class ReprocessWorker(QThread):
                     )
                     continue
 
-                if track.bbox_corrections is not None:
-                    corrections = np.asarray(track.bbox_corrections, dtype=np.float32)
-                    num_corrected = int(np.sum(~np.all(corrections == 0, axis=1)))
-                    log.info(
-                        "[ReprocessWorker] Person %d: %d keyframe corrections out of %d frames",
-                        pid, num_corrected, len(orig),
-                    )
-
-                    updated = build_dense_rerun_bboxes(orig, corrections)
-                    num_changed = int(np.sum(np.any(np.abs(updated - np.asarray(orig, dtype=np.float32)) > 1e-4, axis=1)))
-
-                    # Compute how much the bboxes actually changed
-                    diff = np.abs(updated - np.asarray(orig, dtype=np.float32))
-                    max_diff = float(diff.max()) if diff.size > 0 else 0.0
-                    log.info(
-                        "[ReprocessWorker] Person %d: dense rerun prior updated %d/%d frames, "
-                        "max bbox delta=%.1fpx",
-                        pid, num_changed, len(orig), max_diff,
-                    )
-                else:
-                    log.info("[ReprocessWorker] Person %d: no bbox_corrections, using original bboxes", pid)
-                    updated = np.asarray(orig, dtype=np.float32)
+                num_corrected = len(manual_bbox_keyframes)
+                log.info(
+                    "[ReprocessWorker] Person %d: %d manual bbox anchors, %d verified identity anchors",
+                    pid, num_corrected, len(verified_identity_keyframes),
+                )
 
                 def _progress_cb(frac, msg, _i=i, _total=total):
                     overall = (i + frac) / _total
@@ -263,15 +277,15 @@ class ReprocessWorker(QThread):
                 backend = "gemx" if track.body_model_type == "soma" else "gvhmr"
                 log.info(
                     "[ReprocessWorker] Person %d: calling reprocess_person "
-                    "(backend=%s, bboxes shape=%s)",
-                    pid, backend, updated.shape,
+                    "(backend=%s, num_frames=%d)",
+                    pid, backend, len(orig),
                 )
 
                 result = reprocess_person(
                     video_path=str(self._session.video_path),
                     person_index=person_index,
                     person_dir=str(track.person_dir),
-                    updated_bboxes=updated.astype(np.float32),
+                    original_bboxes=np.asarray(orig, dtype=np.float32),
                     all_tracks=all_tracks,
                     slam_path=slam_path,
                     masks_dir=masks_dir,
@@ -279,6 +293,7 @@ class ReprocessWorker(QThread):
                     use_dpvo=self._session.use_dpvo,
                     progress_callback=_progress_cb,
                     estimation_backend=backend,
+                    manual_bbox_keyframes=manual_bbox_keyframes,
                     verified_identity_keyframes=verified_identity_keyframes,
                 )
 
@@ -302,6 +317,18 @@ class ReprocessWorker(QThread):
                 self.person_done.emit(pid)
 
             self.progress.emit(1.0, "Done")
+            if reprocessed:
+                try:
+                    if isinstance(all_tracks_data, dict) and "tracks" in all_tracks_data:
+                        all_tracks_data["tracks"] = all_tracks
+                    else:
+                        all_tracks_data = all_tracks
+                    torch.save(all_tracks_data, str(tracks_path))
+                except Exception:
+                    log.warning(
+                        "[ReprocessWorker] Failed to persist regenerated all_tracks cache",
+                        exc_info=True,
+                    )
             summary = {
                 "reprocessed": reprocessed,
             }

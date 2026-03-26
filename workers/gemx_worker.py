@@ -44,7 +44,7 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
     Returns dict matching PersonTrack.soma_params format, or None.
     """
     # Primary: look for hpe_results.pt (the real GEM-X output)
-    for pattern in ["**/hpe_results.pt", "**/preprocess/hpe_results.pt", "hpe_results.pt"]:
+    for pattern in ["hpe_results.pt", "**/hpe_results.pt", "**/preprocess/hpe_results.pt"]:
         for f in sorted(output_dir.glob(pattern)):
             try:
                 import torch
