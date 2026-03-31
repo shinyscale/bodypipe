@@ -635,51 +635,48 @@ class IdentityInspector(QWidget):
             bbox[2] = min(self._session.img_width - 1, bbox[2])
             bbox[3] = min(self._session.img_height - 1, bbox[3])
 
-            # Snapshot for undo
+            # Snapshot for undo (full corrections array + keyframes)
             pid = self._current_person_id
             frame = self._current_frame
-            old_corr = (
-                track.bbox_corrections[frame].copy()
-                if track.bbox_corrections is not None and frame < len(track.bbox_corrections)
+            old_corrections = (
+                track.bbox_corrections.copy()
+                if track.bbox_corrections is not None
                 else None
             )
-            had_keyframe = any(kf["frame"] == frame for kf in track.keyframes)
+            old_keyframes = list(track.keyframes)
 
             # Store correction
             self._store_bbox_correction(track, self._current_frame, bbox)
 
             # Add keyframe at this frame if not present
-            added_kf = False
             if not any(kf["frame"] == self._current_frame for kf in track.keyframes):
                 track.keyframes.append({
                     "frame": self._current_frame,
                     "verified": False,
                 })
-                added_kf = True
 
-            # Undo/redo entry
-            new_bbox = list(bbox)
+            # Auto-interpolate across all frames
+            self._auto_interpolate(track)
 
-            def undo(p=pid, f=frame, old_c=old_corr, added=added_kf):
+            # Undo/redo with full-array snapshots
+            new_corrections = track.bbox_corrections.copy()
+            new_keyframes = list(track.keyframes)
+
+            def undo(p=pid, f=frame, old_c=old_corrections, old_kf=old_keyframes):
                 t = self._session.person_tracks.get(p)
-                if t and t.bbox_corrections is not None and f < len(t.bbox_corrections):
-                    if old_c is not None:
-                        t.bbox_corrections[f] = old_c
-                    else:
-                        t.bbox_corrections[f] = 0
-                if added and t:
-                    t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+                if t:
+                    t.bbox_corrections = old_c.copy() if old_c is not None else None
+                    t.keyframes = list(old_kf)
                 self._session.dirty_persons.discard(p)
                 self._refresh_for_person()
                 self.keyframe_changed.emit(p, f)
                 self.bbox_overlay_changed.emit({"edit_preview": None})
 
-            def redo(p=pid, f=frame, new_b=new_bbox, was_kf=had_keyframe):
+            def redo(p=pid, f=frame, new_c=new_corrections, new_kf=new_keyframes):
                 t = self._session.person_tracks.get(p)
                 if t:
-                    self._store_bbox_correction(t, f, new_b)
-                    if not was_kf and not any(kf["frame"] == f for kf in t.keyframes):
-                        t.keyframes.append({"frame": f, "verified": False})
+                    t.bbox_corrections = new_c.copy()
+                    t.keyframes = list(new_kf)
                     self._session.dirty_persons.add(p)
                 self._refresh_for_person()
                 self.keyframe_changed.emit(p, f)
@@ -734,48 +731,45 @@ class IdentityInspector(QWidget):
         if bbox[3] - bbox[1] < 20:
             bbox[3] = bbox[1] + 20
 
-        # Snapshot for undo
+        # Snapshot for undo (full corrections array + keyframes)
         pid = self._current_person_id
         frame = self._current_frame
-        old_corr = (
-            track.bbox_corrections[frame].copy()
-            if track.bbox_corrections is not None and frame < len(track.bbox_corrections)
+        old_corrections = (
+            track.bbox_corrections.copy()
+            if track.bbox_corrections is not None
             else None
         )
-        had_keyframe = any(kf["frame"] == frame for kf in track.keyframes)
+        old_keyframes = list(track.keyframes)
 
         # Store correction
         self._store_bbox_correction(track, frame, bbox)
 
         # Add keyframe at this frame if not present
-        added_kf = False
         if not any(kf["frame"] == frame for kf in track.keyframes):
             track.keyframes.append({"frame": frame, "verified": False})
-            added_kf = True
 
-        # Undo/redo
-        new_bbox = list(bbox)
+        # Auto-interpolate across all frames
+        self._auto_interpolate(track)
 
-        def undo(p=pid, f=frame, old_c=old_corr, added=added_kf):
+        # Undo/redo with full-array snapshots
+        new_corrections = track.bbox_corrections.copy()
+        new_keyframes = list(track.keyframes)
+
+        def undo(p=pid, f=frame, old_c=old_corrections, old_kf=old_keyframes):
             t = self._session.person_tracks.get(p)
-            if t and t.bbox_corrections is not None and f < len(t.bbox_corrections):
-                if old_c is not None:
-                    t.bbox_corrections[f] = old_c
-                else:
-                    t.bbox_corrections[f] = 0
-            if added and t:
-                t.keyframes = [kf for kf in t.keyframes if kf["frame"] != f]
+            if t:
+                t.bbox_corrections = old_c.copy() if old_c is not None else None
+                t.keyframes = list(old_kf)
             self._session.dirty_persons.discard(p)
             self._refresh_for_person()
             self.keyframe_changed.emit(p, f)
             self.bbox_overlay_changed.emit({"edit_preview": None})
 
-        def redo(p=pid, f=frame, new_b=new_bbox, was_kf=had_keyframe):
+        def redo(p=pid, f=frame, new_c=new_corrections, new_kf=new_keyframes):
             t = self._session.person_tracks.get(p)
             if t:
-                self._store_bbox_correction(t, f, new_b)
-                if not was_kf and not any(kf["frame"] == f for kf in t.keyframes):
-                    t.keyframes.append({"frame": f, "verified": False})
+                t.bbox_corrections = new_c.copy()
+                t.keyframes = list(new_kf)
                 self._session.dirty_persons.add(p)
             self._refresh_for_person()
             self.keyframe_changed.emit(p, f)
@@ -1291,6 +1285,25 @@ class IdentityInspector(QWidget):
 
         track.bbox_corrections[frame_idx] = bbox
 
+    def _auto_interpolate(self, track: PersonTrack):
+        """Auto-interpolate bbox corrections between all corrected keyframes.
+
+        Runs after every bbox edit so corrections blend smoothly across the
+        entire track rather than only affecting the keyed frame.
+        """
+        if track.bbox_corrections is None:
+            return
+        original = (
+            track.original_bboxes if track.original_bboxes is not None
+            else track.bboxes
+        )
+        if original is None:
+            return
+        kf_frames = [kf["frame"] for kf in track.keyframes]
+        track.bbox_corrections = interpolate_bbox_corrections(
+            original, track.bbox_corrections, keyframe_frames=kf_frames
+        )
+
     def _on_interpolate(self):
         """Interpolate bbox corrections between keyframes using delta-space blending.
 
@@ -1312,7 +1325,10 @@ class IdentityInspector(QWidget):
         frame = self._current_frame
         old_corrections = track.bbox_corrections.copy()
 
-        result = interpolate_bbox_corrections(original, track.bbox_corrections)
+        kf_frames = [kf["frame"] for kf in track.keyframes]
+        result = interpolate_bbox_corrections(
+            original, track.bbox_corrections, keyframe_frames=kf_frames
+        )
         track.bbox_corrections = result
 
         new_corrections = result.copy()
@@ -1963,61 +1979,80 @@ class IdentityInspector(QWidget):
 
 
 def interpolate_bbox_corrections(
-    original: np.ndarray, corrections: np.ndarray
+    original: np.ndarray,
+    corrections: np.ndarray,
+    keyframe_frames: list[int] | None = None,
 ) -> np.ndarray:
-    """Linear interpolation of bbox corrections in delta space.
+    """Linear interpolation of absolute bbox values between keyframes.
 
-    Why delta space: interpolating the difference between corrected and original
-    bboxes produces smoother results than interpolating absolute coordinates.
-    A 5px nudge at frame 10 and 10px at frame 20 blends naturally between them.
+    Keyframe bboxes are treated as 100% confidence control points — the
+    result passes through each one exactly.  Between keyframes the bbox
+    is linearly interpolated.  Before the first / after the last keyframe
+    the nearest keyframe value is held constant.
 
     Args:
-        original: (N, 4) original bboxes.
-        corrections: (N, 4) correction array — non-zero entries are user edits.
+        original: (N, 4) original bboxes (unused when keyframe_frames given,
+            kept for backwards-compat fallback).
+        corrections: (N, 4) correction array — values at keyframe frames are
+            the user's absolute bbox edits.
+        keyframe_frames: explicit list of frame indices that are user keyframes.
+            When None, falls back to non-zero detection.
 
     Returns:
         (N, 4) interpolated corrections array.
     """
-    n = len(original)
-    result = corrections.copy()
+    n = min(len(original), len(corrections))
 
-    # Find frames with non-zero corrections
-    corrected_frames = [f for f in range(min(n, len(corrections)))
-                        if not np.all(corrections[f] == 0)]
+    if keyframe_frames is not None:
+        sorted_frames = sorted(
+            f for f in keyframe_frames
+            if 0 <= f < n and not np.all(corrections[f] == 0)
+        )
+    else:
+        sorted_frames = [
+            f for f in range(n)
+            if not np.all(corrections[f] == 0)
+        ]
 
-    if len(corrected_frames) < 2:
-        return result  # Need at least 2 points to interpolate
+    if len(sorted_frames) < 1:
+        return corrections.copy()
 
-    # Compute deltas at corrected frames
-    deltas = {}
-    for f in corrected_frames:
-        deltas[f] = corrections[f] - original[f]
+    result = np.zeros((len(corrections), 4), dtype=corrections.dtype)
 
-    sorted_frames = sorted(corrected_frames)
+    if len(sorted_frames) == 1:
+        # Single keyframe: hold its value for every frame
+        val = corrections[sorted_frames[0]].copy()
+        for f in range(len(result)):
+            result[f] = val
+        return result
+
     first_f = sorted_frames[0]
     last_f = sorted_frames[-1]
 
-    # Before first correction: constant extrapolation
-    first_delta = deltas[first_f]
+    # Before first keyframe: hold first keyframe value
+    val_first = corrections[first_f].copy()
     for f in range(0, first_f):
-        if f < n:
-            result[f] = original[f] + first_delta
+        result[f] = val_first
 
-    # Between corrections: linear interpolation of delta
+    # Between keyframes: linear interpolation of absolute bbox
     for i in range(len(sorted_frames) - 1):
         f_a = sorted_frames[i]
         f_b = sorted_frames[i + 1]
-        delta_a = deltas[f_a]
-        delta_b = deltas[f_b]
+        val_a = corrections[f_a]
+        val_b = corrections[f_b]
         span = f_b - f_a
 
+        result[f_a] = val_a
         for f in range(f_a + 1, f_b):
             t = (f - f_a) / span
-            result[f] = original[f] + (1 - t) * delta_a + t * delta_b
+            result[f] = (1 - t) * val_a + t * val_b
 
-    # After last correction: constant extrapolation
-    last_delta = deltas[last_f]
-    for f in range(last_f + 1, min(n, len(result))):
-        result[f] = original[f] + last_delta
+    # Last keyframe itself
+    result[last_f] = corrections[last_f]
+
+    # After last keyframe: hold last keyframe value
+    val_last = corrections[last_f].copy()
+    for f in range(last_f + 1, len(result)):
+        result[f] = val_last
 
     return result

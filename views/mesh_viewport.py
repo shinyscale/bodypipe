@@ -1685,6 +1685,18 @@ class MeshViewport(_BaseWidget):
     # Skeleton: joint computation + joint picking
     # ------------------------------------------------------------------
 
+    def _world_params_for_person(self, params: dict, pid: int) -> dict:
+        """Return world-space orient/transl for a person.
+
+        Multi-person XZ offsets are already baked into transl_world at load
+        time (from assembly/person_offsets.json), so every person just uses
+        their own world params directly.
+        """
+        params = dict(params)
+        params["global_orient"] = params["global_orient_world"]
+        params["transl"] = params["transl_world"]
+        return params
+
     def _compute_joints(self) -> np.ndarray | None:
         """Compute 3D joint positions for current person/frame.
 
@@ -1710,9 +1722,7 @@ class MeshViewport(_BaseWidget):
         if (self._camera_mode == "orbit"
                 and "global_orient_world" in params
                 and "transl_world" in params):
-            params = dict(params)
-            params["global_orient"] = params["global_orient_world"]
-            params["transl"] = params["transl_world"]
+            params = self._world_params_for_person(params, self._person_id)
 
         # Apply pose override for real-time preview
         if self._pose_override is not None:
@@ -1980,6 +1990,13 @@ class MeshViewport(_BaseWidget):
         if params is None:
             return None
 
+        # In orbit mode, use world-space orient/transl so the mesh matches
+        # the world-grounded skeleton positions
+        if (self._camera_mode == "orbit"
+                and "global_orient_world" in params
+                and "transl_world" in params):
+            params = self._world_params_for_person(params, person_id)
+
         # Apply pose override for real-time preview
         if override_active:
             params = self._apply_override_to_params(params, frame_idx)
@@ -2114,6 +2131,62 @@ class MeshViewport(_BaseWidget):
         gl.glViewport(0, 0, w, h)
         self._update_projection(w, h)
 
+    def _paintGL_pure(self):
+        """Pure-GL paint path for WSL2/Wayland (no QPainter).
+
+        QPainter + beginNativePainting() on QOpenGLWidget crashes WSLg's
+        Weston compositor.  This path does all GL rendering directly and
+        skips 2D text overlays (joint labels, debug info).
+        """
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+        # Grid floor (orbit mode only)
+        if self._show_grid and self._camera_mode == "orbit":
+            self._draw_grid()
+
+        # Mesh triangles
+        if (
+            self._render_mode != RenderMode.WIREFRAME
+            and self._vertices is not None
+            and self._n_indices > 0
+        ):
+            self._shader.bind()
+            self._set_mat4("model", self._model_mat)
+            self._set_mat4("view", self._view)
+            self._set_mat4("projection", self._projection)
+            self._set_vec3("light_dir", _LIGHT_DIR)
+            if self._render_mode == RenderMode.FAST:
+                self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+                self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+            else:
+                self._set_vec3("light_color", _LIGHT_COLOR)
+                self._set_vec3("ambient", _AMBIENT)
+            gl.glBindVertexArray(self._vao_id)
+            gl.glDrawElements(
+                gl.GL_TRIANGLES, self._n_indices, gl.GL_UNSIGNED_INT, None
+            )
+            gl.glBindVertexArray(0)
+            self._shader.release()
+
+        # Skeleton overlay
+        if self._show_skeleton:
+            if self._show_all_persons and self._all_joint_positions:
+                for pid, joints in self._all_joint_positions.items():
+                    if pid == self._person_id:
+                        continue
+                    skel = self._all_active_skels.get(pid, self._active_skel)
+                    self._draw_skeleton_for(joints, skel, selected=False)
+            if self._joint_positions is not None:
+                self._draw_skeleton()
+
+        # Force alpha to 1.0 so Wayland compositor doesn't treat viewport
+        # as transparent (click-through).
+        gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_TRUE)
+        gl.glClearColor(0, 0, 0, 1)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+        gl.glClearColor(0.1, 0.1, 0.12, 1.0)
+
     def paintGL(self):
         if not _HAS_GL:
             return
@@ -2121,6 +2194,12 @@ class MeshViewport(_BaseWidget):
         if not self._gl_ready:
             return
 
+        # On WSL2/Wayland, QPainter + beginNativePainting() on QOpenGLWidget
+        # crashes the Weston compositor (segfault).  Use pure GL rendering
+        # on WSL2 and only use QPainter overlays on native Linux/X11.
+        if _IS_WSL:
+            self._paintGL_pure()
+            return
 
         # Use QPainter to enable 2D text overlay after GL rendering.
         # beginNativePainting() brackets the raw GL calls; after
@@ -2737,9 +2816,7 @@ class MeshViewport(_BaseWidget):
                 if (self._camera_mode == "orbit"
                         and "global_orient_world" in params
                         and "transl_world" in params):
-                    params = dict(params)
-                    params["global_orient"] = params["global_orient_world"]
-                    params["transl"] = params["transl_world"]
+                    params = self._world_params_for_person(params, pid)
                 try:
                     joints = forward_kinematics(params, self._current_frame)
                     if joints is not None:

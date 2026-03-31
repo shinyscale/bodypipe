@@ -1134,7 +1134,6 @@ class AppWindow(QMainWindow):
         # hydrate heavy data from disk and refresh all panels.
         if self._session.person_tracks:
             self._hydrate_person_tracks()
-            self._normalize_world_positions()
             self._refresh_all_panels()
             return
 
@@ -1217,52 +1216,7 @@ class AppWindow(QMainWindow):
                     except Exception:
                         pass
 
-        self._normalize_world_positions()
         self._refresh_all_panels()
-
-    def _normalize_world_positions(self):
-        """Offset world-space translations so persons don't overlap.
-
-        Each person's GVHMR world trajectory starts from its own origin.
-        Use incam frame-0 positions to compute horizontal offsets so
-        persons are separated correctly in orbit mode.
-        """
-        tracks = self._session.person_tracks
-        if len(tracks) < 2:
-            return
-
-        # Collect frame-0 incam transl for each person that has world params
-        incam_frame0 = {}
-        for pid, track in tracks.items():
-            params = track.soma_params or track.smplx_params
-            if params is None or "transl_world" not in params:
-                continue
-            tr_incam = np.asarray(params.get("transl"))
-            if tr_incam is not None and tr_incam.ndim >= 2 and tr_incam.shape[0] > 0:
-                incam_frame0[pid] = tr_incam[0].copy()
-
-        if len(incam_frame0) < 2:
-            return
-
-        # Use lowest pid as reference
-        ref_pid = min(incam_frame0.keys())
-        ref_pos = incam_frame0[ref_pid]
-
-        for pid, track in tracks.items():
-            if pid == ref_pid or pid not in incam_frame0:
-                continue
-            params = track.soma_params or track.smplx_params
-            tr_world = np.asarray(params["transl_world"])
-            if not isinstance(tr_world, np.ndarray) or tr_world.ndim < 2:
-                continue
-            # Incam offset relative to reference person
-            offset = incam_frame0[pid] - ref_pos
-            # Camera→world: X same, Z negated (camera Z is into screen,
-            # world Z is out). Y already ground-normalized per-person.
-            tr_world = tr_world.copy()
-            tr_world[:, 0] += offset[0]
-            tr_world[:, 2] -= offset[2]
-            params["transl_world"] = tr_world.astype(np.float32)
 
     def _hydrate_person_tracks(self):
         """Load heavy data (smplx_params, confidences) from disk for existing tracks.
@@ -1561,7 +1515,6 @@ class AppWindow(QMainWindow):
             track.confidences = None
             track.confidence_breakdown = None
         self._hydrate_person_tracks()
-        self._normalize_world_positions()
 
         # Update all panels with new data
         self._populate_tracks()
@@ -1727,9 +1680,49 @@ class AppWindow(QMainWindow):
                     if tr_world.shape[0] > 0:
                         floor_y = float(tr_world[0, 1]) - 0.933
                         tr_world[:, 1] -= floor_y
+                    # Apply multi-person lateral offset from assembly so
+                    # all persons share a common world origin.  Offsets are
+                    # in camera space; rotate into world via R_c2w.  Only
+                    # the lateral (XZ-plane) component perpendicular to the
+                    # camera view is applied — the Z (depth) component from
+                    # bbox height estimation is too noisy and compounds with
+                    # per-person VO drift.
+                    offset_cam = self._get_person_world_offset(person_dir)
+                    if offset_cam is not None:
+                        from scipy.spatial.transform import Rotation
+                        go_incam_0 = np.array(params["global_orient"][0])
+                        R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
+                        R_world = Rotation.from_rotvec(go_world[0]).as_matrix()
+                        R_c2w = R_world @ R_incam.T
+                        # Zero out the depth component — only use lateral (X) offset
+                        offset_lateral = np.array([offset_cam[0], 0.0, 0.0], dtype=np.float32)
+                        off_w = R_c2w @ offset_lateral
+                        tr_world[:, 0] += off_w[0]
+                        tr_world[:, 2] += off_w[2]
                     params["global_orient_world"] = go_world
                     params["transl_world"] = tr_world
                 return params
+        except Exception:
+            pass
+        return None
+
+    def _get_person_world_offset(self, person_dir: Path):
+        """Return [x, y, z] world offset for this person from assembly data."""
+        import json as _json
+        try:
+            meta_path = person_dir / "person_meta.json"
+            if not meta_path.is_file():
+                return None
+            track_id = str(_json.loads(meta_path.read_text()).get("track_id"))
+            offsets_path = person_dir.parent / "assembly" / "person_offsets.json"
+            if not offsets_path.is_file():
+                return None
+            data = _json.loads(offsets_path.read_text())
+            # Support both {"offsets": {...}} and flat {track_id: [...]} formats
+            offsets = data.get("offsets", data) if isinstance(data, dict) else data
+            off = offsets.get(track_id)
+            if off is not None and len(off) >= 3:
+                return [float(off[0]), float(off[1]), float(off[2])]
         except Exception:
             pass
         return None

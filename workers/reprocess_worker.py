@@ -87,8 +87,10 @@ class ReprocessWorker(QThread):
                 if track.bbox_corrections is not None:
                     from views.identity_inspector import interpolate_bbox_corrections
                     # Interpolate keyframe corrections across all frames
+                    kf_frames = [kf["frame"] for kf in track.keyframes]
                     interpolated = interpolate_bbox_corrections(
                         np.array(orig), track.bbox_corrections,
+                        keyframe_frames=kf_frames,
                     )
                     # Build final bboxes: use interpolated where non-zero, else original
                     updated = np.array(orig, dtype=float).copy()
