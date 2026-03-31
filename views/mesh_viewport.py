@@ -2044,6 +2044,14 @@ class MeshViewport(_BaseWidget):
                 if tr_t is not None:
                     tr_frame = _frame_slice(tr_t, frame_idx)
 
+                # SMPL-X internally places the pelvis at J[0] (shape-dependent,
+                # ~35cm below mesh center for mean shape).  The skeleton FK puts
+                # the root at transl directly.  Subtract J[0] from transl so the
+                # mesh rotates around transl, matching the FK convention.
+                if tr_frame is not None:
+                    J_shaped = self._body_model.get_skeleton(be_frame)  # (1, 55, 3)
+                    tr_frame = tr_frame - J_shaped[:, 0]
+
                 verts = self._body_model(
                     body_pose=bp_frame,
                     betas=be_frame,
