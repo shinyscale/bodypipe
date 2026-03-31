@@ -1243,6 +1243,7 @@ class MeshViewport(_BaseWidget):
         if mode == self._camera_mode:
             return
         self._camera_mode = mode
+        self._vertex_cache.clear()  # vertices depend on camera mode (incam vs world params)
         if mode == "orbit":
             self._orbit_auto_centered = False  # force re-center on mode switch
             self._auto_center_orbit()
