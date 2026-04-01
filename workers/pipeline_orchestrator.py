@@ -338,9 +338,18 @@ class FullPipelineWorker(SubprocessWorkerBase):
 
         try:
             self.log_line.emit("Running HaMeR hand reconstruction...")
+            # Find ViTPose from GVHMR preprocessing
+            from workers.gvhmr_worker import find_output_dir, find_file
+            vitpose_pt = None
+            gvhmr_out = find_output_dir(self._video_path, self._gvhmr_root)
+            if gvhmr_out:
+                vp = find_file(gvhmr_out, "vitpose.pt")
+                if vp:
+                    vitpose_pt = str(vp)
+                    self.log_line.emit(f"Using ViTPose for HaMeR: {vp}")
             hamer_result = run_hamer(
                 video_path=str(self._video_path),
-                output_dir=str(self._output_dir),
+                vitpose_path=vitpose_pt,
             )
             if hamer_result is not None:
                 # Merge HaMeR hand poses into world and camera params
@@ -732,6 +741,7 @@ class MultiPersonWorker(QThread):
                 use_inpainting=self._config.use_inpainting,
                 progress_callback=progress_callback,
                 estimation_backend=self._config.estimation_backend,
+                use_hands=self._config.use_hands,
             )
 
             if self._cancelled:
