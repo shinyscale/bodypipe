@@ -747,6 +747,10 @@ class MultiPersonWorker(QThread):
             if self._cancelled:
                 return
 
+            # ── Post-pipeline HaMeR hand replacement (per-person) ──
+            if self._config.hand_source == "hamer":
+                self._try_hamer_multi(result)
+
             # ── Post-pipeline FBX batch conversion ──
             fbx_files = self._convert_bvh_to_fbx_batch(result)
 
@@ -759,6 +763,117 @@ class MultiPersonWorker(QThread):
 
         except Exception as e:
             self.error.emit(str(e))
+
+    def _try_hamer_multi(self, result) -> None:
+        """Run HaMeR hand reconstruction per-person and re-merge.
+
+        For each person directory, finds ViTPose + isolated video, runs
+        ``run_hamer()``, replaces hand poses in the existing hybrid .pt,
+        and re-exports the BVH so downstream FBX conversion picks it up.
+        """
+        try:
+            from hamer_inference import run_hamer
+        except ImportError:
+            self.log_line.emit(
+                "WARNING: hamer_inference not available, skipping HaMeR hands."
+            )
+            return
+
+        person_dirs = getattr(result, "person_dirs", None) or []
+        person_videos = getattr(result, "person_video_paths", None) or []
+        if not person_dirs:
+            return
+
+        self.progress.emit(0.90, "Running HaMeR hand reconstruction...")
+
+        for i, person_dir in enumerate(person_dirs):
+            if self._cancelled:
+                return
+            person_dir = Path(person_dir)
+
+            # Find isolated video for this person
+            video_path = person_videos[i] if i < len(person_videos) else None
+            if not video_path or not Path(video_path).exists():
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: no isolated video, skipping."
+                )
+                continue
+
+            # Find ViTPose from GVHMR preprocessing
+            vitpose_files = list(person_dir.rglob("vitpose.pt"))
+            vitpose_pt = str(vitpose_files[0]) if vitpose_files else None
+            if vitpose_pt:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: using ViTPose {vitpose_pt}"
+                )
+
+            try:
+                hamer_result = run_hamer(
+                    video_path=str(video_path),
+                    vitpose_path=vitpose_pt,
+                )
+            except Exception as exc:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: failed — {exc}"
+                )
+                continue
+
+            if hamer_result is None:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: no results returned."
+                )
+                continue
+
+            # Find the existing params file to update
+            # Prefer hybrid (GVHMR+SMPLest-X), fall back to raw GVHMR
+            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
+            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
+            pt_path = (hybrid_pts[-1] if hybrid_pts
+                       else gvhmr_pts[0] if gvhmr_pts else None)
+            if pt_path is None:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: no params .pt found, skipping."
+                )
+                continue
+
+            # Load, replace hand poses, re-save
+            try:
+                import torch
+                data = torch.load(str(pt_path), map_location="cpu", weights_only=True)
+                n = hamer_result["left_hand_pose"].shape[0]
+                data["left_hand_pose"] = torch.tensor(
+                    hamer_result["left_hand_pose"].reshape(n, -1),
+                    dtype=torch.float32,
+                )
+                data["right_hand_pose"] = torch.tensor(
+                    hamer_result["right_hand_pose"].reshape(n, -1),
+                    dtype=torch.float32,
+                )
+                torch.save(data, str(pt_path))
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: hands merged → {pt_path.name}"
+                )
+            except Exception as exc:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: merge failed — {exc}"
+                )
+                continue
+
+            # Re-export BVH so FBX conversion uses updated hands
+            try:
+                from multi_person_split import _export_person_bvh
+                bvh_path = _export_person_bvh(person_dir)
+                if bvh_path:
+                    self.log_line.emit(
+                        f"[HaMeR] Person {i}: re-exported BVH → {bvh_path.name}"
+                    )
+            except Exception as exc:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: BVH re-export failed — {exc}"
+                )
+
+            frac = 0.90 + ((i + 1) / max(len(person_dirs), 1)) * 0.02
+            self.progress.emit(frac, f"HaMeR done for person {i}")
 
     def _convert_bvh_to_fbx_batch(self, result) -> list[str]:
         """Convert per-person BVH files to FBX after split pipeline completes.

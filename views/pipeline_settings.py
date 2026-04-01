@@ -684,6 +684,38 @@ class PerfPipelineSettings(SinglePipelineSettings):
         return self._gvhmr_root / "outputs" / "perfcap" / video_path.stem
 
     # ------------------------------------------------------------------
+    # SMPLest-X discovery
+    # ------------------------------------------------------------------
+
+    def _discover_smplestx(self) -> tuple[str | None, str | None]:
+        """Discover SMPLest-X Python binary and working directory.
+
+        Returns (python_path, working_dir) or (None, None).
+        """
+        smplestx_script = self._gvhmr_root / "smplestx_inference.py"
+        if not smplestx_script.is_file():
+            self.log_message.emit(
+                "SMPLest-X: smplestx_inference.py not found — hands disabled", "warning")
+            return None, None
+
+        smplestx_dir = str(self._gvhmr_root)
+
+        candidates = [
+            Path.home() / "miniconda3" / "envs" / "smplestx" / "bin" / "python",
+            Path.home() / "anaconda3" / "envs" / "smplestx" / "bin" / "python",
+            Path.home() / ".conda" / "envs" / "smplestx" / "bin" / "python",
+        ]
+        for c in candidates:
+            if c.is_file():
+                self.log_message.emit(f"SMPLest-X env: {c}", "info")
+                return str(c), smplestx_dir
+
+        self.log_message.emit(
+            "SMPLest-X: script found but no smplestx conda env — hands disabled",
+            "warning")
+        return None, None
+
+    # ------------------------------------------------------------------
     # Pipeline execution (override to use FullPipelineWorker)
     # ------------------------------------------------------------------
 
@@ -710,12 +742,15 @@ class PerfPipelineSettings(SinglePipelineSettings):
             )
             backend_label = "GEM-X"
         else:
+            smplestx_python, smplestx_dir = self._discover_smplestx()
             self._worker = FullPipelineWorker(
                 video_path=self._video_path,
                 config=config,
                 gvhmr_root=self._gvhmr_root,
                 output_dir=output_dir,
                 fps=config.target_fps,
+                smplestx_python=smplestx_python,
+                smplestx_dir=smplestx_dir,
             )
             backend_label = "GVHMR"
 
@@ -990,6 +1025,32 @@ class MultiPipelineSettings(QWidget):
         )
         mp_layout.addWidget(self._render_overlays)
 
+        self._use_hands = QCheckBox("Enable hand capture")
+        self._use_hands.setChecked(True)
+        self._use_hands.setToolTip(
+            "Estimate hand poses per person, then merge with GVHMR body.\n"
+            "Only applies to GVHMR backend — GEM-X already includes hands."
+        )
+        mp_layout.addWidget(self._use_hands)
+
+        # Hand source (SMPLest-X vs HaMeR)
+        self._hand_source_group = QButtonGroup(self)
+        self._hand_src_smplestx = QRadioButton("SMPLest-X (default)")
+        self._hand_src_smplestx.setChecked(True)
+        self._hand_src_smplestx.setToolTip("Use SMPLest-X for hand reconstruction")
+        self._hand_src_hamer = QRadioButton("HaMeR")
+        self._hand_src_hamer.setToolTip(
+            "Use HaMeR for dedicated hand mesh recovery (better fingers)"
+        )
+        self._hand_source_group.addButton(self._hand_src_smplestx)
+        self._hand_source_group.addButton(self._hand_src_hamer)
+        mp_layout.addWidget(QLabel("Hand source:"))
+        mp_layout.addWidget(self._hand_src_smplestx)
+        mp_layout.addWidget(self._hand_src_hamer)
+
+        self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
+        self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
+
         layout.addWidget(mp_group)
 
         # Run / Cancel / Progress
@@ -1188,6 +1249,9 @@ class MultiPipelineSettings(QWidget):
         self._fbx_naming.setEnabled(not running)
         self._render_overlays.setEnabled(not running)
         self._use_inpainting.setEnabled(not running)
+        self._use_hands.setEnabled(not running)
+        self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
+        self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:
             self._progress_bar.setValue(0)
             self._progress_label.setText("")
@@ -1237,6 +1301,8 @@ class MultiPipelineSettings(QWidget):
             use_inpainting=self._use_inpainting.isChecked(),
             estimation_backend=be,
             body_model=bm,
+            use_hands=self._use_hands.isChecked(),
+            hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1251,6 +1317,11 @@ class MultiPipelineSettings(QWidget):
             self._fbx_naming.setCurrentIndex(idx)
         self._render_overlays.setChecked(config.render_overlays)
         self._use_inpainting.setChecked(config.use_inpainting)
+        self._use_hands.setChecked(config.use_hands)
+        if config.hand_source == "hamer":
+            self._hand_src_hamer.setChecked(True)
+        else:
+            self._hand_src_smplestx.setChecked(True)
         for i, (_, be, _bm) in enumerate(_BACKEND_OPTIONS):
             if be == config.estimation_backend:
                 self._backend_combo.setCurrentIndex(i)
