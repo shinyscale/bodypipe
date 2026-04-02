@@ -386,6 +386,7 @@ class VideoPlayer(QWidget):
         self._current_frame = 0
         self._playing = False
         self._playback_speed = 1.0
+        self._transport_hidden = False
         self._cache = FrameCache()
 
         self._setup_ui()
@@ -555,11 +556,18 @@ class VideoPlayer(QWidget):
 
     def eventFilter(self, obj, event):
         """Show overlay on mouse activity over the display."""
-        if obj is self._display:
+        if obj is self._display and not self._transport_hidden:
             t = event.type()
             if t == QEvent.Type.MouseMove or t == QEvent.Type.Enter:
                 self._overlay.show_with_timer()
         return super().eventFilter(obj, event)
+
+    def set_transport_hidden(self, hidden: bool):
+        """Lock the transport overlay hidden (True) or restore auto-show (False)."""
+        self._transport_hidden = hidden
+        if hidden:
+            self._overlay.hide()
+            self._overlay._hide_timer.stop()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

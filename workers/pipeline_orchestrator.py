@@ -229,7 +229,8 @@ class FullPipelineWorker(SubprocessWorkerBase):
             self.finished.emit(results)
 
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
     # ------------------------------------------------------------------
     # Stage 3: Merge GVHMR body + SMPLest-X hands
@@ -762,7 +763,8 @@ class MultiPersonWorker(QThread):
             })
 
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
     def _try_hamer_multi(self, result) -> None:
         """Run HaMeR hand reconstruction per-person and re-merge.

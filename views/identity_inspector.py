@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
+    QDoubleSpinBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
@@ -440,6 +441,20 @@ class IdentityInspector(QWidget):
         crossing_label.setStyleSheet("font-weight: bold; font-size: 11px;")
         track_ops_layout.addWidget(crossing_label)
 
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("Proximity threshold:"))
+        self._crossing_threshold_spin = QDoubleSpinBox()
+        self._crossing_threshold_spin.setRange(0.05, 0.50)
+        self._crossing_threshold_spin.setSingleStep(0.05)
+        self._crossing_threshold_spin.setDecimals(2)
+        self._crossing_threshold_spin.setValue(self._session.crossing_threshold)
+        self._crossing_threshold_spin.setToolTip(
+            "Bbox overlap IoU that triggers auto-crossing detection. "
+            "Higher = less sensitive (fewer bridges). Default 0.15")
+        self._crossing_threshold_spin.valueChanged.connect(self._on_crossing_threshold_changed)
+        threshold_row.addWidget(self._crossing_threshold_spin)
+        track_ops_layout.addLayout(threshold_row)
+
         crossing_row = QHBoxLayout()
         self._crossing_start_btn = QPushButton("Mark Start")
         self._crossing_start_btn.setToolTip("Mark start of a crossing/occlusion span")
@@ -831,7 +846,11 @@ class IdentityInspector(QWidget):
         self._update_crossing_table()
 
     def _update_timeline(self):
-        """Update the confidence timeline for the current person."""
+        """Update the confidence timeline for the current person.
+
+        When "show all tracks" is checked, keyframe markers from every
+        person are merged so the user can navigate across all keyframes.
+        """
         track = self._get_current_track()
         if track is None:
             self._timeline.set_data(np.zeros(0))
@@ -842,6 +861,17 @@ class IdentityInspector(QWidget):
         verified_frames = {
             kf["frame"] for kf in track.keyframes if kf.get("verified", False)
         }
+
+        # Merge keyframes from all persons when "show all tracks" is active
+        if self._show_all_tracks.isChecked():
+            for pid, t in self._session.person_tracks.items():
+                if pid == self._current_person_id:
+                    continue
+                for kf in t.keyframes:
+                    if kf["frame"] not in keyframe_frames:
+                        keyframe_frames.append(kf["frame"])
+                    if kf.get("verified", False):
+                        verified_frames.add(kf["frame"])
 
         self._timeline.set_data(confidences, keyframe_frames, verified_frames)
 
@@ -1156,24 +1186,30 @@ class IdentityInspector(QWidget):
         self._update_keyframe_table()
         self.keyframe_changed.emit(self._current_person_id, self._current_frame)
 
-    def _on_prev_keyframe(self):
-        """Navigate to the previous keyframe before current frame."""
+    def _all_keyframe_frames(self) -> list[int]:
+        """Return sorted keyframe frames — all persons if 'show all' is checked."""
         track = self._get_current_track()
         if track is None:
-            return
+            return []
+        frames = {kf["frame"] for kf in track.keyframes}
+        if self._show_all_tracks.isChecked():
+            for pid, t in self._session.person_tracks.items():
+                if pid == self._current_person_id:
+                    continue
+                for kf in t.keyframes:
+                    frames.add(kf["frame"])
+        return sorted(frames)
 
-        frames = sorted(kf["frame"] for kf in track.keyframes)
+    def _on_prev_keyframe(self):
+        """Navigate to the previous keyframe before current frame."""
+        frames = self._all_keyframe_frames()
         prev_frames = [f for f in frames if f < self._current_frame]
         if prev_frames:
             self.frame_requested.emit(prev_frames[-1])
 
     def _on_next_keyframe(self):
         """Navigate to the next keyframe after current frame."""
-        track = self._get_current_track()
-        if track is None:
-            return
-
-        frames = sorted(kf["frame"] for kf in track.keyframes)
+        frames = self._all_keyframe_frames()
         next_frames = [f for f in frames if f > self._current_frame]
         if next_frames:
             self.frame_requested.emit(next_frames[0])
@@ -1217,6 +1253,7 @@ class IdentityInspector(QWidget):
     def _on_show_all_toggled(self, checked: bool):
         """Handle show all tracks checkbox toggle."""
         self.bbox_overlay_changed.emit({"show_all": checked})
+        self._update_timeline()
 
     def _on_table_double_clicked(self, row: int, col: int):
         """Handle double-click on keyframe table row — navigate to frame."""
@@ -1680,6 +1717,9 @@ class IdentityInspector(QWidget):
         self._refresh_for_person()
         self.track_modified.emit()
         log.info("Merged track %d into person %d", source_id, self._current_person_id)
+
+    def _on_crossing_threshold_changed(self, val: float):
+        self._session.crossing_threshold = val
 
     def _on_crossing_start(self):
         """Mark start of a crossing/occlusion span at the current frame."""

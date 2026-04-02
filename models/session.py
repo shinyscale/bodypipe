@@ -200,6 +200,7 @@ class Session:
     person_tracks: dict[int, PersonTrack] = field(default_factory=dict)
     inactive_tracks: set[int] = field(default_factory=set)
     crossing_spans: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
+    crossing_threshold: float = 0.15  # bbox overlap IoU threshold for auto-crossing detection
 
     # Pose correction (CorrectionTrack objects, keyed by person_id)
     correction_tracks: dict[int, Any] = field(default_factory=dict)
@@ -242,6 +243,7 @@ class Session:
             "crossing_spans": {
                 str(k): v for k, v in self.crossing_spans.items()
             },
+            "crossing_threshold": self.crossing_threshold,
         }
         if self.camera_K is not None:
             d["camera_K"] = self.camera_K.tolist()
@@ -274,6 +276,7 @@ class Session:
                 else {}
             ),
         )
+        session.crossing_threshold = data.get("crossing_threshold", 0.15)
         session.notes = data.get("notes", "")
         session.tags = list(data.get("tags", []))
         session.version = data.get("version", 1)

@@ -1734,8 +1734,10 @@ class MeshViewport(_BaseWidget):
         try:
             return forward_kinematics(params, self._current_frame)
         except Exception as e:
-            logger.warning("FK failed (pid=%d, f=%d): %s",
-                           self._person_id, self._current_frame, e)
+            import traceback as _tb
+            logger.warning("FK failed (pid=%d, f=%d): %s\n%s",
+                           self._person_id, self._current_frame, e,
+                           _tb.format_exc())
             return None
 
     def _pick_joint(self, screen_x: float, screen_y: float) -> int | None:
@@ -2073,8 +2075,9 @@ class MeshViewport(_BaseWidget):
 
                 return result
         except Exception as e:
-            logger.warning("Vertex computation failed (pid=%d, f=%d): %s",
-                           person_id, frame_idx, e)
+            import traceback as _tb
+            logger.warning("Vertex computation failed (pid=%d, f=%d): %s\n%s",
+                           person_id, frame_idx, e, _tb.format_exc())
             return None
 
     # ------------------------------------------------------------------
@@ -2085,6 +2088,12 @@ class MeshViewport(_BaseWidget):
         if not _HAS_GL:
             return
         try:
+            # Reset draw state — old GL resources are invalid after context recreation
+            self._gl_ready = False
+            self._n_indices = 0
+            self._n_vertices = 0
+            self._vertex_cache.clear()
+
             gl.glEnable(gl.GL_DEPTH_TEST)
             gl.glEnable(gl.GL_CULL_FACE)
             gl.glCullFace(gl.GL_BACK)
@@ -2128,6 +2137,8 @@ class MeshViewport(_BaseWidget):
             self._gl_ready = True
             logger.info("MeshViewport: OpenGL initialized (GL %s)",
                         gl.glGetString(gl.GL_VERSION))
+            # Re-compute mesh so data is uploaded to the new GL buffers
+            self._refresh_mesh()
         except Exception as e:
             logger.error("OpenGL init failed: %s", e)
             self._gl_ready = False

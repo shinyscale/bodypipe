@@ -99,6 +99,19 @@ class ReprocessWorker(QThread):
                 else:
                     updated = np.array(orig, dtype=float)
 
+                # Build manual_bbox_keyframes for DP track selection
+                manual_bbox_keyframes = None
+                if track.bbox_corrections is not None and track.keyframes:
+                    manual_bbox_keyframes = {}
+                    for kf in track.keyframes:
+                        f = kf["frame"]
+                        if f < len(track.bbox_corrections):
+                            bbox = track.bbox_corrections[f]
+                            if not np.all(bbox == 0):
+                                manual_bbox_keyframes[f] = bbox.astype(np.float32)
+                    if not manual_bbox_keyframes:
+                        manual_bbox_keyframes = None
+
                 def _progress_cb(frac, msg, _i=i, _total=total):
                     overall = (i + frac) / _total
                     self.progress.emit(overall, msg)
@@ -110,7 +123,7 @@ class ReprocessWorker(QThread):
                     video_path=str(self._session.video_path),
                     person_index=person_index,
                     person_dir=str(track.person_dir),
-                    updated_bboxes=updated.astype(np.float32),
+                    original_bboxes=updated.astype(np.float32),
                     all_tracks=all_tracks,
                     slam_path=slam_path,
                     masks_dir=masks_dir,
@@ -118,6 +131,8 @@ class ReprocessWorker(QThread):
                     use_dpvo=self._session.use_dpvo,
                     progress_callback=_progress_cb,
                     estimation_backend=backend,
+                    manual_bbox_keyframes=manual_bbox_keyframes,
+                    crossing_threshold=self._session.crossing_threshold,
                 )
 
                 reprocessed.append(pid)
@@ -127,7 +142,8 @@ class ReprocessWorker(QThread):
             self.finished.emit({"reprocessed": reprocessed})
 
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
     def cancel(self):
         self._cancelled = True

@@ -14,6 +14,29 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+
+def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
+    """Apply One Euro filter to hand poses — same params as BVH export."""
+    from smplx_to_bvh import _smooth_rotations_one_euro
+
+    hand_keys = [k for k in ("left_hand_pose", "right_hand_pose") if k in params]
+    if not hand_keys:
+        return
+
+    # Reshape flat (N, 45) → (N, 15, 3) so the filter sees proper rotvecs
+    orig_shapes = {}
+    for k in hand_keys:
+        v = params[k]
+        orig_shapes[k] = v.shape
+        if v.ndim == 2 and v.shape[-1] != 3:
+            params[k] = v.reshape(v.shape[0], -1, 3)
+
+    smoothed = _smooth_rotations_one_euro(
+        params, keys=hand_keys, fps=fps, min_cutoff=0.3, beta=0.007,
+    )
+    for k in hand_keys:
+        params[k] = smoothed[k].reshape(orig_shapes[k])
+
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -493,6 +516,15 @@ class AppWindow(QMainWindow):
         self._toggle_hud_action.setChecked(True)
         self._toggle_hud_action.toggled.connect(self._on_toggle_hud)
         self._view_menu.addAction(self._toggle_hud_action)
+
+        self._toggle_transport_action = QAction("Hide &Transport Controls", self)
+        self._toggle_transport_action.setShortcut("T")
+        self._toggle_transport_action.setCheckable(True)
+        self._toggle_transport_action.setChecked(False)
+        self._toggle_transport_action.toggled.connect(
+            lambda hidden: self._video_player.set_transport_hidden(hidden)
+        )
+        self._view_menu.addAction(self._toggle_transport_action)
 
         self._view_menu.addSeparator()
         self._workspace_menu = QMenu("&Workspace", self)
@@ -1639,6 +1671,18 @@ class AppWindow(QMainWindow):
                     continue
                 gemx_result = load_gemx_soma_output(search_dir)
                 if gemx_result is not None:
+                    # Log hand joint data quality
+                    if "poses" in gemx_result and gemx_result["poses"].shape[1] > 21:
+                        poses = gemx_result["poses"]
+                        hand_joints = np.concatenate(
+                            [poses[:, 15:39], poses[:, 43:67]], axis=1,
+                        )
+                        nz = np.count_nonzero(hand_joints)
+                        tot = hand_joints.size
+                        self._log_panel.append_line(
+                            f"GEM-X hand joints: nonzero={nz}/{tot} ({100*nz/max(tot,1):.0f}%)",
+                            "info",
+                        )
                     bmt = gemx_result.pop("body_model_type", "soma")
                     if bmt == "smplx":
                         # GEM-X with 21 body joints → SMPL-X format
@@ -1647,7 +1691,8 @@ class AppWindow(QMainWindow):
                         # GEM-X with 76 body joints → true SOMA format
                         return None, gemx_result, "soma"
         except Exception:
-            pass
+            log.warning("GEM-X load failed for %s:\n%s", person_dir,
+                        __import__("traceback").format_exc())
         # GVHMR fallback: hmr4d_results.pt
         smplx_params = self._load_smplx_params_legacy(person_dir)
         if smplx_params is not None:
@@ -1655,55 +1700,84 @@ class AppWindow(QMainWindow):
         return None, None, "smplx"
 
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
-        """Load SMPL-X parameters from hmr4d_results.pt for mesh rendering."""
+        """Load SMPL-X parameters from GVHMR results, augmented with hand
+        data from hybrid file (GVHMR body + SMPLest-X hands) when available.
+        """
+        import torch
+
         hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
         if not hmr4d_pt.is_file():
             return None
         try:
-            import torch
-
             results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
             params = results.get("smpl_params_incam")
-            if params and "body_pose" in params:
-                K = results.get("K_fullimg")
-                if K is not None and self._session.camera_K is None:
-                    self._session.camera_K = K[0].numpy()
-                # Extract world-space params for orbit mode
-                global_params = results.get("smpl_params_global")
-                if global_params and "global_orient" in global_params:
-                    params = dict(params)  # shallow copy to add keys
-                    go_world = np.array(global_params["global_orient"]).astype(np.float32)
-                    tr_world = np.array(global_params["transl"]).astype(np.float32)
-                    # Ground-normalize: GVHMR transl gives actual pelvis height
-                    # but FK uses mean-shape offsets. Shift Y so feet land at Y=0.
-                    # SMPL-X default leg length (hip→foot sum of Y offsets): ~0.933m
-                    if tr_world.shape[0] > 0:
-                        floor_y = float(tr_world[0, 1]) - 0.933
-                        tr_world[:, 1] -= floor_y
-                    # Apply multi-person lateral offset from assembly so
-                    # all persons share a common world origin.  Offsets are
-                    # in camera space; rotate into world via R_c2w.  Only
-                    # the lateral (XZ-plane) component perpendicular to the
-                    # camera view is applied — the Z (depth) component from
-                    # bbox height estimation is too noisy and compounds with
-                    # per-person VO drift.
-                    offset_cam = self._get_person_world_offset(person_dir)
-                    if offset_cam is not None:
-                        from scipy.spatial.transform import Rotation
-                        go_incam_0 = np.array(params["global_orient"][0])
-                        R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
-                        R_world = Rotation.from_rotvec(go_world[0]).as_matrix()
-                        R_c2w = R_world @ R_incam.T
-                        # Zero out the depth component — only use lateral (X) offset
-                        offset_lateral = np.array([offset_cam[0], 0.0, 0.0], dtype=np.float32)
-                        off_w = R_c2w @ offset_lateral
-                        tr_world[:, 0] += off_w[0]
-                        tr_world[:, 2] += off_w[2]
-                    params["global_orient_world"] = go_world
-                    params["transl_world"] = tr_world
-                return params
+            if not params or "body_pose" not in params:
+                return None
+
+            K = results.get("K_fullimg")
+            if K is not None and self._session.camera_K is None:
+                self._session.camera_K = K[0].numpy()
+
+            params = dict(params)  # shallow copy to add keys
+
+            # --- Augment with hand data from hybrid file ---
+            hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
+            if hybrid_pts:
+                try:
+                    hybrid_pt = max(hybrid_pts, key=lambda p: p.stat().st_mtime)
+                    hybrid_data = torch.load(str(hybrid_pt), map_location="cpu",
+                                             weights_only=False)
+                    for key in ["left_hand_pose", "right_hand_pose"]:
+                        if key in hybrid_data:
+                            val = hybrid_data[key]
+                            params[key] = (val.numpy() if hasattr(val, "numpy")
+                                           else np.array(val))
+                except Exception:
+                    log.warning("Hybrid hand load failed:\n%s",
+                                __import__("traceback").format_exc())
+
+            if "left_hand_pose" in params:
+                lh = params["left_hand_pose"]
+                msg = (f"Hand data: shape={lh.shape}, "
+                       f"nonzero={np.count_nonzero(lh)}/{lh.size}")
+                self._log_panel.append_line(msg, "info")
+            else:
+                self._log_panel.append_line(
+                    f"No hybrid file in {person_dir.name} — hands will be rest pose",
+                    "warning",
+                )
+
+            # --- Smooth hand poses (One Euro, same params as BVH export) ---
+            _smooth_hand_poses(params)
+
+            # --- World-space params for orbit mode (with ground norm + offsets) ---
+            global_params = results.get("smpl_params_global")
+            if global_params and "global_orient" in global_params:
+                go_world = np.array(global_params["global_orient"]).astype(np.float32)
+                tr_world = np.array(global_params["transl"]).astype(np.float32)
+                # Ground-normalize Y
+                if tr_world.shape[0] > 0:
+                    floor_y = float(tr_world[0, 1]) - 0.933
+                    tr_world[:, 1] -= floor_y
+                # Multi-person lateral offset
+                offset_cam = self._get_person_world_offset(person_dir)
+                if offset_cam is not None:
+                    from scipy.spatial.transform import Rotation
+                    go_incam_0 = np.array(params["global_orient"][0])
+                    R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
+                    R_world = Rotation.from_rotvec(go_world[0]).as_matrix()
+                    R_c2w = R_world @ R_incam.T
+                    offset_lateral = np.array([offset_cam[0], 0.0, 0.0],
+                                              dtype=np.float32)
+                    off_w = R_c2w @ offset_lateral
+                    tr_world[:, 0] += off_w[0]
+                    tr_world[:, 2] += off_w[2]
+                params["global_orient_world"] = go_world
+                params["transl_world"] = tr_world
+            return params
         except Exception:
-            pass
+            log.warning("Legacy SMPL-X load failed for %s:\n%s", person_dir,
+                        __import__("traceback").format_exc())
         return None
 
     def _get_person_world_offset(self, person_dir: Path):
