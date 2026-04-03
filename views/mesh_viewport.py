@@ -1116,6 +1116,9 @@ class MeshViewport(_BaseWidget):
         self._show_grid: bool = True  # visible by default in orbit mode
         self._grid_y: float = 0.0  # Y level of the grid in GL space
 
+        # Interpolation preview: SLERP between correction keyframes
+        self._interpolation_enabled: bool = True
+
         # FBO picking state (color-coded render pass for accurate joint selection)
         self._picking_mode: str = "fbo"  # "screen" or "fbo"
         self._pick_fbo_id: int = 0
@@ -1448,6 +1451,109 @@ class MeshViewport(_BaseWidget):
                 if bp.ndim >= 3 and frame_idx < bp.shape[0] and j_idx < bp.shape[1]:
                     bp[frame_idx, j_idx] = aa
             params["body_pose"] = bp
+
+        return params
+
+    def set_interpolation_enabled(self, enabled: bool):
+        """Toggle viewport SLERP interpolation preview between correction keyframes."""
+        if self._interpolation_enabled == enabled:
+            return
+        self._interpolation_enabled = enabled
+        self._vertex_cache.clear()
+        self._refresh_mesh()
+
+    @property
+    def interpolation_enabled(self) -> bool:
+        return self._interpolation_enabled
+
+    def _apply_interpolation_to_params(self, params: dict, frame_idx: int) -> dict:
+        """Apply SLERP interpolation between adjacent correction keyframes.
+
+        If frame_idx falls between two correction keyframes, builds the full
+        corrected pose at both keyframes and SLERP-interpolates between them.
+        This matches the export-time behavior of apply_corrections().
+        """
+        if not self._interpolation_enabled:
+            return params
+        if self._session is None or self._person_id < 0:
+            return params
+
+        ct = self._session.correction_tracks.get(self._person_id)
+        if ct is None or not ct.corrections:
+            return params
+
+        # If this frame IS a keyframe, apply the correction directly
+        corr_at_frame = ct.get_correction(frame_idx)
+        if corr_at_frame is not None:
+            try:
+                from pose_correction import _build_full_correction_pose
+            except ImportError:
+                return params
+
+            go, bp, tr = _build_full_correction_pose(params, corr_at_frame)
+            params = dict(params)
+            go_arr = np.array(params["global_orient"], dtype=np.float32)
+            if go_arr.ndim >= 2 and frame_idx < go_arr.shape[0]:
+                go_arr[frame_idx] = go
+                params["global_orient"] = go_arr
+            bp_arr = np.array(params["body_pose"], dtype=np.float32)
+            if bp_arr.ndim == 2 and bp_arr.shape[-1] != 3:
+                bp_arr = bp_arr.reshape(bp_arr.shape[0], -1, 3)
+            if bp_arr.ndim >= 3 and frame_idx < bp_arr.shape[0]:
+                bp_arr[frame_idx] = bp
+                params["body_pose"] = bp_arr
+            tr_arr = np.array(params["transl"], dtype=np.float32)
+            if tr_arr.ndim >= 2 and frame_idx < tr_arr.shape[0]:
+                tr_arr[frame_idx] = tr
+                params["transl"] = tr_arr
+            return params
+
+        # Check if we're between two correction keyframes
+        prev_corr, next_corr = ct.get_surrounding(frame_idx)
+        if (prev_corr is None or next_corr is None
+                or prev_corr is next_corr
+                or prev_corr.frame_index >= frame_idx
+                or next_corr.frame_index <= frame_idx):
+            return params
+
+        try:
+            from pose_correction import _build_full_correction_pose, _slerp_axis_angle
+        except ImportError:
+            return params
+
+        go_a, bp_a, tr_a = _build_full_correction_pose(params, prev_corr)
+        go_b, bp_b, tr_b = _build_full_correction_pose(params, next_corr)
+
+        t = (frame_idx - prev_corr.frame_index) / (next_corr.frame_index - prev_corr.frame_index)
+
+        # SLERP global orient
+        go_interp = _slerp_axis_angle(go_a, go_b, t).astype(np.float32)
+
+        # SLERP each body joint
+        n_joints = bp_a.shape[0]
+        bp_interp = np.empty_like(bp_a)
+        for j in range(n_joints):
+            bp_interp[j] = _slerp_axis_angle(bp_a[j], bp_b[j], t).astype(np.float32)
+
+        # Lerp translation
+        tr_interp = ((1 - t) * tr_a + t * tr_b).astype(np.float32)
+
+        # Apply to params copy
+        params = dict(params)
+        go_arr = np.array(params["global_orient"], dtype=np.float32)
+        if go_arr.ndim >= 2 and frame_idx < go_arr.shape[0]:
+            go_arr[frame_idx] = go_interp
+            params["global_orient"] = go_arr
+        bp_arr = np.array(params["body_pose"], dtype=np.float32)
+        if bp_arr.ndim == 2 and bp_arr.shape[-1] != 3:
+            bp_arr = bp_arr.reshape(bp_arr.shape[0], -1, 3)
+        if bp_arr.ndim >= 3 and frame_idx < bp_arr.shape[0]:
+            bp_arr[frame_idx] = bp_interp
+            params["body_pose"] = bp_arr
+        tr_arr = np.array(params["transl"], dtype=np.float32)
+        if tr_arr.ndim >= 2 and frame_idx < tr_arr.shape[0]:
+            tr_arr[frame_idx] = tr_interp
+            params["transl"] = tr_arr
 
         return params
 
@@ -1851,6 +1957,9 @@ class MeshViewport(_BaseWidget):
                 and "transl_world" in params):
             params = self._world_params_for_person(params, self._person_id)
 
+        # Apply interpolation between correction keyframes
+        params = self._apply_interpolation_to_params(params, self._current_frame)
+
         # Apply pose override for real-time preview
         if self._pose_override is not None:
             ov_frame = self._pose_override.get("frame_idx", self._current_frame)
@@ -2099,7 +2208,21 @@ class MeshViewport(_BaseWidget):
             and self._pose_override.get("frame_idx", self._current_frame) == frame_idx
         )
 
-        if not override_active and cache_key in self._vertex_cache:
+        # Skip cache when interpolation modifies this frame
+        interp_active = False
+        if self._interpolation_enabled and self._session is not None:
+            ct = self._session.correction_tracks.get(person_id)
+            if ct is not None and len(ct.corrections) >= 2:
+                if ct.get_correction(frame_idx) is not None:
+                    interp_active = True
+                else:
+                    prev_c, next_c = ct.get_surrounding(frame_idx)
+                    if (prev_c is not None and next_c is not None
+                            and prev_c is not next_c
+                            and prev_c.frame_index < frame_idx < next_c.frame_index):
+                        interp_active = True
+
+        if not override_active and not interp_active and cache_key in self._vertex_cache:
             return self._vertex_cache[cache_key]
 
         if not self._load_model():
@@ -2125,6 +2248,9 @@ class MeshViewport(_BaseWidget):
                 and "global_orient_world" in params
                 and "transl_world" in params):
             params = self._world_params_for_person(params, person_id)
+
+        # Apply interpolation between correction keyframes
+        params = self._apply_interpolation_to_params(params, frame_idx)
 
         # Apply pose override for real-time preview
         if override_active:
@@ -2192,8 +2318,8 @@ class MeshViewport(_BaseWidget):
 
                 result = (vertices, normals)
 
-                # Only cache non-overridden results
-                if not override_active:
+                # Only cache non-overridden and non-interpolated results
+                if not override_active and not interp_active:
                     if len(self._vertex_cache) >= _CACHE_MAX:
                         oldest = next(iter(self._vertex_cache))
                         del self._vertex_cache[oldest]

@@ -68,6 +68,8 @@ _COLOR_BORDER = QColor(COLORS.get("border", "#76797C"))
 _COLOR_NEUTRAL = QColor(COLORS.get("bg_active_tab", "#54575B"))
 _COLOR_CROSSING = QColor("#0984e3")
 _COLOR_CROSSING.setAlpha(80)
+_COLOR_INTERP = QColor("#ca952e")  # amber, matches correction dots
+_COLOR_INTERP.setAlpha(100)
 
 
 def _conf_color(conf: float) -> QColor:
@@ -102,6 +104,7 @@ class _TrackLaneItem(QGraphicsItem):
         self._issue_frames: list[int] = []
         self._correction_frames: list[int] = []
         self._crossing_spans: list[tuple[int, int]] = []
+        self._interpolation_spans: list[tuple[int, int]] = []
         self._collapsed = False
         self.setPos(0, y_pos)
 
@@ -158,6 +161,18 @@ class _TrackLaneItem(QGraphicsItem):
         # Inverse X scale for fixed-screen-size markers
         sx = max(0.001, abs(painter.deviceTransform().m11()))
         inv = 1.0 / sx
+
+        # -- interpolation spans (amber band connecting correction dots) ----
+        if self._interpolation_spans:
+            cy = LANE_HEIGHT / 2.0
+            pen = QPen(_COLOR_INTERP, 2.0)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            for span_s, span_e in self._interpolation_spans:
+                s = max(span_s, f_start)
+                e = min(span_e, f_end)
+                if s < e:
+                    painter.drawLine(QPointF(s + 0.5, cy), QPointF(e + 0.5, cy))
 
         # -- correction markers (amber dots, mid-lane) --------------------
         if self._correction_frames:
@@ -235,6 +250,10 @@ class _TrackLaneItem(QGraphicsItem):
 
     def set_crossing_spans(self, spans: list[tuple[int, int]]):
         self._crossing_spans = list(spans)
+        self.update()
+
+    def set_interpolation_spans(self, spans: list[tuple[int, int]]):
+        self._interpolation_spans = list(spans)
         self.update()
 
     def set_collapsed(self, collapsed: bool):
@@ -583,6 +602,7 @@ class TrackOverview(QWidget):
         issue_frames: list[int] | None = None,
         correction_frames: list[int] | None = None,
         crossing_spans: list[tuple[int, int]] | None = None,
+        interpolation_spans: list[tuple[int, int]] | None = None,
     ):
         """Set additional markers for a specific person's track lane."""
         lane = self._lanes.get(person_id)
@@ -596,6 +616,8 @@ class TrackOverview(QWidget):
             lane.set_corrections(correction_frames)
         if crossing_spans is not None:
             lane.set_crossing_spans(crossing_spans)
+        if interpolation_spans is not None:
+            lane.set_interpolation_spans(interpolation_spans)
 
     def set_num_frames(self, num_frames: int):
         """Update total frame count for timeline scaling."""

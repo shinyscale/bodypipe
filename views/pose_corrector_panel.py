@@ -847,6 +847,9 @@ class PoseCorrectorPanel(QWidget):
         self._pose_issues: list[PoseIssue] = []
         self._pose_issue_idx: int = 0
 
+        # Track overview reference (set externally via set_track_overview)
+        self._track_overview = None
+
         self._setup_ui()
         self._connect_signals()
 
@@ -854,6 +857,10 @@ class PoseCorrectorPanel(QWidget):
     def mesh_viewport(self) -> MeshViewport:
         """Expose embedded MeshViewport for external signal wiring."""
         return self._viewport
+
+    def set_track_overview(self, track_overview):
+        """Set reference to the TrackOverview for interpolation span markers."""
+        self._track_overview = track_overview
 
     # ------------------------------------------------------------------
     # UI setup
@@ -1062,6 +1069,26 @@ class PoseCorrectorPanel(QWidget):
         self._corrections_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._corrections_table.setMaximumHeight(160)
         lay.addWidget(self._corrections_table)
+
+        # Interpolation preview toggle + bake button
+        interp_row = QHBoxLayout()
+        self._interp_preview_check = QCheckBox("Interpolate Preview")
+        self._interp_preview_check.setChecked(True)
+        self._interp_preview_check.setToolTip(
+            "Preview SLERP interpolation between correction keyframes in the viewport"
+        )
+        self._interp_preview_check.toggled.connect(self._on_interp_toggle)
+        interp_row.addWidget(self._interp_preview_check)
+
+        self._bake_interp_btn = QPushButton("Bake Interpolation")
+        self._bake_interp_btn.setToolTip(
+            "Write interpolated poses into raw params for all spans"
+        )
+        self._bake_interp_btn.setEnabled(False)
+        self._bake_interp_btn.clicked.connect(self._on_bake_interpolation)
+        interp_row.addWidget(self._bake_interp_btn)
+        interp_row.addStretch()
+        lay.addLayout(interp_row)
 
         # Smoothing section (collapsible)
         smooth_section = _CollapsibleSection("Smoothing")
@@ -1556,11 +1583,12 @@ class PoseCorrectorPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_slider_moved(self, spinbox: QDoubleSpinBox, value: int):
-        """Sync slider (integer) → spinbox (float)."""
+        """Sync slider (integer) → spinbox (float) and trigger live preview."""
         if not self._updating_sliders:
             self._updating_sliders = True
             spinbox.setValue(float(value))
             self._updating_sliders = False
+            self._preview_correction()
 
     def _on_euler_changed(self):
         """Handle euler spinbox value change — sync slider + preview."""
@@ -1816,6 +1844,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.set_pose_override(None)
         self._save_correction_track(pid)
         self._refresh_corrections_table()
+        self._update_interpolation_state()
 
         log.info("Correction applied: person=%d, %d frames, joint=%d",
                  pid, n, self._current_joint)
@@ -1886,6 +1915,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport._refresh_mesh()
         self._update_sliders()
         self._refresh_corrections_table()
+        self._update_interpolation_state()
 
     def _on_reset_all(self):
         """Remove all corrections at current frame."""
@@ -1924,6 +1954,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport._refresh_mesh()
         self._update_sliders()
         self._refresh_corrections_table()
+        self._update_interpolation_state()
 
     def reset_current_joint(self):
         """Public API: reset the currently selected joint (keyboard shortcut)."""
@@ -2145,6 +2176,7 @@ class PoseCorrectorPanel(QWidget):
         self._update_sliders()
         self._refresh_corrections_table()
 
+        self._update_interpolation_state()
         log.info("Quick fix %s: person=%d, frame=%d", correction_type, pid, frame)
         self.correction_applied.emit(pid, frame)
         self._trigger_auto_preview()
@@ -2257,6 +2289,184 @@ class PoseCorrectorPanel(QWidget):
         self._viewport._refresh_mesh()
         self._update_sliders()
         self._refresh_corrections_table()
+        self._update_interpolation_state()
+
+    # ------------------------------------------------------------------
+    # Interpolation preview
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_interpolation_spans(ct) -> list[tuple[int, int]]:
+        """Compute (start, end) frame pairs for adjacent correction keyframes."""
+        if ct is None or len(ct.corrections) < 2:
+            return []
+        corrections = sorted(ct.corrections, key=lambda c: c.frame_index)
+        spans = []
+        for i in range(len(corrections) - 1):
+            f_start = corrections[i].frame_index
+            f_end = corrections[i + 1].frame_index
+            if f_end - f_start > 1:
+                spans.append((f_start, f_end))
+        return spans
+
+    def _update_interpolation_state(self):
+        """Recompute interpolation spans and push to timeline + enable bake button."""
+        if self._current_person < 0:
+            return
+        pid = self._current_person
+        ct = self._session.correction_tracks.get(pid)
+        spans = self._compute_interpolation_spans(ct)
+
+        # Update bake button
+        self._bake_interp_btn.setEnabled(len(spans) > 0)
+
+        # Update timeline markers
+        if self._track_overview is not None:
+            corr_frames = []
+            if ct is not None and ct.corrections:
+                corr_frames = [c.frame_index for c in ct.corrections]
+            self._track_overview.set_track_markers(
+                pid,
+                correction_frames=corr_frames,
+                interpolation_spans=spans,
+            )
+
+        # Clear vertex cache for affected spans so interpolation shows
+        self._viewport.invalidate_cache()
+
+    def _on_interp_toggle(self, checked: bool):
+        """Toggle interpolation preview in the viewport."""
+        self._viewport.set_interpolation_enabled(checked)
+        self._update_interpolation_state()
+
+    def _on_bake_interpolation(self):
+        """Bake SLERP-interpolated poses into raw params for all spans."""
+        if self._current_person < 0:
+            return
+
+        pid = self._current_person
+        ct = self._session.correction_tracks.get(pid)
+        spans = self._compute_interpolation_spans(ct)
+        if not spans:
+            return
+
+        track = self._session.person_tracks.get(pid)
+        if track is None or track.smplx_params is None:
+            return
+
+        try:
+            from pose_correction import _build_full_correction_pose, _slerp_axis_angle
+        except ImportError:
+            log.warning("Cannot bake interpolation: pose_correction backend unavailable")
+            return
+
+        params = track.smplx_params
+        corrections = sorted(ct.corrections, key=lambda c: c.frame_index)
+
+        # Build full corrected poses at each keyframe
+        corrected_poses = {}
+        for corr in corrections:
+            go, bp, tr = _build_full_correction_pose(params, corr)
+            corrected_poses[corr.frame_index] = (go, bp, tr)
+
+        # Collect undo data and apply
+        undo_snapshots = {}  # frame -> {joint_idx: old_aa}
+
+        for span_s, span_e in spans:
+            go_a, bp_a, tr_a = corrected_poses[span_s]
+            go_b, bp_b, tr_b = corrected_poses[span_e]
+
+            for f in range(span_s + 1, span_e):
+                t = (f - span_s) / (span_e - span_s)
+
+                # Snapshot before modification
+                frame_snap = {}
+                go_arr = np.asarray(params.get("global_orient", []), dtype=np.float32)
+                if go_arr.ndim >= 2 and f < go_arr.shape[0]:
+                    frame_snap[0] = go_arr[f].copy()
+                bp_arr = np.asarray(params.get("body_pose", []), dtype=np.float32)
+                if bp_arr.ndim == 2 and bp_arr.shape[-1] != 3:
+                    bp_arr = bp_arr.reshape(bp_arr.shape[0], -1, 3)
+                n_joints = bp_a.shape[0]
+                for j in range(n_joints):
+                    if bp_arr.ndim >= 3 and f < bp_arr.shape[0] and j < bp_arr.shape[1]:
+                        frame_snap[j + 1] = bp_arr[f, j].copy()
+                undo_snapshots[f] = frame_snap
+
+                # SLERP global orient
+                go_interp = _slerp_axis_angle(go_a, go_b, t).astype(np.float32)
+                self._apply_to_raw_params(0, go_interp, f)
+
+                # SLERP each body joint
+                for j in range(n_joints):
+                    bp_interp = _slerp_axis_angle(bp_a[j], bp_b[j], t).astype(np.float32)
+                    self._apply_to_raw_params(j + 1, bp_interp, f)
+
+                # Lerp translation
+                tr_interp = ((1 - t) * tr_a + t * tr_b).astype(np.float32)
+                tr_arr = np.asarray(params.get("transl", []), dtype=np.float32)
+                if tr_arr.ndim >= 2 and f < tr_arr.shape[0]:
+                    if f not in undo_snapshots:
+                        undo_snapshots[f] = {}
+                    undo_snapshots[f]["transl"] = tr_arr[f].copy()
+                    tr_arr[f] = tr_interp
+                    params["transl"] = tr_arr
+
+        def undo(p=pid, snaps=undo_snapshots):
+            self._current_person = p
+            t = self._session.person_tracks.get(p)
+            if t is None or t.smplx_params is None:
+                return
+            pr = t.smplx_params
+            for f, frame_snap in snaps.items():
+                for ji, old_val in frame_snap.items():
+                    if ji == "transl":
+                        tr = np.asarray(pr.get("transl", []), dtype=np.float32)
+                        if tr.ndim >= 2 and f < tr.shape[0]:
+                            tr[f] = old_val
+                            pr["transl"] = tr
+                    else:
+                        self._apply_to_raw_params(ji, old_val, f)
+            self._viewport.invalidate_cache()
+            self._viewport._refresh_mesh()
+            self._refresh_corrections_table()
+            self._update_interpolation_state()
+
+        def redo(p=pid, sp=spans, cp=corrected_poses):
+            self._current_person = p
+            t = self._session.person_tracks.get(p)
+            if t is None or t.smplx_params is None:
+                return
+            pr = t.smplx_params
+            for span_s2, span_e2 in sp:
+                go_a2, bp_a2, tr_a2 = cp[span_s2]
+                go_b2, bp_b2, tr_b2 = cp[span_e2]
+                for f in range(span_s2 + 1, span_e2):
+                    tt = (f - span_s2) / (span_e2 - span_s2)
+                    self._apply_to_raw_params(
+                        0, _slerp_axis_angle(go_a2, go_b2, tt).astype(np.float32), f)
+                    for j in range(bp_a2.shape[0]):
+                        self._apply_to_raw_params(
+                            j + 1, _slerp_axis_angle(bp_a2[j], bp_b2[j], tt).astype(np.float32), f)
+                    tr_arr2 = np.asarray(pr.get("transl", []), dtype=np.float32)
+                    if tr_arr2.ndim >= 2 and f < tr_arr2.shape[0]:
+                        tr_arr2[f] = ((1 - tt) * tr_a2 + tt * tr_b2).astype(np.float32)
+                        pr["transl"] = tr_arr2
+            self._viewport.invalidate_cache()
+            self._viewport._refresh_mesh()
+            self._refresh_corrections_table()
+            self._update_interpolation_state()
+
+        self._session.undo_stack.push(UndoEntry("Bake interpolation", undo, redo))
+
+        self._viewport.invalidate_cache()
+        self._viewport._refresh_mesh()
+        self._refresh_corrections_table()
+        self._update_interpolation_state()
+
+        n_frames = sum(e - s - 1 for s, e in spans)
+        log.info("Baked interpolation: person=%d, %d frames across %d spans",
+                 pid, n_frames, len(spans))
 
     # ------------------------------------------------------------------
     # Space overrides
@@ -2528,6 +2738,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport._refresh_mesh()
         self._update_sliders()
 
+        self._update_interpolation_state()
         log.info(
             "Smoothing applied: person=%d, frames=%d-%d, %d joints, %s, window=%d",
             pid, f_start, f_end, n_joints, method, window,
@@ -2639,6 +2850,7 @@ class PoseCorrectorPanel(QWidget):
             f"Applied to {n} similar frame{'s' if n != 1 else ''} "
             f"(threshold {threshold:.0f}\u00b0)."
         )
+        self._update_interpolation_state()
         log.info(
             "Apply to similar: person=%d, joint=%d, %d frames (threshold=%.1f\u00b0)",
             pid, joint_idx, n, threshold,
@@ -2739,6 +2951,7 @@ class PoseCorrectorPanel(QWidget):
         self._prop_status.setText(
             f"Propagated across {n} frames ({f_start}\u2013{f_end})."
         )
+        self._update_interpolation_state()
         log.info(
             "Propagation applied: person=%d, joint=%d, frames=%d-%d",
             pid, joint_idx, f_start, f_end,
@@ -3209,6 +3422,7 @@ class PoseCorrectorPanel(QWidget):
         self._ai_reject_btn.setEnabled(False)
         self._ai_status.setText("Correction applied.")
         self._ai_result = None
+        self._update_interpolation_state()
         self.correction_applied.emit(self._current_person, result.start_frame)
 
     def _on_ai_reject(self):

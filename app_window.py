@@ -410,6 +410,7 @@ class AppWindow(QMainWindow):
             viewport=self._mesh_viewport, parent=self,
         )
         self._pose_corrector = self._pose_corrector_dock.pose_corrector
+        self._pose_corrector.set_track_overview(self._track_overview)
         self._track_overview_dock = TrackOverviewDock(self._track_overview, self)
         self._pipeline_dock = PipelineSettingsDock(
             self._single_settings, self._perf_settings, self._multi_settings, self,
@@ -1851,9 +1852,17 @@ class AppWindow(QMainWindow):
                 if kf.get("verified", False)
             }
             corr_frames: list[int] = []
+            interp_spans: list[tuple[int, int]] = []
             ct = self._session.correction_tracks.get(pid)
             if ct is not None and hasattr(ct, "corrections") and ct.corrections:
                 corr_frames = [c.frame_index for c in ct.corrections]
+                # Compute interpolation spans between adjacent corrections
+                sorted_corrs = sorted(ct.corrections, key=lambda c: c.frame_index)
+                for i in range(len(sorted_corrs) - 1):
+                    f_s = sorted_corrs[i].frame_index
+                    f_e = sorted_corrs[i + 1].frame_index
+                    if f_e - f_s > 1:
+                        interp_spans.append((f_s, f_e))
             spans = self._session.crossing_spans.get(pid, [])
             self._track_overview.set_track_markers(
                 pid,
@@ -1861,6 +1870,7 @@ class AppWindow(QMainWindow):
                 verified_frames=verified,
                 correction_frames=corr_frames,
                 crossing_spans=spans,
+                interpolation_spans=interp_spans,
             )
         # Issue flags from review scanner
         try:
