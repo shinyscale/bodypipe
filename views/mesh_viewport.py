@@ -764,6 +764,9 @@ _ORBIT_DEFAULT_PITCH = 10.0    # slight tilt from above
 _PITCH_LIMIT = 89.0            # clamp to avoid gimbal lock
 _ORBIT_DEFAULT_CENTER = np.array([0.0, 0.0, -2.5], dtype=np.float32)
 
+# Joint drag-to-rotate sensitivity.
+_JOINT_DRAG_SENSITIVITY = 0.5  # degrees per pixel
+
 # Grid floor constants (orbit mode reference plane).
 _GRID_SIZE = 10.0            # half-extent in meters (grid spans ±size)
 _GRID_DIVISIONS = 20         # number of cells per half (total 2*N lines per axis)
@@ -1023,11 +1026,13 @@ class MeshViewport(_BaseWidget):
     """
 
     joint_clicked = Signal(int)
+    joint_drag_updated = Signal(int, object)  # (joint_idx, euler_deg ndarray or None)
     camera_changed = Signal(object)
     gl_rendered = Signal()  # emitted after paintGL completes
 
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._gvhmr_root = gvhmr_root
         self._session: Session | None = None
         self._person_id: int = -1
@@ -1097,6 +1102,12 @@ class MeshViewport(_BaseWidget):
         # dict with keys: frame_idx (int), global_orient (3,) optional,
         #                  body_pose {int: (3,)} optional
         self._pose_override: dict | None = None
+
+        # Joint drag-to-rotate state
+        self._drag_mode: str = "none"  # "none" | "orbit" | "joint_drag"
+        self._drag_joint: int = -1  # joint index being dragged
+        self._drag_start_aa: np.ndarray | None = None  # original axis-angle (3,)
+        self._drag_cumulative_R: object | None = None  # scipy Rotation
 
         # Joint label overlay state (QPainter text over GL)
         self._show_joint_labels: bool = False  # off by default, toggled by user
@@ -1535,8 +1546,23 @@ class MeshViewport(_BaseWidget):
                 self.joint_clicked.emit(hit)
                 if _HAS_GL:
                     self.update()
+                # Start joint drag if it's a body joint (0-21)
+                if 0 <= hit <= 21:
+                    self._drag_mode = "joint_drag"
+                    self._drag_joint = hit
+                    self._drag_start_aa = self._get_current_joint_aa(hit)
+                    try:
+                        from scipy.spatial.transform import Rotation
+                        self._drag_cumulative_R = Rotation.identity()
+                    except ImportError:
+                        self._drag_mode = "none"
+                else:
+                    self._drag_mode = "orbit"
+            else:
+                self._drag_mode = "orbit"
 
-        if self._camera_mode == "orbit":
+        # Track mouse position for drag (orbit or joint drag)
+        if self._camera_mode == "orbit" or self._drag_mode == "joint_drag":
             self._mouse_last_pos = (event.position().x(), event.position().y())
         event.accept()
 
@@ -1546,6 +1572,17 @@ class MeshViewport(_BaseWidget):
         # Show HUD on any mouse activity over the viewport
         if self._hud_enabled:
             self._hud.show_with_timer()
+
+        # Joint drag-to-rotate takes priority over orbit
+        if self._drag_mode == "joint_drag" and self._mouse_last_pos is not None:
+            x, y = event.position().x(), event.position().y()
+            dx = x - self._mouse_last_pos[0]
+            dy = y - self._mouse_last_pos[1]
+            self._mouse_last_pos = (x, y)
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._handle_joint_drag(dx, dy)
+            return
+
         if self._camera_mode != "orbit" or self._mouse_last_pos is None:
             return
 
@@ -1555,7 +1592,7 @@ class MeshViewport(_BaseWidget):
         self._mouse_last_pos = (x, y)
 
         buttons = event.buttons()
-        if buttons & Qt.MouseButton.LeftButton:
+        if buttons & Qt.MouseButton.LeftButton and self._drag_mode != "joint_drag":
             # Orbit: rotate camera around center
             self._orbit_yaw += dx * _ORBIT_SENSITIVITY
             self._orbit_pitch += dy * _ORBIT_SENSITIVITY
@@ -1586,7 +1623,8 @@ class MeshViewport(_BaseWidget):
             self.camera_changed.emit(self._camera_state())
 
     def mouseReleaseEvent(self, event):
-        """End orbit/pan drag."""
+        """End orbit/pan drag or joint drag."""
+        self._drag_mode = "none"
         self._mouse_last_pos = None
         event.accept()
 
@@ -1611,6 +1649,94 @@ class MeshViewport(_BaseWidget):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    # ------------------------------------------------------------------
+    # Joint drag-to-rotate
+    # ------------------------------------------------------------------
+
+    def _get_current_joint_aa(self, joint_idx: int) -> np.ndarray:
+        """Get current axis-angle (3,) for a joint, checking pose override first."""
+        # Check active pose override first (for chained drags)
+        if self._pose_override is not None:
+            ov_frame = self._pose_override.get("frame_idx", self._current_frame)
+            if ov_frame == self._current_frame:
+                if joint_idx == 0:
+                    go = self._pose_override.get("global_orient")
+                    if go is not None:
+                        return np.asarray(go, dtype=np.float32).ravel()[:3]
+                elif 1 <= joint_idx <= 21:
+                    bp = self._pose_override.get("body_pose")
+                    if bp is not None and (joint_idx - 1) in bp:
+                        return np.asarray(bp[joint_idx - 1], dtype=np.float32).ravel()[:3]
+
+        # Fall back to module-level helper from pose_corrector_panel
+        from views.pose_corrector_panel import _get_joint_axis_angle
+        return _get_joint_axis_angle(
+            self._session, self._person_id, self._current_frame, joint_idx
+        )
+
+    def _handle_joint_drag(self, dx: float, dy: float):
+        """Rotate the dragged joint based on mouse delta in camera space."""
+        if self._drag_joint < 0 or self._drag_start_aa is None:
+            return
+        try:
+            from scipy.spatial.transform import Rotation
+        except ImportError:
+            return
+
+        # Camera right/up vectors from view matrix
+        cam_right = self._view[0, :3].copy().astype(np.float64)
+        cam_up = self._view[1, :3].copy().astype(np.float64)
+        r_len = np.linalg.norm(cam_right)
+        u_len = np.linalg.norm(cam_up)
+        if r_len > 1e-8:
+            cam_right /= r_len
+        if u_len > 1e-8:
+            cam_up /= u_len
+
+        # Horizontal drag → rotation around camera-up axis
+        # Vertical drag → rotation around camera-right axis
+        angle_h = np.radians(dx * _JOINT_DRAG_SENSITIVITY)
+        angle_v = np.radians(-dy * _JOINT_DRAG_SENSITIVITY)
+
+        R_h = Rotation.from_rotvec(cam_up * angle_h)
+        R_v = Rotation.from_rotvec(cam_right * angle_v)
+        R_increment = R_v * R_h
+
+        # Accumulate
+        self._drag_cumulative_R = R_increment * self._drag_cumulative_R
+
+        # Final rotation = cumulative * original
+        R_original = Rotation.from_rotvec(self._drag_start_aa.astype(np.float64))
+        R_final = self._drag_cumulative_R * R_original
+        aa_final = R_final.as_rotvec().astype(np.float32)
+
+        # Build pose override
+        override = {"frame_idx": self._current_frame}
+        if self._drag_joint == 0:
+            override["global_orient"] = aa_final
+        else:
+            override["body_pose"] = {self._drag_joint - 1: aa_final}
+        self.set_pose_override(override)
+
+        # Emit euler for slider sync
+        euler_deg = R_final.as_euler("XYZ", degrees=True).astype(np.float32)
+        self.joint_drag_updated.emit(self._drag_joint, euler_deg)
+
+    def keyPressEvent(self, event):
+        """Esc cancels active joint drag preview."""
+        if event.key() == Qt.Key.Key_Escape:
+            if self._pose_override is not None:
+                joint_idx = self._drag_joint
+                self.set_pose_override(None)
+                self._drag_mode = "none"
+                self._drag_joint = -1
+                self._drag_start_aa = None
+                self._drag_cumulative_R = None
+                self.joint_drag_updated.emit(joint_idx, None)
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
         """Right-click context menu for joint selection shortcuts.

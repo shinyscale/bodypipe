@@ -1381,6 +1381,8 @@ class PoseCorrectorPanel(QWidget):
     def _connect_signals(self):
         # Viewport joint click → update dropdown + sliders
         self._viewport.joint_clicked.connect(self._on_joint_clicked)
+        # Viewport joint drag → sync euler sliders in real time
+        self._viewport.joint_drag_updated.connect(self._on_joint_drag_updated)
 
         # Dropdowns
         self._joint_combo.currentIndexChanged.connect(self._on_joint_dropdown_changed)
@@ -1573,6 +1575,24 @@ class PoseCorrectorPanel(QWidget):
 
         # Real-time mesh preview
         self._preview_correction()
+
+    def _on_joint_drag_updated(self, joint_idx: int, euler_deg):
+        """Handle joint drag rotation from viewport — sync sliders."""
+        if euler_deg is None:
+            # Esc cancel — refresh sliders to raw param values
+            self._update_sliders()
+            return
+        if joint_idx != self._current_joint:
+            return
+        # Update sliders without triggering _preview_correction (viewport already has override)
+        self._updating_sliders = True
+        self._euler_x.setValue(float(euler_deg[0]))
+        self._euler_y.setValue(float(euler_deg[1]))
+        self._euler_z.setValue(float(euler_deg[2]))
+        self._slider_x.setValue(int(round(euler_deg[0])))
+        self._slider_y.setValue(int(round(euler_deg[1])))
+        self._slider_z.setValue(int(round(euler_deg[2])))
+        self._updating_sliders = False
 
     # ------------------------------------------------------------------
     # Preview + Apply + Reset
