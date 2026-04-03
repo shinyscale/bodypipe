@@ -774,7 +774,7 @@ class MultiPersonWorker(QThread):
         and re-exports the BVH so downstream FBX conversion picks it up.
         """
         try:
-            from hamer_inference import run_hamer
+            from hamer_inference import run_hamer, _load_hamer_model
         except ImportError:
             self.log_line.emit(
                 "WARNING: hamer_inference not available, skipping HaMeR hands."
@@ -787,6 +787,13 @@ class MultiPersonWorker(QThread):
             return
 
         self.progress.emit(0.90, "Running HaMeR hand reconstruction...")
+
+        # Load the HaMeR model once and share across all persons
+        try:
+            shared_model, shared_model_cfg = _load_hamer_model("cuda")
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: HaMeR model load failed: {exc}")
+            return
 
         for i, person_dir in enumerate(person_dirs):
             if self._cancelled:
@@ -813,6 +820,8 @@ class MultiPersonWorker(QThread):
                 hamer_result = run_hamer(
                     video_path=str(video_path),
                     vitpose_path=vitpose_pt,
+                    model=shared_model,
+                    model_cfg=shared_model_cfg,
                 )
             except Exception as exc:
                 self.log_line.emit(
@@ -877,6 +886,11 @@ class MultiPersonWorker(QThread):
             frac = 0.90 + ((i + 1) / max(len(person_dirs), 1)) * 0.02
             self.progress.emit(frac, f"HaMeR done for person {i}")
 
+        # Free shared model
+        import torch
+        del shared_model, shared_model_cfg
+        torch.cuda.empty_cache()
+
     def _convert_bvh_to_fbx_batch(self, result) -> list[str]:
         """Convert per-person BVH files to FBX after split pipeline completes.
 
@@ -912,39 +926,55 @@ class MultiPersonWorker(QThread):
             self.log_line.emit("[FBX] No BVH files found, skipping FBX conversion.")
             return fbx_files
 
+        # Separate cached vs needing conversion
+        to_convert: list[tuple[int, Path, str]] = []
         for i, bvh_path in enumerate(bvh_paths):
-            if self._cancelled:
-                return fbx_files
-
             fbx_path = str(bvh_path.with_suffix(".fbx"))
-
-            # Skip if FBX already exists
             if Path(fbx_path).exists():
                 fbx_files.append(fbx_path)
                 self.log_line.emit(f"[FBX] Already exists: {fbx_path}")
-                continue
+            else:
+                to_convert.append((i, bvh_path, fbx_path))
 
-            frac = 0.90 + (i / max(len(bvh_paths), 1)) * 0.08
-            self.progress.emit(
-                frac,
-                f"Converting BVH to FBX ({i + 1}/{len(bvh_paths)})...",
+        if not to_convert:
+            return fbx_files
+
+        self.progress.emit(0.90, f"Converting {len(to_convert)} BVH to FBX (parallel)...")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _convert_one(bvh_path: Path, fbx_path: str):
+            fbx_log = convert_bvh_to_fbx(
+                str(bvh_path), fbx_path, fps=fps, naming=naming_key,
             )
+            return fbx_path, fbx_log
 
-            try:
-                fbx_log = convert_bvh_to_fbx(
-                    str(bvh_path), fbx_path, fps=fps, naming=naming_key,
-                )
-                self.log_line.emit(fbx_log)
-                if "ERROR" not in fbx_log:
-                    fbx_files.append(fbx_path)
-                else:
+        with ThreadPoolExecutor(max_workers=max(len(to_convert), 1)) as pool:
+            futures = {}
+            for idx, bvh_path, fbx_path in to_convert:
+                if self._cancelled:
+                    break
+                futures[pool.submit(_convert_one, bvh_path, fbx_path)] = (idx, bvh_path)
+
+            done_count = 0
+            for future in as_completed(futures):
+                idx, bvh_path = futures[future]
+                done_count += 1
+                try:
+                    fbx_path, fbx_log = future.result()
+                    self.log_line.emit(fbx_log)
+                    if "ERROR" not in fbx_log:
+                        fbx_files.append(fbx_path)
+                    else:
+                        self.log_line.emit(
+                            f"WARNING: FBX conversion failed for {bvh_path.name}"
+                        )
+                except Exception as exc:
                     self.log_line.emit(
-                        f"WARNING: FBX conversion failed for {bvh_path.name}"
+                        f"WARNING: FBX conversion failed for {bvh_path.name}: {exc}"
                     )
-            except Exception as exc:
-                self.log_line.emit(
-                    f"WARNING: FBX conversion failed for {bvh_path.name}: {exc}"
-                )
+                frac = 0.90 + (done_count / max(len(to_convert), 1)) * 0.08
+                self.progress.emit(frac, f"FBX done ({done_count}/{len(to_convert)})")
 
         return fbx_files
 
