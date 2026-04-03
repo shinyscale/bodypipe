@@ -1622,7 +1622,14 @@ class PoseCorrectorPanel(QWidget):
             return
         self._current_person = person_id
         self._viewport.set_person(person_id)
-        # Sync dropdown without re-triggering the callback
+        # Sync dropdown — repopulate if requested person isn't in the combo
+        found = False
+        for i in range(self._person_combo.count()):
+            if self._person_combo.itemData(i) == person_id:
+                found = True
+                break
+        if not found:
+            self._update_person_dropdown()
         self._person_combo.blockSignals(True)
         for i in range(self._person_combo.count()):
             if self._person_combo.itemData(i) == person_id:

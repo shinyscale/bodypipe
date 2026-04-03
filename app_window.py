@@ -1842,6 +1842,7 @@ class AppWindow(QMainWindow):
                 tracks[pid] = np.ones(max(1, self._session.num_frames)) * 0.8
         self._track_overview.set_tracks(tracks)
         self._populate_track_markers()
+        self._pose_corrector.refresh()
 
     def _populate_track_markers(self):
         """Push keyframe, issue, correction, and crossing markers to track overview."""
