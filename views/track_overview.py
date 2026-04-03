@@ -70,6 +70,8 @@ _COLOR_CROSSING = QColor("#0984e3")
 _COLOR_CROSSING.setAlpha(80)
 _COLOR_INTERP = QColor("#ca952e")  # amber, matches correction dots
 _COLOR_INTERP.setAlpha(100)
+_COLOR_FOOT_SLIDE = QColor("#00b894")  # teal, foot-slide correction spans
+_COLOR_FOOT_SLIDE.setAlpha(80)
 
 
 def _conf_color(conf: float) -> QColor:
@@ -105,6 +107,7 @@ class _TrackLaneItem(QGraphicsItem):
         self._correction_frames: list[int] = []
         self._crossing_spans: list[tuple[int, int]] = []
         self._interpolation_spans: list[tuple[int, int]] = []
+        self._foot_slide_spans: list[tuple[int, int]] = []
         self._collapsed = False
         self.setPos(0, y_pos)
 
@@ -157,6 +160,13 @@ class _TrackLaneItem(QGraphicsItem):
             e = min(span_e, f_end)
             if s < e:
                 painter.fillRect(QRectF(s, 0, e - s, LANE_HEIGHT), _COLOR_CROSSING)
+
+        # -- foot-slide correction spans (teal tint) ----------------------
+        for span_s, span_e in self._foot_slide_spans:
+            s = max(span_s, f_start)
+            e = min(span_e, f_end)
+            if s < e:
+                painter.fillRect(QRectF(s, 0, e - s, LANE_HEIGHT), _COLOR_FOOT_SLIDE)
 
         # Inverse X scale for fixed-screen-size markers
         sx = max(0.001, abs(painter.deviceTransform().m11()))
@@ -254,6 +264,10 @@ class _TrackLaneItem(QGraphicsItem):
 
     def set_interpolation_spans(self, spans: list[tuple[int, int]]):
         self._interpolation_spans = list(spans)
+        self.update()
+
+    def set_foot_slide_spans(self, spans: list[tuple[int, int]]):
+        self._foot_slide_spans = list(spans)
         self.update()
 
     def set_collapsed(self, collapsed: bool):
@@ -603,6 +617,7 @@ class TrackOverview(QWidget):
         correction_frames: list[int] | None = None,
         crossing_spans: list[tuple[int, int]] | None = None,
         interpolation_spans: list[tuple[int, int]] | None = None,
+        foot_slide_spans: list[tuple[int, int]] | None = None,
     ):
         """Set additional markers for a specific person's track lane."""
         lane = self._lanes.get(person_id)
@@ -618,6 +633,8 @@ class TrackOverview(QWidget):
             lane.set_crossing_spans(crossing_spans)
         if interpolation_spans is not None:
             lane.set_interpolation_spans(interpolation_spans)
+        if foot_slide_spans is not None:
+            lane.set_foot_slide_spans(foot_slide_spans)
 
     def set_num_frames(self, num_frames: int):
         """Update total frame count for timeline scaling."""

@@ -850,6 +850,10 @@ class PoseCorrectorPanel(QWidget):
         # Track overview reference (set externally via set_track_overview)
         self._track_overview = None
 
+        # Foot-slide correction state
+        self._foot_anchors: list[tuple[int, str, np.ndarray]] = []  # (frame, "left"/"right", pos)
+        self._foot_slide_applied_spans: list[tuple[int, int]] = []  # for timeline markers
+
         self._setup_ui()
         self._connect_signals()
 
@@ -894,6 +898,13 @@ class PoseCorrectorPanel(QWidget):
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
+        # Person selector — always visible above tabs
+        person_row = QHBoxLayout()
+        person_row.addWidget(QLabel("Person:"))
+        self._person_combo = QComboBox()
+        person_row.addWidget(self._person_combo, stretch=1)
+        layout.addLayout(person_row)
+
         # Tabbed controls (no splitter needed — viewport is external)
         self._controls_tabs = QTabWidget()
         self._controls_tabs.setDocumentMode(True)
@@ -901,6 +912,7 @@ class PoseCorrectorPanel(QWidget):
         self._controls_tabs.addTab(self._build_corrections_tab(), "Corrections")
         self._controls_tabs.addTab(self._build_export_tab(), "Export")
         self._controls_tabs.addTab(self._build_space_tab(), "Space")
+        self._controls_tabs.addTab(self._build_feet_tab(), "Feet")
         layout.addWidget(self._controls_tabs, stretch=1)
 
         # Preview playback timer (not a visual widget)
@@ -923,19 +935,15 @@ class PoseCorrectorPanel(QWidget):
         lay = QVBoxLayout(container)
         lay.setContentsMargins(8, 8, 8, 8)
 
-        # Person / Joint selectors — grid with 120px label column
+        # Joint selector — grid with 120px label column
         grid = QGridLayout()
         grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
         grid.setColumnStretch(1, 1)
 
-        grid.addWidget(QLabel("Person:"), 0, 0)
-        self._person_combo = QComboBox()
-        grid.addWidget(self._person_combo, 0, 1)
-
-        grid.addWidget(QLabel("Joint:"), 1, 0)
+        grid.addWidget(QLabel("Joint:"), 0, 0)
         self._joint_combo = QComboBox()
         self._populate_joint_dropdown()
-        grid.addWidget(self._joint_combo, 1, 1)
+        grid.addWidget(self._joint_combo, 0, 1)
 
         lay.addLayout(grid)
 
@@ -1351,6 +1359,120 @@ class PoseCorrectorPanel(QWidget):
         scroll.setWidget(container)
         return scroll
 
+    def _build_feet_tab(self) -> QWidget:
+        """Build the Feet tab: foot-slide correction with anchor pinning."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        # Foot selector + blend frames
+        grid = QGridLayout()
+        grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("Foot:"), 0, 0)
+        self._foot_combo = QComboBox()
+        self._foot_combo.addItem("Both Feet", userData="both")
+        self._foot_combo.addItem("Left Foot", userData=10)
+        self._foot_combo.addItem("Right Foot", userData=11)
+        grid.addWidget(self._foot_combo, 0, 1)
+
+        grid.addWidget(QLabel("Blend:"), 1, 0)
+        self._blend_spin = QSpinBox()
+        self._blend_spin.setRange(0, 30)
+        self._blend_spin.setValue(5)
+        self._blend_spin.setSuffix(" frames")
+        self._style_spinbox(self._blend_spin)
+        grid.addWidget(self._blend_spin, 1, 1)
+
+        lay.addLayout(grid)
+
+        # Pin / Unpin buttons
+        pin_row = QHBoxLayout()
+        self._pin_foot_btn = QPushButton("Pin Foot at Current Frame")
+        pin_row.addWidget(self._pin_foot_btn, stretch=1)
+        self._unpin_foot_btn = QPushButton("Unpin Frame")
+        self._unpin_foot_btn.setToolTip("Remove all anchors at the current frame")
+        pin_row.addWidget(self._unpin_foot_btn)
+        lay.addLayout(pin_row)
+
+        # Anchor table
+        lay.addWidget(QLabel("Anchors:"))
+        self._foot_anchor_table = QTableWidget(0, 4)
+        self._foot_anchor_table.setHorizontalHeaderLabels(
+            ["Frame", "Foot", "Position", "Del"]
+        )
+        self._foot_anchor_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self._foot_anchor_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self._foot_anchor_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch
+        )
+        self._foot_anchor_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self._foot_anchor_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._foot_anchor_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._foot_anchor_table.setMaximumHeight(140)
+        lay.addWidget(self._foot_anchor_table)
+
+        # Frame range
+        range_grid = QGridLayout()
+        range_grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        range_grid.setColumnStretch(1, 1)
+
+        range_grid.addWidget(QLabel("Range start:"), 0, 0)
+        self._foot_range_start = QSpinBox()
+        self._foot_range_start.setRange(0, 999999)
+        self._style_spinbox(self._foot_range_start)
+        range_grid.addWidget(self._foot_range_start, 0, 1)
+
+        range_grid.addWidget(QLabel("Range end:"), 1, 0)
+        self._foot_range_end = QSpinBox()
+        self._foot_range_end.setRange(0, 999999)
+        self._style_spinbox(self._foot_range_end)
+        range_grid.addWidget(self._foot_range_end, 1, 1)
+
+        lay.addLayout(range_grid)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        self._apply_foot_btn = QPushButton("Apply Foot Lock")
+        btn_row.addWidget(self._apply_foot_btn)
+        self._clear_anchors_btn = QPushButton("Clear All Anchors")
+        btn_row.addWidget(self._clear_anchors_btn)
+        lay.addLayout(btn_row)
+
+        # Status
+        self._foot_status = QLabel("Ready — no anchors set")
+        self._foot_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._foot_status.setWordWrap(True)
+        lay.addWidget(self._foot_status)
+
+        # Collapsible foot velocity section
+        vel_section = _CollapsibleSection("Foot Velocity", collapsed=True)
+        self._foot_vel_label = QLabel("Scrub to a frame to see foot velocity")
+        self._foot_vel_label.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px; "
+            f"font-family: {_MONO_FONT_FAMILY};"
+        )
+        self._foot_vel_label.setWordWrap(True)
+        vel_section.content_layout.addWidget(self._foot_vel_label)
+        lay.addWidget(vel_section)
+
+        lay.addStretch()
+        scroll.setWidget(container)
+        return scroll
+
     # ------------------------------------------------------------------
     # Layout helpers
     # ------------------------------------------------------------------
@@ -1476,6 +1598,12 @@ class PoseCorrectorPanel(QWidget):
             self._ai_accept_btn.clicked.connect(self._on_ai_accept)
             self._ai_reject_btn.clicked.connect(self._on_ai_reject)
 
+        # Feet tab
+        self._pin_foot_btn.clicked.connect(self._on_pin_foot)
+        self._unpin_foot_btn.clicked.connect(self._on_unpin_foot)
+        self._apply_foot_btn.clicked.connect(self._on_apply_foot_lock)
+        self._clear_anchors_btn.clicked.connect(self._on_clear_anchors)
+
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
     # ------------------------------------------------------------------
@@ -1512,6 +1640,7 @@ class PoseCorrectorPanel(QWidget):
         # Clear any in-progress preview when navigating frames
         self._viewport.set_pose_override(None)
         self._update_sliders()
+        self._update_foot_velocity()
 
     def refresh(self):
         """Refresh person list from session."""
@@ -3431,3 +3560,309 @@ class PoseCorrectorPanel(QWidget):
         self._ai_accept_btn.setEnabled(False)
         self._ai_reject_btn.setEnabled(False)
         self._ai_status.setText("Correction rejected.")
+
+    # ------------------------------------------------------------------
+    # Foot-slide correction handlers
+    # ------------------------------------------------------------------
+
+    def _get_world_params_for_foot(self):
+        """Get world-space params for the current person (for FK)."""
+        if self._session is None or self._current_person < 0:
+            return None
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return None
+        params = dict(track.smplx_params)
+        if "transl_world" in params:
+            params["transl"] = params["transl_world"]
+        if "global_orient_world" in params:
+            params["global_orient"] = params["global_orient_world"]
+        return params
+
+    def _on_pin_foot(self):
+        """Pin the selected foot (or both) at the current frame's world position."""
+        from views.mesh_viewport import forward_kinematics
+
+        params = self._get_world_params_for_foot()
+        if params is None:
+            self._foot_status.setText("Error: no params for current person")
+            return
+
+        selection = self._foot_combo.currentData()
+        frame = self._current_frame
+
+        try:
+            joints = forward_kinematics(params, frame)
+        except Exception as e:
+            self._foot_status.setText(f"FK error: {e}")
+            return
+
+        # Determine which feet to pin
+        if selection == "both":
+            feet = [("left", 10), ("right", 11)]
+        elif selection == 10:
+            feet = [("left", 10)]
+        else:
+            feet = [("right", 11)]
+
+        for foot_side, foot_idx in feet:
+            foot_pos = joints[foot_idx].copy()
+            self._foot_anchors.append((frame, foot_side, foot_pos))
+
+        self._foot_anchors.sort(key=lambda a: a[0])
+
+        # Auto-update range from anchors ± blend
+        blend = self._blend_spin.value()
+        first_frame = self._foot_anchors[0][0]
+        last_frame = self._foot_anchors[-1][0]
+        n_frames = self._session.num_frames if self._session else 999999
+        self._foot_range_start.setValue(max(0, first_frame - blend))
+        self._foot_range_end.setValue(min(n_frames - 1, last_frame + blend))
+
+        self._refresh_foot_anchor_table()
+        n = len(self._foot_anchors)
+        self._foot_status.setText(
+            f"Ready — {n} anchor{'s' if n != 1 else ''} set"
+        )
+
+    def _on_apply_foot_lock(self):
+        """Compute foot-slide offsets and bake into transl_world."""
+        if not self._foot_anchors:
+            self._foot_status.setText("No anchors set — pin a foot first")
+            return
+        if self._session is None or self._current_person < 0:
+            self._foot_status.setText("No person selected")
+            return
+
+        pid = self._current_person
+        track = self._session.person_tracks.get(pid)
+        if track is None or track.smplx_params is None:
+            self._foot_status.setText("No params for current person")
+            return
+        if "transl_world" not in track.smplx_params:
+            self._foot_status.setText("No world translations — use orbit mode")
+            return
+
+        try:
+            from pose_correction import compute_foot_slide_offsets
+        except ImportError:
+            self._foot_status.setText("Backend unavailable (pose_correction)")
+            return
+
+        from views.mesh_viewport import forward_kinematics
+
+        # Build world-space params
+        params = self._get_world_params_for_foot()
+        if params is None:
+            return
+
+        selection = self._foot_combo.currentData()
+        f_start = self._foot_range_start.value()
+        f_end = self._foot_range_end.value()
+        blend = self._blend_spin.value()
+
+        if f_start >= f_end:
+            self._foot_status.setText("Invalid range: start must be < end")
+            return
+
+        # Determine which feet to solve for
+        if selection == "both":
+            foot_sides = [("left", 10), ("right", 11)]
+        elif selection == 10:
+            foot_sides = [("left", 10)]
+        else:
+            foot_sides = [("right", 11)]
+
+        # Compute offsets per foot, then average
+        all_offsets: list[dict[int, np.ndarray]] = []
+        for foot_side, foot_idx in foot_sides:
+            anchors_for_foot = [
+                (f, pos) for f, side, pos in self._foot_anchors
+                if side == foot_side
+            ]
+            if not anchors_for_foot:
+                continue
+            try:
+                off = compute_foot_slide_offsets(
+                    params=params,
+                    foot_joint_idx=foot_idx,
+                    anchors=anchors_for_foot,
+                    frame_start=f_start,
+                    frame_end=f_end,
+                    blend_frames=blend,
+                    forward_kinematics_fn=forward_kinematics,
+                )
+                if off:
+                    all_offsets.append(off)
+            except Exception as e:
+                self._foot_status.setText(f"Offset computation failed: {e}")
+                log.exception("Foot slide offset computation failed")
+                return
+
+        if not all_offsets:
+            self._foot_status.setText(
+                "No matching anchors for selected foot — check foot selector"
+            )
+            return
+
+        # Average offsets across feet (for "Both", this balances L and R)
+        if len(all_offsets) == 1:
+            offsets = all_offsets[0]
+        else:
+            offsets = {}
+            all_frames = set()
+            for od in all_offsets:
+                all_frames.update(od.keys())
+            for f in all_frames:
+                vals = [od[f] for od in all_offsets if f in od]
+                offsets[f] = np.mean(vals, axis=0).astype(np.float32)
+
+        if not offsets:
+            self._foot_status.setText("No offsets computed")
+            return
+
+        # Snapshot for undo
+        tw = track.smplx_params["transl_world"]
+        old_tw = tw[f_start:f_end + 1].copy()
+
+        # Apply offsets
+        for f, offset in offsets.items():
+            if 0 <= f < tw.shape[0]:
+                tw[f] += offset
+
+        # Undo/redo closures
+        def undo(
+            _tw=tw, _start=f_start, _end=f_end, _old=old_tw,
+            _offsets=offsets,
+        ):
+            _tw[_start:_end + 1] = _old
+            self._viewport.invalidate_cache()
+            self._viewport.on_frame_changed(self._current_frame)
+
+        def redo(
+            _tw=tw, _offsets=offsets,
+        ):
+            for _f, _off in _offsets.items():
+                if 0 <= _f < _tw.shape[0]:
+                    _tw[_f] += _off
+            self._viewport.invalidate_cache()
+            self._viewport.on_frame_changed(self._current_frame)
+
+        self._session.undo_stack.push(
+            UndoEntry("Foot slide correction", undo, redo)
+        )
+
+        # Track the corrected span for timeline markers
+        self._foot_slide_applied_spans.append((f_start, f_end))
+        if self._track_overview is not None:
+            self._track_overview.set_track_markers(
+                pid,
+                foot_slide_spans=list(self._foot_slide_applied_spans),
+            )
+
+        # Force full viewport refresh — invalidate cache then re-render
+        self._viewport.invalidate_cache()
+        self._viewport.on_frame_changed(self._current_frame)
+
+        n_frames_corrected = len(offsets)
+        self._foot_status.setText(
+            f"Applied — {n_frames_corrected} frames corrected "
+            f"({f_start}–{f_end})"
+        )
+
+        # Clear anchors (consumed)
+        self._foot_anchors.clear()
+        self._refresh_foot_anchor_table()
+        log.info(
+            "Foot slide correction: pid=%d, foot=%s, range=%d-%d, "
+            "%d offsets applied",
+            pid, foot_side, f_start, f_end, n_frames_corrected,
+        )
+
+    def _on_clear_anchors(self):
+        """Clear all foot anchors."""
+        self._foot_anchors.clear()
+        self._refresh_foot_anchor_table()
+        self._foot_status.setText("Ready — no anchors set")
+
+    def _on_unpin_foot(self):
+        """Remove all anchors at the current frame."""
+        frame = self._current_frame
+        before = len(self._foot_anchors)
+        self._foot_anchors = [
+            a for a in self._foot_anchors if a[0] != frame
+        ]
+        removed = before - len(self._foot_anchors)
+        if removed == 0:
+            self._foot_status.setText(f"No anchors at frame {frame}")
+            return
+        self._refresh_foot_anchor_table()
+        n = len(self._foot_anchors)
+        self._foot_status.setText(
+            f"Removed {removed} anchor{'s' if removed != 1 else ''} at frame {frame} — "
+            + (f"{n} remaining" if n > 0 else "no anchors set")
+        )
+
+    def _refresh_foot_anchor_table(self):
+        """Refresh the anchor table widget from internal state."""
+        self._foot_anchor_table.setRowCount(len(self._foot_anchors))
+        for row, (frame, side, pos) in enumerate(self._foot_anchors):
+            self._foot_anchor_table.setItem(
+                row, 0, QTableWidgetItem(str(frame))
+            )
+            self._foot_anchor_table.setItem(
+                row, 1, QTableWidgetItem("L" if side == "left" else "R")
+            )
+            self._foot_anchor_table.setItem(
+                row, 2,
+                QTableWidgetItem(
+                    f"{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}"
+                ),
+            )
+            del_btn = QPushButton("\u00d7")  # ×
+            del_btn.setFixedSize(24, 20)
+            del_btn.setStyleSheet("border: none; font-weight: bold;")
+            del_btn.clicked.connect(lambda _checked, r=row: self._delete_foot_anchor(r))
+            self._foot_anchor_table.setCellWidget(row, 3, del_btn)
+
+    def _delete_foot_anchor(self, row: int):
+        """Remove a single anchor by row index."""
+        if 0 <= row < len(self._foot_anchors):
+            self._foot_anchors.pop(row)
+            self._refresh_foot_anchor_table()
+            n = len(self._foot_anchors)
+            self._foot_status.setText(
+                f"Ready — {n} anchor{'s' if n != 1 else ''} set"
+                if n > 0 else "Ready — no anchors set"
+            )
+
+    def _update_foot_velocity(self):
+        """Compute and display foot speed at the current frame."""
+        if not hasattr(self, '_foot_vel_label'):
+            return
+
+        params = self._get_world_params_for_foot()
+        if params is None:
+            self._foot_vel_label.setText("No params available")
+            return
+
+        frame = self._current_frame
+        if frame < 1:
+            self._foot_vel_label.setText("(need frame > 0 for velocity)")
+            return
+
+        from views.mesh_viewport import forward_kinematics
+
+        try:
+            joints_cur = forward_kinematics(params, frame)
+            joints_prev = forward_kinematics(params, frame - 1)
+        except Exception:
+            self._foot_vel_label.setText("FK error")
+            return
+
+        l_speed = float(np.linalg.norm(joints_cur[10] - joints_prev[10]))
+        r_speed = float(np.linalg.norm(joints_cur[11] - joints_prev[11]))
+        self._foot_vel_label.setText(
+            f"L_Foot speed at frame {frame}: {l_speed:.3f} m/f\n"
+            f"R_Foot speed at frame {frame}: {r_speed:.3f} m/f"
+        )
