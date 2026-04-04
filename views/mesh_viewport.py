@@ -1408,6 +1408,15 @@ class MeshViewport(_BaseWidget):
             self._vertex_cache.pop((self._person_id, frame_idx), None)
         self._refresh_mesh()
 
+    def refresh(self):
+        """Force a full mesh + skeleton recompute for the current frame.
+
+        Use when underlying params have changed but the frame index hasn't,
+        which would cause ``on_frame_changed`` to early-return.
+        """
+        self._vertex_cache.clear()
+        self._refresh_mesh()
+
     def invalidate_cache(self, person_id: int | None = None, frame_idx: int | None = None):
         """Invalidate vertex cache entries.
 

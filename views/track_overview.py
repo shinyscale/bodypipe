@@ -72,6 +72,8 @@ _COLOR_INTERP = QColor("#ca952e")  # amber, matches correction dots
 _COLOR_INTERP.setAlpha(100)
 _COLOR_FOOT_SLIDE = QColor("#00b894")  # teal, foot-slide correction spans
 _COLOR_FOOT_SLIDE.setAlpha(80)
+_COLOR_DRIFT = QColor("#6c5ce7")  # purple, drift correction spans
+_COLOR_DRIFT.setAlpha(80)
 
 
 def _conf_color(conf: float) -> QColor:
@@ -108,6 +110,8 @@ class _TrackLaneItem(QGraphicsItem):
         self._crossing_spans: list[tuple[int, int]] = []
         self._interpolation_spans: list[tuple[int, int]] = []
         self._foot_slide_spans: list[tuple[int, int]] = []
+        self._drift_correction_spans: list[tuple[int, int]] = []
+        self._foot_pin_frames: list[int] = []
         self._collapsed = False
         self.setPos(0, y_pos)
 
@@ -168,6 +172,13 @@ class _TrackLaneItem(QGraphicsItem):
             if s < e:
                 painter.fillRect(QRectF(s, 0, e - s, LANE_HEIGHT), _COLOR_FOOT_SLIDE)
 
+        # -- drift correction spans (purple tint) -------------------------
+        for span_s, span_e in self._drift_correction_spans:
+            s = max(span_s, f_start)
+            e = min(span_e, f_end)
+            if s < e:
+                painter.fillRect(QRectF(s, 0, e - s, LANE_HEIGHT), _COLOR_DRIFT)
+
         # Inverse X scale for fixed-screen-size markers
         sx = max(0.001, abs(painter.deviceTransform().m11()))
         inv = 1.0 / sx
@@ -224,6 +235,17 @@ class _TrackLaneItem(QGraphicsItem):
                     QPointF(cx, LANE_HEIGHT - 5),
                 ]))
 
+        # -- foot pin markers (teal dots at top of lane) -----------------
+        if self._foot_pin_frames:
+            _pin_color = QColor("#00b894")  # solid teal
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(_pin_color)
+            pin_rx = 2.5 * inv
+            pin_cy = 4.0  # near top of lane
+            for f in self._foot_pin_frames:
+                if f_start <= f < f_end:
+                    painter.drawEllipse(QPointF(f + 0.5, pin_cy), pin_rx, 2.5)
+
         # -- lane border --------------------------------------------------
         pen = QPen(_COLOR_BORDER, 1)
         pen.setCosmetic(True)
@@ -268,6 +290,14 @@ class _TrackLaneItem(QGraphicsItem):
 
     def set_foot_slide_spans(self, spans: list[tuple[int, int]]):
         self._foot_slide_spans = list(spans)
+        self.update()
+
+    def set_drift_correction_spans(self, spans: list[tuple[int, int]]):
+        self._drift_correction_spans = list(spans)
+        self.update()
+
+    def set_foot_pin_frames(self, frames: list[int]):
+        self._foot_pin_frames = list(frames)
         self.update()
 
     def set_collapsed(self, collapsed: bool):
@@ -618,6 +648,8 @@ class TrackOverview(QWidget):
         crossing_spans: list[tuple[int, int]] | None = None,
         interpolation_spans: list[tuple[int, int]] | None = None,
         foot_slide_spans: list[tuple[int, int]] | None = None,
+        foot_pin_frames: list[int] | None = None,
+        drift_correction_spans: list[tuple[int, int]] | None = None,
     ):
         """Set additional markers for a specific person's track lane."""
         lane = self._lanes.get(person_id)
@@ -635,6 +667,10 @@ class TrackOverview(QWidget):
             lane.set_interpolation_spans(interpolation_spans)
         if foot_slide_spans is not None:
             lane.set_foot_slide_spans(foot_slide_spans)
+        if foot_pin_frames is not None:
+            lane.set_foot_pin_frames(foot_pin_frames)
+        if drift_correction_spans is not None:
+            lane.set_drift_correction_spans(drift_correction_spans)
 
     def set_num_frames(self, num_frames: int):
         """Update total frame count for timeline scaling."""

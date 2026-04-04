@@ -853,6 +853,9 @@ class PoseCorrectorPanel(QWidget):
         # Foot-slide correction state
         self._foot_anchors: list[tuple[int, str, np.ndarray]] = []  # (frame, "left"/"right", pos)
         self._foot_slide_applied_spans: list[tuple[int, int]] = []  # for timeline markers
+        self._drift_correction_spans: list[tuple[int, int]] = []
+        self._foot_pinned: bool = False  # Pin/Unpin toggle state
+        self._foot_pin_frame: int = -1  # frame where Pin was set
 
         self._setup_ui()
         self._connect_signals()
@@ -1391,14 +1394,9 @@ class PoseCorrectorPanel(QWidget):
 
         lay.addLayout(grid)
 
-        # Pin / Unpin buttons
-        pin_row = QHBoxLayout()
+        # Pin / Unpin toggle button (single button changes label based on state)
         self._pin_foot_btn = QPushButton("Pin Foot at Current Frame")
-        pin_row.addWidget(self._pin_foot_btn, stretch=1)
-        self._unpin_foot_btn = QPushButton("Unpin Frame")
-        self._unpin_foot_btn.setToolTip("Remove all anchors at the current frame")
-        pin_row.addWidget(self._unpin_foot_btn)
-        lay.addLayout(pin_row)
+        lay.addWidget(self._pin_foot_btn)
 
         # Anchor table
         lay.addWidget(QLabel("Anchors:"))
@@ -1468,6 +1466,21 @@ class PoseCorrectorPanel(QWidget):
         self._foot_vel_label.setWordWrap(True)
         vel_section.content_layout.addWidget(self._foot_vel_label)
         lay.addWidget(vel_section)
+
+        # Collapsible drift correction section
+        drift_section = _CollapsibleSection("Drift Correction", collapsed=True)
+        self._drift_xz_only = QCheckBox("XZ only (horizontal)")
+        self._drift_xz_only.setChecked(True)
+        drift_section.content_layout.addWidget(self._drift_xz_only)
+        self._remove_drift_btn = QPushButton("Remove Drift")
+        drift_section.content_layout.addWidget(self._remove_drift_btn)
+        self._drift_status = QLabel("Uses frame range and blend above")
+        self._drift_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._drift_status.setWordWrap(True)
+        drift_section.content_layout.addWidget(self._drift_status)
+        lay.addWidget(drift_section)
 
         lay.addStretch()
         scroll.setWidget(container)
@@ -1599,10 +1612,10 @@ class PoseCorrectorPanel(QWidget):
             self._ai_reject_btn.clicked.connect(self._on_ai_reject)
 
         # Feet tab
-        self._pin_foot_btn.clicked.connect(self._on_pin_foot)
-        self._unpin_foot_btn.clicked.connect(self._on_unpin_foot)
+        self._pin_foot_btn.clicked.connect(self._on_pin_foot_toggle)
         self._apply_foot_btn.clicked.connect(self._on_apply_foot_lock)
         self._clear_anchors_btn.clicked.connect(self._on_clear_anchors)
+        self._remove_drift_btn.clicked.connect(self._on_remove_drift)
 
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
@@ -1648,6 +1661,7 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.set_pose_override(None)
         self._update_sliders()
         self._update_foot_velocity()
+        self._sync_pin_button_text()
 
     def refresh(self):
         """Refresh person list from session."""
@@ -3586,6 +3600,26 @@ class PoseCorrectorPanel(QWidget):
             params["global_orient"] = params["global_orient_world"]
         return params
 
+    def _has_anchor_at_frame(self, frame: int) -> bool:
+        """Check if any anchor exists at the given frame."""
+        return any(a[0] == frame for a in self._foot_anchors)
+
+    def _sync_pin_button_text(self):
+        """Update pin button label based on pinned state."""
+        if self._foot_pinned:
+            self._pin_foot_btn.setText("Unpin Foot (Set Out)")
+            self._pin_foot_btn.setToolTip("Set the range end at current frame and release pin")
+        else:
+            self._pin_foot_btn.setText("Pin Foot at Current Frame")
+            self._pin_foot_btn.setToolTip("Pin the selected foot at the current frame's position")
+
+    def _on_pin_foot_toggle(self):
+        """Toggle: Pin sets the in-point, Unpin sets the out-point."""
+        if self._foot_pinned:
+            self._on_unpin_foot()
+        else:
+            self._on_pin_foot()
+
     def _on_pin_foot(self):
         """Pin the selected foot (or both) at the current frame's world position."""
         from views.mesh_viewport import forward_kinematics
@@ -3618,18 +3652,21 @@ class PoseCorrectorPanel(QWidget):
 
         self._foot_anchors.sort(key=lambda a: a[0])
 
-        # Auto-update range from anchors ± blend
+        # Set pinned state and record pin frame
+        self._foot_pinned = True
+        self._foot_pin_frame = frame
+
+        # Auto-set range start from pin frame
         blend = self._blend_spin.value()
-        first_frame = self._foot_anchors[0][0]
-        last_frame = self._foot_anchors[-1][0]
-        n_frames = self._session.num_frames if self._session else 999999
-        self._foot_range_start.setValue(max(0, first_frame - blend))
-        self._foot_range_end.setValue(min(n_frames - 1, last_frame + blend))
+        self._foot_range_start.setValue(max(0, frame - blend))
 
         self._refresh_foot_anchor_table()
+        self._sync_pin_button_text()
+        self._push_foot_pin_markers()
         n = len(self._foot_anchors)
         self._foot_status.setText(
-            f"Ready — {n} anchor{'s' if n != 1 else ''} set"
+            f"Pinned at frame {frame} — {n} anchor{'s' if n != 1 else ''} set. "
+            f"Scrub to release point and click Unpin."
         )
 
     def _on_apply_foot_lock(self):
@@ -3698,6 +3735,7 @@ class PoseCorrectorPanel(QWidget):
                     frame_end=f_end,
                     blend_frames=blend,
                     forward_kinematics_fn=forward_kinematics,
+                    propagate=True,
                 )
                 if off:
                     all_offsets.append(off)
@@ -3728,86 +3766,197 @@ class PoseCorrectorPanel(QWidget):
             self._foot_status.setText("No offsets computed")
             return
 
-        # Snapshot for undo
+        # Snapshot for undo (capture from f_start through end of track)
         tw = track.smplx_params["transl_world"]
-        old_tw = tw[f_start:f_end + 1].copy()
+        num_frames = tw.shape[0]
+        old_tw = tw[f_start:].copy()
 
-        # Apply offsets
+        # Extract tail offset (offset at frame_end) for propagation
+        tail_offset = offsets.get(f_end, np.zeros(3, dtype=np.float32))
+
+        # Apply offsets within the corrected range
         for f, offset in offsets.items():
-            if 0 <= f < tw.shape[0]:
+            if 0 <= f < num_frames:
                 tw[f] += offset
+
+        # Propagate tail offset to all frames beyond f_end
+        if f_end + 1 < num_frames:
+            tw[f_end + 1:] += tail_offset
 
         # Undo/redo closures
         def undo(
-            _tw=tw, _start=f_start, _end=f_end, _old=old_tw,
-            _offsets=offsets,
+            _tw=tw, _start=f_start, _old=old_tw,
         ):
-            _tw[_start:_end + 1] = _old
-            self._viewport.invalidate_cache()
-            self._viewport.on_frame_changed(self._current_frame)
+            _tw[_start:] = _old
+            self._viewport.refresh()
 
         def redo(
-            _tw=tw, _offsets=offsets,
+            _tw=tw, _start=f_start, _num=num_frames,
+            _offsets=offsets, _tail=tail_offset, _fend=f_end,
         ):
             for _f, _off in _offsets.items():
-                if 0 <= _f < _tw.shape[0]:
+                if 0 <= _f < _num:
                     _tw[_f] += _off
-            self._viewport.invalidate_cache()
-            self._viewport.on_frame_changed(self._current_frame)
+            if _fend + 1 < _num:
+                _tw[_fend + 1:] += _tail
+            self._viewport.refresh()
 
         self._session.undo_stack.push(
             UndoEntry("Foot slide correction", undo, redo)
         )
 
-        # Track the corrected span for timeline markers
-        self._foot_slide_applied_spans.append((f_start, f_end))
+        # Track the corrected span for timeline markers (includes propagated tail)
+        self._foot_slide_applied_spans.append((f_start, num_frames - 1))
         if self._track_overview is not None:
             self._track_overview.set_track_markers(
                 pid,
                 foot_slide_spans=list(self._foot_slide_applied_spans),
             )
 
-        # Force full viewport refresh — invalidate cache then re-render
-        self._viewport.invalidate_cache()
-        self._viewport.on_frame_changed(self._current_frame)
+        # Force full viewport refresh
+        self._viewport.refresh()
 
-        n_frames_corrected = len(offsets)
+        n_frames_corrected = len(offsets) + max(0, num_frames - 1 - f_end)
         self._foot_status.setText(
             f"Applied — {n_frames_corrected} frames corrected "
-            f"({f_start}–{f_end})"
+            f"({f_start}–{num_frames - 1}, propagated from {f_end})"
         )
 
-        # Clear anchors (consumed)
+        # Clear anchors (consumed) and reset pin state
         self._foot_anchors.clear()
+        self._foot_pinned = False
+        self._foot_pin_frame = -1
         self._refresh_foot_anchor_table()
+        self._sync_pin_button_text()
+        self._push_foot_pin_markers()
         log.info(
             "Foot slide correction: pid=%d, foot=%s, range=%d-%d, "
             "%d offsets applied",
             pid, foot_side, f_start, f_end, n_frames_corrected,
         )
 
+    def _on_remove_drift(self):
+        """Remove linear positional drift from transl_world over frame range."""
+        if self._session is None or self._current_person < 0:
+            self._drift_status.setText("No person selected")
+            return
+
+        pid = self._current_person
+        track = self._session.person_tracks.get(pid)
+        if track is None or track.smplx_params is None:
+            self._drift_status.setText("No params for current person")
+            return
+        if "transl_world" not in track.smplx_params:
+            self._drift_status.setText("No world translations — use orbit mode")
+            return
+
+        try:
+            from pose_correction import compute_drift_offsets
+        except ImportError:
+            self._drift_status.setText("Backend unavailable (pose_correction)")
+            return
+
+        tw = track.smplx_params["transl_world"]
+        f_start = self._foot_range_start.value()
+        f_end = self._foot_range_end.value()
+        blend = self._blend_spin.value()
+        xz_only = self._drift_xz_only.isChecked()
+
+        if f_start >= f_end:
+            self._drift_status.setText("Invalid range: start must be < end")
+            return
+
+        offsets = compute_drift_offsets(tw, f_start, f_end, xz_only, blend)
+        if not offsets:
+            self._drift_status.setText("No offsets computed")
+            return
+
+        # Snapshot for undo (capture from f_start through end of track)
+        num_frames = tw.shape[0]
+        old_tw = tw[f_start:].copy()
+
+        # Extract tail offset for propagation beyond f_end
+        tail_offset = offsets.get(f_end, np.zeros(3, dtype=np.float32))
+
+        # Apply offsets within the corrected range
+        for f, offset in offsets.items():
+            if 0 <= f < num_frames:
+                tw[f] += offset
+
+        # Propagate tail offset to all frames beyond f_end
+        if f_end + 1 < num_frames:
+            tw[f_end + 1:] += tail_offset
+
+        # Undo/redo closures
+        def undo(
+            _tw=tw, _start=f_start, _old=old_tw,
+        ):
+            _tw[_start:] = _old
+            self._viewport.refresh()
+
+        def redo(
+            _tw=tw, _start=f_start, _num=num_frames,
+            _offsets=offsets, _tail=tail_offset, _fend=f_end,
+        ):
+            for _f, _off in _offsets.items():
+                if 0 <= _f < _num:
+                    _tw[_f] += _off
+            if _fend + 1 < _num:
+                _tw[_fend + 1:] += _tail
+            self._viewport.refresh()
+
+        self._session.undo_stack.push(
+            UndoEntry("Drift correction", undo, redo)
+        )
+
+        # Track the corrected span for timeline markers
+        self._drift_correction_spans.append((f_start, f_end))
+        if self._track_overview is not None:
+            self._track_overview.set_track_markers(
+                pid,
+                drift_correction_spans=list(self._drift_correction_spans),
+            )
+
+        self._viewport.refresh()
+
+        drift_mag = float(np.linalg.norm(tail_offset))
+        axes = "XZ" if xz_only else "XYZ"
+        self._drift_status.setText(
+            f"Removed {drift_mag:.3f}m {axes} drift over frames {f_start}–{f_end}"
+        )
+        log.info(
+            "Drift correction: pid=%d, range=%d-%d, drift=%.3fm (%s)",
+            pid, f_start, f_end, drift_mag, axes,
+        )
+
     def _on_clear_anchors(self):
-        """Clear all foot anchors."""
+        """Clear all foot anchors and reset pin state."""
         self._foot_anchors.clear()
+        self._foot_pinned = False
+        self._foot_pin_frame = -1
         self._refresh_foot_anchor_table()
+        self._sync_pin_button_text()
+        self._push_foot_pin_markers()
         self._foot_status.setText("Ready — no anchors set")
 
     def _on_unpin_foot(self):
-        """Remove all anchors at the current frame."""
+        """Unpin: set range end to current frame and clear pinned state."""
         frame = self._current_frame
-        before = len(self._foot_anchors)
-        self._foot_anchors = [
-            a for a in self._foot_anchors if a[0] != frame
-        ]
-        removed = before - len(self._foot_anchors)
-        if removed == 0:
-            self._foot_status.setText(f"No anchors at frame {frame}")
-            return
-        self._refresh_foot_anchor_table()
+
+        # Set range end
+        blend = self._blend_spin.value()
+        n_frames = self._session.num_frames if self._session else 999999
+        self._foot_range_end.setValue(min(n_frames - 1, frame + blend))
+
+        # Clear pinned state
+        self._foot_pinned = False
+        self._sync_pin_button_text()
+        self._push_foot_pin_markers()
+
         n = len(self._foot_anchors)
         self._foot_status.setText(
-            f"Removed {removed} anchor{'s' if removed != 1 else ''} at frame {frame} — "
-            + (f"{n} remaining" if n > 0 else "no anchors set")
+            f"Range set: {self._foot_range_start.value()}–{self._foot_range_end.value()} — "
+            f"{n} anchor{'s' if n != 1 else ''} ready to apply"
         )
 
     def _refresh_foot_anchor_table(self):
@@ -3837,11 +3986,23 @@ class PoseCorrectorPanel(QWidget):
         if 0 <= row < len(self._foot_anchors):
             self._foot_anchors.pop(row)
             self._refresh_foot_anchor_table()
+            self._sync_pin_button_text()
+            self._push_foot_pin_markers()
             n = len(self._foot_anchors)
             self._foot_status.setText(
                 f"Ready — {n} anchor{'s' if n != 1 else ''} set"
                 if n > 0 else "Ready — no anchors set"
             )
+
+    def _push_foot_pin_markers(self):
+        """Push current anchor frames to the track overview as foot pin dots."""
+        if self._track_overview is None or self._current_person < 0:
+            return
+        pin_frames = sorted({a[0] for a in self._foot_anchors})
+        self._track_overview.set_track_markers(
+            self._current_person,
+            foot_pin_frames=pin_frames,
+        )
 
     def _update_foot_velocity(self):
         """Compute and display foot speed at the current frame."""
