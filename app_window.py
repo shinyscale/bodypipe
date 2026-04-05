@@ -58,6 +58,21 @@ def _amplify_ankle_rotations(
     params["body_pose"] = bp
 
 
+def _compute_camera_c2w(go_incam, tr_incam, go_world, tr_world):
+    """Derive per-frame camera-to-world (4x4) from body pose pairs."""
+    from scipy.spatial.transform import Rotation
+    N = go_world.shape[0]
+    c2w = np.zeros((N, 4, 4), dtype=np.float32)
+    R_cams = Rotation.from_rotvec(go_incam).as_matrix()    # (N,3,3)
+    R_worlds = Rotation.from_rotvec(go_world).as_matrix()   # (N,3,3)
+    R_c2w = R_worlds @ np.swapaxes(R_cams, -1, -2)         # (N,3,3)
+    t_cam = tr_world - np.einsum('nij,nj->ni', R_c2w, tr_incam)
+    c2w[:, :3, :3] = R_c2w
+    c2w[:, :3, 3] = t_cam
+    c2w[:, 3, 3] = 1.0
+    return c2w
+
+
 def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
     """Apply One Euro filter to hand poses — same params as BVH export."""
     from smplx_to_bvh import _smooth_rotations_one_euro
@@ -447,6 +462,17 @@ class AppWindow(QMainWindow):
         # ---- Create dock widgets ----
         self._video_dock = VideoDock(self._video_player, self)
         self._mesh_dock = MeshViewportDock(self._mesh_viewport, self)
+        # Viewport toolbar → viewport signals
+        dock = self._mesh_dock
+        dock._camera_combo.currentIndexChanged.connect(
+            lambda idx: self._mesh_viewport.set_camera_mode("incam" if idx == 0 else "orbit")
+        )
+        dock._grid_cb.toggled.connect(self._mesh_viewport.set_show_grid)
+        dock._labels_cb.toggled.connect(self._mesh_viewport.set_show_joint_labels)
+        dock._frustum_cb.toggled.connect(self._mesh_viewport.set_show_camera_frustum)
+        dock._frustum_cb.toggled.connect(dock._fov_label.setVisible)
+        dock._frustum_cb.toggled.connect(dock._fov_spin.setVisible)
+        dock._fov_spin.valueChanged.connect(self._mesh_viewport.set_frustum_fov)
         self._identity_dock = IdentityDock(self._identity_inspector, self)
         self._pose_corrector_dock = PoseCorrectorDock(
             session=self._session, gvhmr_root=self._gvhmr_root,
@@ -1410,12 +1436,13 @@ class AppWindow(QMainWindow):
         self._mesh_viewport.set_person(pid)
         self._pose_corrector.set_person(pid)
 
-        # Auto-switch to orbit camera for skeleton-only tracks (no mesh)
+        # Auto-switch to orbit camera when world-grounding data is available
         track = self._session.person_tracks.get(pid)
-        if track is not None and track.smplx_params is not None:
-            # GEM-X smplx_params don't have betas → no mesh, skeleton only
-            if track.smplx_params.get("betas") is None and track.soma_params is None:
-                self._mesh_viewport.set_camera_mode("orbit")
+        if track is not None:
+            params = track.soma_params or track.smplx_params
+            if params is not None and "transl_world" in params:
+                if self._mesh_viewport._camera_mode != "orbit":
+                    self._mesh_viewport.set_camera_mode("orbit")
 
         # Broadcast current frame to all panels
         frame = self._session.current_frame
@@ -1706,8 +1733,31 @@ class AppWindow(QMainWindow):
                         pass
 
     def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
-        """Load motion params — tries GEM-X first, falls back to GVHMR."""
-        # GEM-X primary: hpe_results.pt
+        """Load motion params — prefers the currently selected estimation backend."""
+        # Determine preferred backend from pipeline settings
+        prefer_gemx = True  # default fallback
+        try:
+            settings = self._pipeline_dock.current_settings
+            backend, _ = settings._selected_backend()
+            prefer_gemx = (backend == "gemx")
+        except Exception:
+            pass
+
+        if prefer_gemx:
+            primary, fallback = self._try_load_gemx, self._try_load_gvhmr
+        else:
+            primary, fallback = self._try_load_gvhmr, self._try_load_gemx
+
+        result = primary(person_dir)
+        if result is not None:
+            return result
+        result = fallback(person_dir)
+        if result is not None:
+            return result
+        return None, None, "smplx"
+
+    def _try_load_gemx(self, person_dir: Path) -> tuple[dict | None, dict | None, str] | None:
+        """Try loading GEM-X results from person_dir. Returns None on failure."""
         try:
             from workers.gemx_worker import load_gemx_soma_output
             for search_dir in [person_dir, person_dir / "gemx_demo"]:
@@ -1729,19 +1779,20 @@ class AppWindow(QMainWindow):
                         )
                     bmt = gemx_result.pop("body_model_type", "soma")
                     if bmt == "smplx":
-                        # GEM-X with 21 body joints → SMPL-X format
                         return gemx_result, None, "smplx"
                     else:
-                        # GEM-X with 76 body joints → true SOMA format
                         return None, gemx_result, "soma"
         except Exception:
             log.warning("GEM-X load failed for %s:\n%s", person_dir,
                         __import__("traceback").format_exc())
-        # GVHMR fallback: hmr4d_results.pt
+        return None
+
+    def _try_load_gvhmr(self, person_dir: Path) -> tuple[dict | None, dict | None, str] | None:
+        """Try loading GVHMR results from person_dir. Returns None on failure."""
         smplx_params = self._load_smplx_params_legacy(person_dir)
         if smplx_params is not None:
             return smplx_params, None, "smplx"
-        return None, None, "smplx"
+        return None
 
     def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
         """Load SMPL-X parameters from GVHMR results, augmented with hand
@@ -1761,6 +1812,11 @@ class AppWindow(QMainWindow):
             K = results.get("K_fullimg")
             if K is not None and self._session.camera_K is None:
                 self._session.camera_K = K[0].numpy()
+                # Sync FOV spinbox to match loaded intrinsics
+                fov = self._mesh_viewport.get_frustum_fov()
+                self._mesh_dock._fov_spin.blockSignals(True)
+                self._mesh_dock._fov_spin.setValue(fov)
+                self._mesh_dock._fov_spin.blockSignals(False)
 
             params = dict(params)  # shallow copy to add keys
 
@@ -1825,6 +1881,13 @@ class AppWindow(QMainWindow):
                 if tr_world.shape[0] > 0:
                     floor_y = float(tr_world[0, 1]) - 0.933
                     tr_world[:, 1] -= floor_y
+                # Derive camera world pose (once, from first person loaded)
+                if self._session.derived_c2w is None:
+                    go_incam = np.array(params["global_orient"]).astype(np.float32)
+                    tr_incam = np.array(params["transl"]).astype(np.float32)
+                    self._session.derived_c2w = _compute_camera_c2w(
+                        go_incam, tr_incam, go_world, tr_world
+                    )
                 # Multi-person lateral offset
                 offset_cam = self._get_person_world_offset(person_dir)
                 if offset_cam is not None:

@@ -897,6 +897,118 @@ def compute_grid_lines(
     return positions[:idx], colors[:idx]
 
 
+def compute_frustum_lines(
+    c2w: np.ndarray,
+    K: np.ndarray,
+    img_w: int,
+    img_h: int,
+    depth: float = 0.4,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build wireframe frustum line vertices for a single camera pose.
+
+    Parameters
+    ----------
+    c2w : (4, 4) camera-to-world transform (OpenCV convention: +Z forward)
+    K : (3, 3) camera intrinsic matrix
+    img_w, img_h : image dimensions in pixels
+    depth : frustum depth in metres
+
+    Returns
+    -------
+    positions : (N, 3) float32 — GL_LINES vertex pairs
+    colors : (N, 3) float32 — per-vertex colors (cyan)
+    """
+    R = c2w[:3, :3]
+    t = c2w[:3, 3]
+
+    # Unproject 4 image corners to camera-space rays, scale to depth
+    K_inv = np.linalg.inv(K)
+    corners_px = np.array([
+        [0, 0, 1],
+        [img_w, 0, 1],
+        [img_w, img_h, 1],
+        [0, img_h, 1],
+    ], dtype=np.float32)
+    rays_cam = (K_inv @ corners_px.T).T  # (4, 3)
+    # Normalise so Z=depth
+    rays_cam = rays_cam / rays_cam[:, 2:3] * depth
+    # Transform to world (OpenCV cam: Z-forward, Y-down)
+    corners_world = (R @ rays_cam.T).T + t  # (4, 3)
+
+    # Convert origin and corners to GL coords (Y-up): swap Y and Z, negate new Z
+    def cv_to_gl(p):
+        return np.array([p[0], -p[1], -p[2]], dtype=np.float32)
+
+    origin = cv_to_gl(t)
+    gl_corners = np.array([cv_to_gl(c) for c in corners_world])
+
+    verts = []
+    # 4 pyramid edges (origin → corner)
+    for c in gl_corners:
+        verts.append(origin)
+        verts.append(c)
+    # 4 near-plane edges (corner → next corner)
+    for i in range(4):
+        verts.append(gl_corners[i])
+        verts.append(gl_corners[(i + 1) % 4])
+    # Up tick on top edge midpoint
+    top_mid = (gl_corners[0] + gl_corners[1]) * 0.5
+    cam_up = R @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    cam_up_gl = np.array([cam_up[0], -cam_up[1], -cam_up[2]], dtype=np.float32)
+    tick_end = top_mid + cam_up_gl * (depth * 0.15)
+    verts.append(top_mid)
+    verts.append(tick_end)
+
+    positions = np.array(verts, dtype=np.float32)
+    color = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+    colors = np.tile(color, (len(positions), 1))
+    return positions, colors
+
+
+def compute_camera_trail(
+    c2w_all: np.ndarray,
+    current_frame: int,
+    trail_frames: int = 30,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build GL_LINES pairs tracing camera origin through recent frames.
+
+    Parameters
+    ----------
+    c2w_all : (N, 4, 4) per-frame camera-to-world
+    current_frame : current frame index
+    trail_frames : how many past frames to show
+
+    Returns
+    -------
+    positions : (M, 3) float32 — GL_LINES pairs
+    colors : (M, 3) float32 — dim cyan per vertex
+    """
+    N = c2w_all.shape[0]
+    start = max(0, current_frame - trail_frames)
+    end = min(current_frame + 1, N)
+    if end - start < 2:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
+
+    # Extract origins and convert OpenCV → GL (Y-up)
+    origins = c2w_all[start:end, :3, 3].copy()  # (K, 3)
+    gl_origins = np.column_stack([
+        origins[:, 0],
+        -origins[:, 1],
+        -origins[:, 2],
+    ]).astype(np.float32)
+
+    # Build line pairs: frame[i] → frame[i+1]
+    K = gl_origins.shape[0]
+    verts = np.zeros((2 * (K - 1), 3), dtype=np.float32)
+    for i in range(K - 1):
+        verts[2 * i] = gl_origins[i]
+        verts[2 * i + 1] = gl_origins[i + 1]
+
+    color = np.array([0.0, 0.6, 0.6], dtype=np.float32)
+    colors = np.tile(color, (len(verts), 1))
+    return verts, colors
+
+
 # ---------------------------------------------------------------------------
 # HUD overlay — semi-transparent info display on viewport (Phase 10)
 # ---------------------------------------------------------------------------
@@ -1142,6 +1254,10 @@ class MeshViewport(_BaseWidget):
         # Position anchor markers (purple crosshairs on ground plane)
         self._pos_anchor_markers: list[np.ndarray] = []  # list of (3,) world positions
 
+        # Camera frustum wireframe (orbit mode)
+        self._show_camera_frustum: bool = False
+        self._frustum_fov_override: float | None = None  # horizontal FOV in degrees
+
         # Status message for fallback rendering
         self._status_msg: str = ""
 
@@ -1253,6 +1369,33 @@ class MeshViewport(_BaseWidget):
         self._current_frame = frame_idx
         self._refresh_mesh()
 
+    @property
+    def camera_mode(self) -> str:
+        """Current camera mode ('incam' or 'orbit')."""
+        return self._camera_mode
+
+    def set_frustum_fov(self, fov_deg: float):
+        """Override the horizontal FOV used for frustum rendering."""
+        self._frustum_fov_override = fov_deg
+        if _HAS_GL:
+            self.update()
+
+    def get_frustum_fov(self) -> float:
+        """Current horizontal FOV in degrees from camera_K, focal_mm, or default."""
+        if self._frustum_fov_override is not None:
+            return self._frustum_fov_override
+        sess = self._session
+        if sess is not None:
+            w = sess.img_width or 1920
+            if sess.camera_K is not None:
+                fx = float(sess.camera_K[0, 0])
+                return float(np.degrees(2 * np.arctan(w / (2 * fx))))
+            # Derive from focal_mm assuming 36mm sensor width
+            f_mm = sess.focal_mm if sess.focal_mm else 24.0
+            fx = f_mm / 36.0 * w
+            return float(np.degrees(2 * np.arctan(w / (2 * fx))))
+        return 60.0
+
     def set_camera_mode(self, mode: str):
         """Set camera mode ('incam' or 'orbit').
 
@@ -1332,6 +1475,14 @@ class MeshViewport(_BaseWidget):
         if show == self._show_grid:
             return
         self._show_grid = show
+        if _HAS_GL:
+            self.update()
+
+    def set_show_camera_frustum(self, show: bool):
+        """Toggle camera frustum wireframe visibility in orbit mode."""
+        if show == self._show_camera_frustum:
+            return
+        self._show_camera_frustum = show
         if _HAS_GL:
             self.update()
 
@@ -2511,6 +2662,10 @@ class MeshViewport(_BaseWidget):
         if self._pos_anchor_markers:
             self._draw_pos_anchor_markers()
 
+        # Camera frustum wireframe (orbit mode)
+        if self._show_camera_frustum and self._camera_mode == "orbit":
+            self._draw_camera_frustum()
+
         # Mesh triangles
         if (
             self._render_mode != RenderMode.WIREFRAME
@@ -2607,6 +2762,10 @@ class MeshViewport(_BaseWidget):
         # Position anchor markers (after grid, before mesh/skeleton)
         if self._pos_anchor_markers:
             self._draw_pos_anchor_markers()
+
+        # Camera frustum wireframe (orbit mode)
+        if self._show_camera_frustum and self._camera_mode == "orbit":
+            self._draw_camera_frustum()
 
         # Mesh triangles — skip entirely in wireframe mode
         if (
@@ -3043,6 +3202,76 @@ class MeshViewport(_BaseWidget):
         self._draw_primitive(gl.GL_POINTS, dot_positions, dot_normals, dot_colors, point_size=6.0)
         gl.glEnable(gl.GL_CULL_FACE)
 
+        self._shader.release()
+
+    def _get_frustum_K(self) -> np.ndarray:
+        """Intrinsics matrix for frustum rendering, respecting FOV override."""
+        sess = self._session
+        w = sess.img_width or 1920
+        h = sess.img_height or 1080
+        # Priority 1: user FOV override
+        if self._frustum_fov_override is not None:
+            fx = w / (2 * np.tan(np.radians(self._frustum_fov_override / 2)))
+            return np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1]], dtype=np.float32)
+        # Priority 2: pipeline-computed K
+        if sess.camera_K is not None:
+            return sess.camera_K.astype(np.float32)
+        # Priority 3: derive from focal_mm (NOT max(w,h) fallback)
+        f_mm = sess.focal_mm if sess.focal_mm else 24.0
+        fx = f_mm / 36.0 * w
+        return np.array([[fx, 0, w / 2], [0, fx, h / 2], [0, 0, 1]], dtype=np.float32)
+
+    def _draw_camera_frustum(self):
+        """Draw camera frustum wireframe and motion trail in orbit mode."""
+        if not _HAS_GL or not self._gl_ready:
+            return
+        sess = self._session
+        if sess is None or sess.derived_c2w is None:
+            return
+
+        c2w_all = sess.derived_c2w
+        frame = min(self._current_frame, len(c2w_all) - 1)
+        c2w = c2w_all[frame]
+
+        K = self._get_frustum_K()
+        img_w = sess.img_width or 1920
+        img_h = sess.img_height or 1080
+
+        # Frustum wireframe
+        frust_pos, frust_col = compute_frustum_lines(c2w, K, img_w, img_h)
+        # Trail
+        trail_pos, trail_col = compute_camera_trail(c2w_all, frame)
+        # Camera origin dot (in GL coords)
+        origin_gl = np.array([[c2w[0, 3], -c2w[1, 3], -c2w[2, 3]]], dtype=np.float32)
+        dot_col = np.array([[0.0, 1.0, 1.0]], dtype=np.float32)
+
+        self._shader.bind()
+
+        # Unlit (same pattern as grid)
+        self._set_mat4("model", np.eye(4, dtype=np.float32))
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        # Frustum lines
+        if len(frust_pos) > 0:
+            normals = np.zeros_like(frust_pos)
+            self._draw_primitive(gl.GL_LINES, frust_pos, normals, frust_col, line_width=2.0)
+
+        # Trail lines
+        if len(trail_pos) > 0:
+            normals = np.zeros_like(trail_pos)
+            self._draw_primitive(gl.GL_LINES, trail_pos, normals, trail_col, line_width=1.0)
+
+        # Camera origin dot
+        dot_normals = np.zeros_like(origin_gl)
+        self._draw_primitive(gl.GL_POINTS, origin_gl, dot_normals, dot_col, point_size=6.0)
+
+        gl.glEnable(gl.GL_CULL_FACE)
         self._shader.release()
 
     def _draw_joint_labels(self, painter: QPainter):

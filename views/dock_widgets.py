@@ -13,8 +13,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDockWidget,
+    QDoubleSpinBox,
+    QHBoxLayout,
+    QLabel,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -50,13 +54,53 @@ class VideoDock(QDockWidget):
 
 
 class MeshViewportDock(QDockWidget):
-    """Dock wrapping a MeshViewport widget."""
+    """Dock wrapping a MeshViewport widget with a compact toolbar row."""
 
     def __init__(self, mesh_viewport: MeshViewport, parent: QWidget | None = None):
         super().__init__("3D Viewport", parent)
         self.setObjectName("MeshViewportDock")
         self._mesh_viewport = mesh_viewport
-        self.setWidget(mesh_viewport)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # --- Toolbar row ---
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(4, 2, 4, 2)
+
+        self._camera_combo = QComboBox()
+        self._camera_combo.addItems(["In-camera", "Free orbit"])
+        toolbar.addWidget(self._camera_combo)
+
+        self._grid_cb = QCheckBox("Grid")
+        self._grid_cb.setChecked(True)
+        toolbar.addWidget(self._grid_cb)
+
+        self._labels_cb = QCheckBox("Labels")
+        toolbar.addWidget(self._labels_cb)
+
+        self._frustum_cb = QCheckBox("Frustum")
+        self._frustum_cb.setToolTip("Show camera frustum wireframe in orbit mode")
+        toolbar.addWidget(self._frustum_cb)
+
+        toolbar.addStretch()
+
+        self._fov_label = QLabel("FOV:")
+        self._fov_label.setVisible(False)
+        toolbar.addWidget(self._fov_label)
+        self._fov_spin = QDoubleSpinBox()
+        self._fov_spin.setRange(10.0, 170.0)
+        self._fov_spin.setSuffix("°")
+        self._fov_spin.setDecimals(1)
+        self._fov_spin.setToolTip("Horizontal field of view for camera frustum")
+        self._fov_spin.setVisible(False)
+        toolbar.addWidget(self._fov_spin)
+
+        lay.addLayout(toolbar)
+        lay.addWidget(mesh_viewport)
+        self.setWidget(container)
 
     @property
     def mesh_viewport(self) -> MeshViewport:

@@ -901,21 +901,14 @@ class PoseCorrectorPanel(QWidget):
             self._viewport = MeshViewport(gvhmr_root=self._gvhmr_root)
             self._viewport.set_session(self._session)
 
-        # Camera/color/labels controls row (controls the main 3D viewport)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Camera:"))
-        self._camera_combo = QComboBox()
-        self._camera_combo.addItems(["In-camera", "Free orbit"])
-        mode_row.addWidget(self._camera_combo)
-        mode_row.addWidget(QLabel("Color:"))
+        # Color mode control row
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Color:"))
         self._color_combo = QComboBox()
         self._color_combo.addItems(["Solid", "Joint influence", "Confidence"])
-        mode_row.addWidget(self._color_combo)
-        self._labels_checkbox = QCheckBox("Labels")
-        self._labels_checkbox.setToolTip("Show joint name labels on skeleton")
-        mode_row.addWidget(self._labels_checkbox)
-        mode_row.addStretch()
-        layout.addLayout(mode_row)
+        color_row.addWidget(self._color_combo)
+        color_row.addStretch()
+        layout.addLayout(color_row)
 
         # Person selector — always visible above tabs
         person_row = QHBoxLayout()
@@ -1622,9 +1615,7 @@ class PoseCorrectorPanel(QWidget):
         self._person_combo.currentIndexChanged.connect(self._on_person_dropdown_changed)
 
         # Camera/color mode and labels toggle
-        self._camera_combo.currentIndexChanged.connect(self._on_camera_mode_changed)
         self._color_combo.currentIndexChanged.connect(self._on_color_mode_changed)
-        self._labels_checkbox.toggled.connect(self._viewport.set_show_joint_labels)
 
         # Euler spinboxes (primary — sliders sync from these)
         self._euler_x.valueChanged.connect(self._on_euler_changed)
@@ -1806,7 +1797,7 @@ class PoseCorrectorPanel(QWidget):
 
     def _use_world_orient(self) -> bool:
         """True when the viewport renders world-space orientation (orbit mode)."""
-        if self._camera_combo.currentIndex() != 1:  # not orbit
+        if self._viewport.camera_mode != "orbit":
             return False
         if self._current_person < 0:
             return False
@@ -1814,11 +1805,6 @@ class PoseCorrectorPanel(QWidget):
         if track is None or track.smplx_params is None:
             return False
         return "global_orient_world" in track.smplx_params
-
-    def _on_camera_mode_changed(self, idx: int):
-        """Handle camera mode dropdown change."""
-        mode = "incam" if idx == 0 else "orbit"
-        self._viewport.set_camera_mode(mode)
 
     def _on_color_mode_changed(self, idx: int):
         """Handle color mode dropdown change."""
