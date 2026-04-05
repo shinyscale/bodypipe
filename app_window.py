@@ -15,6 +15,49 @@ import cv2
 import numpy as np
 
 
+# Ankle/foot body_pose indices (0-based: SMPL-X joint index - 1).
+_ANKLE_FOOT_JOINTS = {6, 7, 9, 10}  # L_Ankle, R_Ankle, L_Foot, R_Foot
+
+# Default gain for ankle/foot rotation amplification.  GVHMR's decoder
+# under-predicts ankle articulation (~30-50% of true ROM for dance footage).
+_DEFAULT_ANKLE_GAIN = 1.5
+
+
+def _amplify_ankle_rotations(
+    params: dict,
+    gain: float = _DEFAULT_ANKLE_GAIN,
+    joint_indices: set[int] | None = None,
+) -> None:
+    """Scale ankle/foot axis-angle magnitudes in-place.
+
+    Preserves rotation axis — only the magnitude (angle) is scaled.
+    """
+    if gain == 1.0:
+        return
+
+    if joint_indices is None:
+        joint_indices = _ANKLE_FOOT_JOINTS
+
+    bp = params.get("body_pose")
+    if bp is None:
+        return
+
+    # Ensure (N, 21, 3) shape
+    needs_reshape = bp.ndim == 2 and bp.shape[-1] != 3
+    if needs_reshape:
+        bp = bp.reshape(bp.shape[0], -1, 3)
+
+    for j in joint_indices:
+        joint_aa = bp[:, j, :]  # (N, 3)
+        norms = np.linalg.norm(joint_aa, axis=-1, keepdims=True)
+        safe = np.where(norms > 1e-8, norms, np.ones_like(norms))
+        bp[:, j, :] = (joint_aa / safe) * (norms * gain)
+
+    if needs_reshape:
+        bp = bp.reshape(bp.shape[0], -1)
+    params["body_pose"] = bp
+
+
 def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
     """Apply One Euro filter to hand poses — same params as BVH export."""
     from smplx_to_bvh import _smooth_rotations_one_euro
@@ -1759,6 +1802,19 @@ class AppWindow(QMainWindow):
 
             # --- Smooth hand poses (One Euro, same params as BVH export) ---
             _smooth_hand_poses(params)
+
+            # --- Amplify ankle/foot rotations (GVHMR under-predicts) ---
+            # Ensure body_pose is (N, 21, 3) before amplification
+            bp = params["body_pose"]
+            if hasattr(bp, "numpy"):
+                params["body_pose"] = bp.numpy().astype(np.float32)
+            else:
+                params["body_pose"] = np.array(bp, dtype=np.float32)
+            if params["body_pose"].ndim == 2 and params["body_pose"].shape[-1] != 3:
+                params["body_pose"] = params["body_pose"].reshape(
+                    params["body_pose"].shape[0], -1, 3
+                )
+            _amplify_ankle_rotations(params, gain=_DEFAULT_ANKLE_GAIN)
 
             # --- World-space params for orbit mode (with ground norm + offsets) ---
             global_params = results.get("smpl_params_global")
