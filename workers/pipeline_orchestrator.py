@@ -726,7 +726,7 @@ class MultiPersonWorker(QThread):
                     # Log-only: stream subprocess output without updating progress bar
                     self.log_line.emit(msg)
                 else:
-                    overall = 0.05 + frac * 0.85
+                    overall = 0.02 + frac * 0.83
                     self.progress.emit(overall, msg)
                     self.log_line.emit(f"[MultiPerson] {msg}")
 
@@ -742,7 +742,7 @@ class MultiPersonWorker(QThread):
                 use_inpainting=self._config.use_inpainting,
                 progress_callback=progress_callback,
                 estimation_backend=self._config.estimation_backend,
-                use_hands=self._config.use_hands,
+                use_hands=self._config.use_hands and self._config.hand_source != "hamer",
             )
 
             if self._cancelled:
@@ -767,26 +767,31 @@ class MultiPersonWorker(QThread):
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 
     def _try_hamer_multi(self, result) -> None:
-        """Run HaMeR hand reconstruction per-person and re-merge.
+        """Run HaMeR hand reconstruction per-person with confidence merging.
 
         For each person directory, finds ViTPose + isolated video, runs
-        ``run_hamer()``, replaces hand poses in the existing hybrid .pt,
-        and re-exports the BVH so downstream FBX conversion picks it up.
+        ``run_hamer()``, merges hand poses using per-frame confidence
+        thresholds, and re-exports the BVH so downstream FBX conversion
+        picks it up.
         """
         try:
-            from hamer_inference import run_hamer, _load_hamer_model
+            from hamer_inference import run_hamer, _load_hamer_model, merge_gvhmr_hamer_params
+            from smplx_to_bvh import extract_gvhmr_params
         except ImportError:
             self.log_line.emit(
                 "WARNING: hamer_inference not available, skipping HaMeR hands."
             )
             return
 
+        import torch
+
         person_dirs = getattr(result, "person_dirs", None) or []
         person_videos = getattr(result, "person_video_paths", None) or []
         if not person_dirs:
             return
 
-        self.progress.emit(0.90, "Running HaMeR hand reconstruction...")
+        total_persons = len(person_dirs)
+        self.progress.emit(0.85, f"Running HaMeR hand reconstruction ({total_persons} persons)...")
 
         # Load the HaMeR model once and share across all persons
         try:
@@ -799,6 +804,9 @@ class MultiPersonWorker(QThread):
             if self._cancelled:
                 return
             person_dir = Path(person_dir)
+
+            base_frac = 0.85 + (i / total_persons) * 0.07
+            self.progress.emit(base_frac, f"HaMeR hands: person {i + 1}/{total_persons}")
 
             # Find isolated video for this person
             video_path = person_videos[i] if i < len(person_videos) else None
@@ -847,22 +855,26 @@ class MultiPersonWorker(QThread):
                 )
                 continue
 
-            # Load, replace hand poses, re-save
+            # Confidence-based merge: only replace hand poses on frames
+            # where HaMeR confidence exceeds the threshold
             try:
-                import torch
-                data = torch.load(str(pt_path), map_location="cpu", weights_only=True)
-                n = hamer_result["left_hand_pose"].shape[0]
+                gvhmr_params = extract_gvhmr_params(str(pt_path))
+                merged = merge_gvhmr_hamer_params(gvhmr_params, hamer_result)
+
+                # Update existing file in-place to preserve format for BVH export
+                data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                n = merged["num_frames"]
                 data["left_hand_pose"] = torch.tensor(
-                    hamer_result["left_hand_pose"].reshape(n, -1),
+                    merged["left_hand_pose"].reshape(n, -1),
                     dtype=torch.float32,
                 )
                 data["right_hand_pose"] = torch.tensor(
-                    hamer_result["right_hand_pose"].reshape(n, -1),
+                    merged["right_hand_pose"].reshape(n, -1),
                     dtype=torch.float32,
                 )
                 torch.save(data, str(pt_path))
                 self.log_line.emit(
-                    f"[HaMeR] Person {i}: hands merged → {pt_path.name}"
+                    f"[HaMeR] Person {i}: confidence-merged hands → {pt_path.name}"
                 )
             except Exception as exc:
                 self.log_line.emit(
@@ -883,11 +895,10 @@ class MultiPersonWorker(QThread):
                     f"[HaMeR] Person {i}: BVH re-export failed — {exc}"
                 )
 
-            frac = 0.90 + ((i + 1) / max(len(person_dirs), 1)) * 0.02
-            self.progress.emit(frac, f"HaMeR done for person {i}")
+            done_frac = 0.85 + ((i + 1) / total_persons) * 0.07
+            self.progress.emit(done_frac, f"HaMeR hands: person {i + 1}/{total_persons} complete")
 
         # Free shared model
-        import torch
         del shared_model, shared_model_cfg
         torch.cuda.empty_cache()
 
@@ -939,7 +950,7 @@ class MultiPersonWorker(QThread):
         if not to_convert:
             return fbx_files
 
-        self.progress.emit(0.90, f"Converting {len(to_convert)} BVH to FBX (parallel)...")
+        self.progress.emit(0.92, f"Converting {len(to_convert)} BVH to FBX (parallel)...")
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
