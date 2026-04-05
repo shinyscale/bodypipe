@@ -1721,6 +1721,15 @@ class AppWindow(QMainWindow):
 
             params = dict(params)  # shallow copy to add keys
 
+            # --- Raw body pose (pre-IK) for dance/rapid motion toggle ---
+            raw_bp = results.get("raw_body_pose")
+            if raw_bp is not None:
+                params["body_pose_raw"] = np.array(raw_bp).astype(np.float32)
+                if params["body_pose_raw"].ndim == 2 and params["body_pose_raw"].shape[-1] != 3:
+                    params["body_pose_raw"] = params["body_pose_raw"].reshape(
+                        params["body_pose_raw"].shape[0], -1, 3
+                    )
+
             # --- Augment with hand data from hybrid file ---
             hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
             if hybrid_pts:

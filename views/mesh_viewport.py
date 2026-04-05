@@ -767,6 +767,9 @@ _ORBIT_DEFAULT_CENTER = np.array([0.0, 0.0, -2.5], dtype=np.float32)
 # Joint drag-to-rotate sensitivity.
 _JOINT_DRAG_SENSITIVITY = 0.5  # degrees per pixel
 
+# Root drag (Shift+drag joint 0) sensitivity — world units per pixel.
+_ROOT_DRAG_SENSITIVITY = 0.003
+
 # Grid floor constants (orbit mode reference plane).
 _GRID_SIZE = 10.0            # half-extent in meters (grid spans ±size)
 _GRID_DIVISIONS = 20         # number of cells per half (total 2*N lines per axis)
@@ -1027,6 +1030,7 @@ class MeshViewport(_BaseWidget):
 
     joint_clicked = Signal(int)
     joint_drag_updated = Signal(int, object)  # (joint_idx, euler_deg ndarray or None)
+    root_drag_committed = Signal(int, object)  # (person_id, offset_xyz ndarray)
     camera_changed = Signal(object)
     gl_rendered = Signal()  # emitted after paintGL completes
 
@@ -1104,7 +1108,8 @@ class MeshViewport(_BaseWidget):
         self._pose_override: dict | None = None
 
         # Joint drag-to-rotate state
-        self._drag_mode: str = "none"  # "none" | "orbit" | "joint_drag"
+        self._drag_mode: str = "none"  # "none" | "orbit" | "joint_drag" | "root_drag"
+        self._root_drag_offset: np.ndarray = np.zeros(3, dtype=np.float32)
         self._drag_joint: int = -1  # joint index being dragged
         self._drag_start_aa: np.ndarray | None = None  # original axis-angle (3,)
         self._drag_cumulative_R: object | None = None  # scipy Rotation
@@ -1133,6 +1138,9 @@ class MeshViewport(_BaseWidget):
         self._render_mode: RenderMode = RenderMode.FULL
         # Saved mode before auto-switch during scrubbing (None = not scrubbing)
         self._pre_scrub_mode: RenderMode | None = None
+
+        # Position anchor markers (purple crosshairs on ground plane)
+        self._pos_anchor_markers: list[np.ndarray] = []  # list of (3,) world positions
 
         # Status message for fallback rendering
         self._status_msg: str = ""
@@ -1461,6 +1469,17 @@ class MeshViewport(_BaseWidget):
                     bp[frame_idx, j_idx] = aa
             params["body_pose"] = bp
 
+        # Root position offset (Shift+drag on pelvis)
+        transl_offset = self._pose_override.get("transl_offset")
+        if transl_offset is not None:
+            key = "transl"  # already mapped from transl_world by caller
+            if key in params:
+                tr = np.array(params[key], dtype=np.float32)
+                if tr.ndim >= 2 and frame_idx < tr.shape[0]:
+                    tr = tr.copy()
+                    tr[frame_idx] = tr[frame_idx] + transl_offset
+                    params[key] = tr
+
         return params
 
     def set_interpolation_enabled(self, enabled: bool):
@@ -1661,8 +1680,14 @@ class MeshViewport(_BaseWidget):
                 self.joint_clicked.emit(hit)
                 if _HAS_GL:
                     self.update()
+                # Shift+click on pelvis (joint 0) → root drag mode
+                if hit == 0 and event.modifiers() & Qt.ShiftModifier:
+                    self._drag_mode = "root_drag"
+                    self._drag_joint = 0
+                    self._root_drag_offset = np.zeros(3, dtype=np.float32)
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
                 # Start joint drag if it's a body joint (0-21)
-                if 0 <= hit <= 21:
+                elif 0 <= hit <= 21:
                     self._drag_mode = "joint_drag"
                     self._drag_joint = hit
                     self._drag_start_aa = self._get_current_joint_aa(hit)
@@ -1676,8 +1701,8 @@ class MeshViewport(_BaseWidget):
             else:
                 self._drag_mode = "orbit"
 
-        # Track mouse position for drag (orbit or joint drag)
-        if self._camera_mode == "orbit" or self._drag_mode == "joint_drag":
+        # Track mouse position for drag (orbit, joint drag, or root drag)
+        if self._camera_mode == "orbit" or self._drag_mode in ("joint_drag", "root_drag"):
             self._mouse_last_pos = (event.position().x(), event.position().y())
         event.accept()
 
@@ -1687,6 +1712,16 @@ class MeshViewport(_BaseWidget):
         # Show HUD on any mouse activity over the viewport
         if self._hud_enabled:
             self._hud.show_with_timer()
+
+        # Root drag (Shift+drag pelvis) takes priority
+        if self._drag_mode == "root_drag" and self._mouse_last_pos is not None:
+            x, y = event.position().x(), event.position().y()
+            dx = x - self._mouse_last_pos[0]
+            dy = y - self._mouse_last_pos[1]
+            self._mouse_last_pos = (x, y)
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._handle_root_drag(dx, dy)
+            return
 
         # Joint drag-to-rotate takes priority over orbit
         if self._drag_mode == "joint_drag" and self._mouse_last_pos is not None:
@@ -1738,7 +1773,20 @@ class MeshViewport(_BaseWidget):
             self.camera_changed.emit(self._camera_state())
 
     def mouseReleaseEvent(self, event):
-        """End orbit/pan drag or joint drag."""
+        """End orbit/pan drag, joint drag, or root drag."""
+        if self._drag_mode == "root_drag":
+            offset = self._root_drag_offset.copy()
+            if np.linalg.norm(offset) > 1e-6:
+                self.root_drag_committed.emit(self._person_id, offset)
+            # Clear live preview
+            if self._pose_override:
+                self._pose_override.pop("transl_offset", None)
+                if not any(k != "frame_idx" for k in self._pose_override):
+                    self.set_pose_override(None)
+                else:
+                    self.set_pose_override(self._pose_override)
+            self._root_drag_offset = np.zeros(3, dtype=np.float32)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
         self._drag_mode = "none"
         self._mouse_last_pos = None
         event.accept()
@@ -1838,9 +1886,43 @@ class MeshViewport(_BaseWidget):
         euler_deg = R_final.as_euler("XYZ", degrees=True).astype(np.float32)
         self.joint_drag_updated.emit(self._drag_joint, euler_deg)
 
+    def _handle_root_drag(self, dx: float, dy: float):
+        """Translate root in XZ ground plane from mouse delta."""
+        # Camera right/forward projected onto XZ plane
+        cam_right = self._view[0, :3].copy().astype(np.float64)
+        cam_fwd = -self._view[2, :3].copy().astype(np.float64)
+        cam_right[1] = 0.0
+        cam_fwd[1] = 0.0
+        rn = np.linalg.norm(cam_right)
+        fn = np.linalg.norm(cam_fwd)
+        if rn > 1e-8:
+            cam_right /= rn
+        if fn > 1e-8:
+            cam_fwd /= fn
+
+        speed = self._orbit_distance * _ROOT_DRAG_SENSITIVITY
+        delta = (cam_right * float(dx) + cam_fwd * float(-dy)) * speed
+        self._root_drag_offset += delta.astype(np.float32)
+
+        # Live preview via pose_override
+        override = dict(self._pose_override or {})
+        override["frame_idx"] = self._current_frame
+        override["transl_offset"] = self._root_drag_offset.copy()
+        self.set_pose_override(override)
+
     def keyPressEvent(self, event):
-        """Esc cancels active joint drag preview."""
+        """Esc cancels active root drag or joint drag preview."""
         if event.key() == Qt.Key.Key_Escape:
+            # Cancel root drag first
+            if self._drag_mode == "root_drag":
+                self._root_drag_offset = np.zeros(3, dtype=np.float32)
+                if self._pose_override:
+                    self._pose_override.pop("transl_offset", None)
+                self.set_pose_override(None)
+                self._drag_mode = "none"
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                event.accept()
+                return
             if self._pose_override is not None:
                 joint_idx = self._drag_joint
                 self.set_pose_override(None)
@@ -2425,6 +2507,10 @@ class MeshViewport(_BaseWidget):
         if self._show_grid and self._camera_mode == "orbit":
             self._draw_grid()
 
+        # Position anchor markers (after grid, before mesh/skeleton)
+        if self._pos_anchor_markers:
+            self._draw_pos_anchor_markers()
+
         # Mesh triangles
         if (
             self._render_mode != RenderMode.WIREFRAME
@@ -2517,6 +2603,10 @@ class MeshViewport(_BaseWidget):
         # Grid floor (orbit mode only, drawn first so mesh occludes it)
         if self._show_grid and self._camera_mode == "orbit":
             self._draw_grid()
+
+        # Position anchor markers (after grid, before mesh/skeleton)
+        if self._pos_anchor_markers:
+            self._draw_pos_anchor_markers()
 
         # Mesh triangles — skip entirely in wireframe mode
         if (
@@ -2900,6 +2990,57 @@ class MeshViewport(_BaseWidget):
         normals = np.zeros_like(positions)
         self._draw_primitive(gl.GL_LINES, positions, normals, colors, line_width=1.0)
 
+        gl.glEnable(gl.GL_CULL_FACE)
+
+        self._shader.release()
+
+    def set_position_anchor_markers(self, markers: list[np.ndarray]):
+        """Set 3D positions for position anchor markers (purple crosshairs)."""
+        self._pos_anchor_markers = list(markers)
+        self.update()
+
+    def _draw_pos_anchor_markers(self):
+        """Draw purple XZ crosshairs at each position anchor's target location."""
+        if not _HAS_GL or not self._gl_ready or not self._pos_anchor_markers:
+            return
+
+        arm = 0.15  # metres
+        color = np.array([0.7, 0.3, 0.9], dtype=np.float32)
+
+        # Build line vertices (4 per marker: ±X arm, ±Z arm)
+        line_verts = []
+        for pos in self._pos_anchor_markers:
+            p = np.asarray(pos, dtype=np.float32)
+            line_verts.append(p + np.array([-arm, 0, 0], dtype=np.float32))
+            line_verts.append(p + np.array([arm, 0, 0], dtype=np.float32))
+            line_verts.append(p + np.array([0, 0, -arm], dtype=np.float32))
+            line_verts.append(p + np.array([0, 0, arm], dtype=np.float32))
+
+        positions = np.array(line_verts, dtype=np.float32)
+        colors = np.tile(color, (len(positions), 1))
+        normals = np.zeros_like(positions)
+
+        # Center dot vertices
+        dot_positions = np.array(
+            [np.asarray(p, dtype=np.float32) for p in self._pos_anchor_markers],
+            dtype=np.float32,
+        )
+        dot_colors = np.tile(color, (len(dot_positions), 1))
+        dot_normals = np.zeros_like(dot_positions)
+
+        self._shader.bind()
+
+        # Unlit (full ambient, zero light — same as grid)
+        self._set_mat4("model", np.eye(4, dtype=np.float32))
+        self._set_mat4("view", self._view)
+        self._set_mat4("projection", self._projection)
+        self._set_vec3("light_dir", _LIGHT_DIR)
+        self._set_vec3("light_color", np.zeros(3, dtype=np.float32))
+        self._set_vec3("ambient", np.ones(3, dtype=np.float32))
+
+        gl.glDisable(gl.GL_CULL_FACE)
+        self._draw_primitive(gl.GL_LINES, positions, normals, colors, line_width=2.0)
+        self._draw_primitive(gl.GL_POINTS, dot_positions, dot_normals, dot_colors, point_size=6.0)
         gl.glEnable(gl.GL_CULL_FACE)
 
         self._shader.release()

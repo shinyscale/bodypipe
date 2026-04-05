@@ -48,7 +48,13 @@ def frame_to_timecode(frame: int, fps: float) -> str:
 
 
 class FrameCache:
-    """LRU cache with read-ahead for sequential video access."""
+    """LRU cache with read-ahead for sequential video access.
+
+    Keeps a persistent cv2.VideoCapture handle so sequential playback
+    never re-opens/re-seeks the file.  On a cache miss the handle simply
+    continues reading from its current position (fast) or seeks only when
+    the requested frame is non-sequential (scrubbing).
+    """
 
     DEFAULT_READAHEAD = 15
     PLAYBACK_READAHEAD = 30
@@ -59,6 +65,10 @@ class FrameCache:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._maxsize = maxsize
         self._readahead = self.DEFAULT_READAHEAD
+        # Persistent VideoCapture handle
+        self._cap: cv2.VideoCapture | None = None
+        self._cap_path: str = ""
+        self._cap_next_frame: int = -1  # frame index the handle will read next
 
     @property
     def readahead(self) -> int:
@@ -84,6 +94,29 @@ class FrameCache:
 
     def clear(self):
         self._cache.clear()
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+            self._cap_path = ""
+            self._cap_next_frame = -1
+
+    def _ensure_cap(self, video_path: Path) -> cv2.VideoCapture | None:
+        """Return a persistent VideoCapture, re-opening only if path changed."""
+        path_str = str(video_path)
+        if self._cap is not None and self._cap_path == path_str and self._cap.isOpened():
+            return self._cap
+        # Different file or stale handle — (re)open
+        if self._cap is not None:
+            self._cap.release()
+        self._cap = cv2.VideoCapture(path_str)
+        if not self._cap.isOpened():
+            self._cap = None
+            self._cap_path = ""
+            self._cap_next_frame = -1
+            return None
+        self._cap_path = path_str
+        self._cap_next_frame = 0
+        return self._cap
 
     def get_frame(self, video_path: Path, frame_idx: int) -> np.ndarray | None:
         """Get frame with read-ahead caching on miss."""
@@ -91,17 +124,21 @@ class FrameCache:
         if cached is not None:
             return cached
 
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
+        cap = self._ensure_cap(video_path)
+        if cap is None:
             return None
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        # Seek only when the handle isn't already at the right position
+        if self._cap_next_frame != frame_idx:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            self._cap_next_frame = frame_idx
+
         for i in range(self._readahead + 1):
             ret, frame = cap.read()
             if not ret:
                 break
             self.put(frame_idx + i, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        cap.release()
+            self._cap_next_frame = frame_idx + i + 1
         return self.get(frame_idx)
 
 
@@ -395,6 +432,15 @@ class VideoPlayer(QWidget):
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
 
+        # Scrub throttle — limits frame_changed emissions during fast slider
+        # drags to at most ~20 Hz so downstream work (mesh recompute, video
+        # decode, overlay compositing) can't pile up and freeze the UI.
+        self._scrub_pending: int | None = None
+        self._scrub_timer = QTimer(self)
+        self._scrub_timer.setSingleShot(True)
+        self._scrub_timer.setInterval(50)  # ms
+        self._scrub_timer.timeout.connect(self._flush_scrub)
+
     # ------------------------------------------------------------------
     # UI Setup
     # ------------------------------------------------------------------
@@ -540,7 +586,7 @@ class VideoPlayer(QWidget):
         self._display.drag_rect.connect(self.bbox_dragged.emit)
         self._slider.valueChanged.connect(self._on_slider_changed)
         self._slider.sliderPressed.connect(self.scrub_started.emit)
-        self._slider.sliderReleased.connect(self.scrub_ended.emit)
+        self._slider.sliderReleased.connect(self._on_slider_released)
         self._btn_first.clicked.connect(lambda: self.seek(0))
         self._btn_last.clicked.connect(lambda: self.seek(self._num_frames - 1))
         self._btn_back1.clicked.connect(lambda: self.seek(self._current_frame - 1))
@@ -669,7 +715,28 @@ class VideoPlayer(QWidget):
     def _on_slider_changed(self, value: int):
         self._current_frame = value
         self._update_label()
-        self.frame_changed.emit(value)
+        # If the slider is being dragged, throttle frame_changed so
+        # expensive downstream work doesn't pile up and freeze the UI.
+        if self._slider.isSliderDown():
+            self._scrub_pending = value
+            if not self._scrub_timer.isActive():
+                self._scrub_timer.start()
+        else:
+            self._scrub_pending = None
+            self.frame_changed.emit(value)
+
+    def _flush_scrub(self):
+        """Emit the most recent scrub position (called by throttle timer)."""
+        if self._scrub_pending is not None:
+            value = self._scrub_pending
+            self._scrub_pending = None
+            self.frame_changed.emit(value)
+
+    def _on_slider_released(self):
+        """Flush any pending scrub frame and emit scrub_ended."""
+        self._scrub_timer.stop()
+        self._flush_scrub()
+        self.scrub_ended.emit()
 
     def _show_current_frame(self):
         frame = self.get_raw_frame()

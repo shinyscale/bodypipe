@@ -218,7 +218,7 @@ def mirror_lr_pose_soma_fallback(soma_params: dict, frame: int) -> dict[int, np.
     return mirrored
 
 
-def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
+def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx: int, *, use_world: bool = False) -> np.ndarray:
     """Get current XYZ euler angles (degrees) for a joint.
 
     Checks CorrectionTrack first, then falls back to raw params.
@@ -228,7 +228,7 @@ def get_joint_euler(session: Session, person_id: int, frame_idx: int, joint_idx:
     if aa_to_euler is None:
         aa_to_euler = axis_angle_to_euler_deg_fallback
 
-    aa = _get_joint_axis_angle(session, person_id, frame_idx, joint_idx)
+    aa = _get_joint_axis_angle(session, person_id, frame_idx, joint_idx, use_world=use_world)
     return aa_to_euler(aa)
 
 
@@ -243,8 +243,16 @@ def _get_soma_joint_axis_angle(soma_params: dict, frame_idx: int, joint_idx: int
     return np.zeros(3, dtype=np.float32)
 
 
-def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, joint_idx: int) -> np.ndarray:
-    """Get current axis-angle (3,) for a joint, including committed corrections."""
+def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, joint_idx: int, *, use_world: bool = False) -> np.ndarray:
+    """Get current axis-angle (3,) for a joint, including committed corrections.
+
+    Parameters
+    ----------
+    use_world : bool
+        If True and ``global_orient_world`` exists in the params, read from
+        the world-space orientation instead of camera-space.  This must match
+        what the viewport actually renders (orbit mode uses world space).
+    """
     if session is None or person_id < 0:
         return np.zeros(3, dtype=np.float32)
 
@@ -276,7 +284,8 @@ def _get_joint_axis_angle(session: Session, person_id: int, frame_idx: int, join
     # Fall back to raw params
     try:
         if joint_idx == 0:
-            go = np.asarray(params["global_orient"], dtype=np.float32)
+            go_key = "global_orient_world" if (use_world and "global_orient_world" in params) else "global_orient"
+            go = np.asarray(params[go_key], dtype=np.float32)
             if go.ndim >= 2 and frame_idx < go.shape[0]:
                 return go[frame_idx].ravel()[:3]
             elif go.ndim == 1:
@@ -854,8 +863,15 @@ class PoseCorrectorPanel(QWidget):
         self._foot_anchors: list[tuple[int, str, np.ndarray]] = []  # (frame, "left"/"right", pos)
         self._foot_slide_applied_spans: list[tuple[int, int]] = []  # for timeline markers
         self._drift_correction_spans: list[tuple[int, int]] = []
+        self._position_correction_frames: dict[int, list[int]] = {}  # pid → [frame, ...]
         self._foot_pinned: bool = False  # Pin/Unpin toggle state
         self._foot_pin_frame: int = -1  # frame where Pin was set
+
+        # Position lock (root drag anchors) — mirrors foot lock pattern
+        self._pos_anchors: list[tuple[int, np.ndarray]] = []  # (frame, target_root_pos)
+        self._pos_pinned: bool = False
+        self._pos_pin_frame: int = -1
+        self._pos_applied_spans: list[tuple[int, int]] = []  # for timeline markers
 
         self._setup_ui()
         self._connect_signals()
@@ -1372,6 +1388,15 @@ class PoseCorrectorPanel(QWidget):
         lay = QVBoxLayout(container)
         lay.setContentsMargins(8, 8, 8, 8)
 
+        # Raw body pose toggle (bypass IK foot stabilization)
+        self._raw_pose_chk = QCheckBox("Use raw body pose (bypass IK foot stabilization)")
+        self._raw_pose_chk.setToolTip(
+            "Use the raw GVHMR model output instead of IK-stabilized body_pose.\n"
+            "Better for dance and rapid foot motion. Requires re-run with updated pipeline."
+        )
+        self._raw_pose_chk.setEnabled(False)
+        lay.addWidget(self._raw_pose_chk)
+
         # Foot selector + blend frames
         grid = QGridLayout()
         grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
@@ -1481,6 +1506,52 @@ class PoseCorrectorPanel(QWidget):
         self._drift_status.setWordWrap(True)
         drift_section.content_layout.addWidget(self._drift_status)
         lay.addWidget(drift_section)
+
+        # Collapsible position correction section (expanded for discoverability)
+        pos_section = _CollapsibleSection("Position Corrections", collapsed=False)
+        pos_hint = QLabel("Shift + drag pelvis to set position anchor")
+        pos_hint.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 12px;"
+        )
+        pos_hint.setWordWrap(True)
+        pos_section.content_layout.addWidget(pos_hint)
+
+        # Anchor table — Frame, Position (XZ), Del
+        pos_section.content_layout.addWidget(QLabel("Anchors:"))
+        self._pos_anchor_table = QTableWidget(0, 3)
+        self._pos_anchor_table.setHorizontalHeaderLabels(
+            ["Frame", "Position", "Del"]
+        )
+        self._pos_anchor_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self._pos_anchor_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self._pos_anchor_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self._pos_anchor_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._pos_anchor_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._pos_anchor_table.setMaximumHeight(140)
+        pos_section.content_layout.addWidget(self._pos_anchor_table)
+
+        # Action buttons
+        pos_btn_row = QHBoxLayout()
+        self._apply_pos_btn = QPushButton("Apply Position Lock")
+        pos_btn_row.addWidget(self._apply_pos_btn)
+        self._clear_pos_anchors_btn = QPushButton("Clear Position Anchors")
+        pos_btn_row.addWidget(self._clear_pos_anchors_btn)
+        pos_section.content_layout.addLayout(pos_btn_row)
+
+        # Status
+        self._pos_correction_status = QLabel("No anchors set — Shift+drag pelvis")
+        self._pos_correction_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._pos_correction_status.setWordWrap(True)
+        pos_section.content_layout.addWidget(self._pos_correction_status)
+        lay.addWidget(pos_section)
 
         lay.addStretch()
         scroll.setWidget(container)
@@ -1612,10 +1683,16 @@ class PoseCorrectorPanel(QWidget):
             self._ai_reject_btn.clicked.connect(self._on_ai_reject)
 
         # Feet tab
+        self._raw_pose_chk.toggled.connect(self._on_raw_pose_toggled)
         self._pin_foot_btn.clicked.connect(self._on_pin_foot_toggle)
         self._apply_foot_btn.clicked.connect(self._on_apply_foot_lock)
         self._clear_anchors_btn.clicked.connect(self._on_clear_anchors)
         self._remove_drift_btn.clicked.connect(self._on_remove_drift)
+
+        # Root position drag (Shift+drag pelvis in viewport) — anchor-based
+        self._viewport.root_drag_committed.connect(self._on_root_drag_committed)
+        self._apply_pos_btn.clicked.connect(self._on_apply_position_lock)
+        self._clear_pos_anchors_btn.clicked.connect(self._on_clear_pos_anchors)
 
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
@@ -1652,6 +1729,16 @@ class PoseCorrectorPanel(QWidget):
         self._update_sliders()
         self._refresh_corrections_table()
         self._refresh_space_table()
+
+        # Enable/disable raw pose toggle based on data availability
+        track = self._session.person_tracks.get(person_id)
+        has_raw = (track is not None and track.smplx_params is not None
+                   and "body_pose_raw" in track.smplx_params)
+        self._raw_pose_chk.setEnabled(has_raw)
+        if not has_raw:
+            self._raw_pose_chk.blockSignals(True)
+            self._raw_pose_chk.setChecked(False)
+            self._raw_pose_chk.blockSignals(False)
 
     def on_frame_changed(self, frame_idx: int):
         """Update frame externally."""
@@ -1716,6 +1803,17 @@ class PoseCorrectorPanel(QWidget):
         self._update_sliders()
         self._refresh_corrections_table()
         self._refresh_space_table()
+
+    def _use_world_orient(self) -> bool:
+        """True when the viewport renders world-space orientation (orbit mode)."""
+        if self._camera_combo.currentIndex() != 1:  # not orbit
+            return False
+        if self._current_person < 0:
+            return False
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return False
+        return "global_orient_world" in track.smplx_params
 
     def _on_camera_mode_changed(self, idx: int):
         """Handle camera mode dropdown change."""
@@ -1811,7 +1909,8 @@ class PoseCorrectorPanel(QWidget):
             return None
         params = track.smplx_params
         if joint_idx == 0:
-            go = np.array(params.get("global_orient", []), dtype=np.float32)
+            go_key = "global_orient_world" if self._use_world_orient() else "global_orient"
+            go = np.array(params.get(go_key, []), dtype=np.float32)
             if go.ndim >= 2 and frame_idx < go.shape[0]:
                 return go[frame_idx].copy()
         elif 1 <= joint_idx <= 21:
@@ -3318,6 +3417,7 @@ class PoseCorrectorPanel(QWidget):
         euler = get_joint_euler(
             self._session, self._current_person,
             self._current_frame, self._current_joint,
+            use_world=self._use_world_orient(),
         )
 
         self._updating_sliders = True
@@ -3346,7 +3446,9 @@ class PoseCorrectorPanel(QWidget):
         """Apply axis-angle correction directly to session params.
 
         This updates the raw smplx_params so the mesh renders correctly
-        without the temporary pose override.
+        without the temporary pose override.  In orbit mode with world-space
+        data, writes to ``global_orient_world`` to match what the viewport
+        renders.
         """
         track = self._session.person_tracks.get(self._current_person)
         if not track or not track.smplx_params:
@@ -3355,10 +3457,11 @@ class PoseCorrectorPanel(QWidget):
         params = track.smplx_params
 
         if joint_idx == 0:
-            go = np.array(params.get("global_orient", []), dtype=np.float32)
+            go_key = "global_orient_world" if self._use_world_orient() else "global_orient"
+            go = np.array(params.get(go_key, []), dtype=np.float32)
             if go.ndim >= 2 and frame_idx < go.shape[0]:
                 go[frame_idx] = aa.astype(np.float32)
-                params["global_orient"] = go
+                params[go_key] = go
         elif 1 <= joint_idx <= 21:
             bp = np.array(params.get("body_pose", []), dtype=np.float32)
             if bp.ndim == 2 and bp.shape[-1] != 3:
@@ -3612,6 +3715,23 @@ class PoseCorrectorPanel(QWidget):
         else:
             self._pin_foot_btn.setText("Pin Foot at Current Frame")
             self._pin_foot_btn.setToolTip("Pin the selected foot at the current frame's position")
+
+    def _on_raw_pose_toggled(self, checked: bool):
+        """Swap between raw and IK-stabilized body_pose."""
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.smplx_params is None:
+            return
+        params = track.smplx_params
+
+        if checked and "body_pose_raw" in params:
+            if "body_pose_ik" not in params:
+                params["body_pose_ik"] = params["body_pose"]
+            params["body_pose"] = params["body_pose_raw"]
+        elif not checked and "body_pose_ik" in params:
+            params["body_pose"] = params["body_pose_ik"]
+
+        self._viewport.invalidate_cache()
+        self._viewport.refresh()
 
     def _on_pin_foot_toggle(self):
         """Toggle: Pin sets the in-point, Unpin sets the out-point."""
@@ -4003,6 +4123,238 @@ class PoseCorrectorPanel(QWidget):
             self._current_person,
             foot_pin_frames=pin_frames,
         )
+
+    # ------------------------------------------------------------------
+    # Root position drag
+    # ------------------------------------------------------------------
+
+    def _on_root_drag_committed(self, person_id: int, offset: object):
+        """Record position anchor from viewport Shift+drag (don't bake yet)."""
+        offset = np.asarray(offset, dtype=np.float32)
+        if self._session is None or person_id < 0:
+            return
+
+        track = self._session.person_tracks.get(person_id)
+        if track is None or track.smplx_params is None:
+            return
+        if "transl_world" not in track.smplx_params:
+            self._pos_correction_status.setText("No world translations — use orbit mode")
+            return
+
+        tw = track.smplx_params["transl_world"]
+        frame = self._current_frame
+        if frame < 0 or frame >= tw.shape[0]:
+            return
+
+        # Compute desired target root position
+        target = (tw[frame] + offset).copy()
+
+        # Store anchor (sorted by frame)
+        self._pos_anchors.append((frame, target))
+        self._pos_anchors.sort(key=lambda a: a[0])
+
+        # Set pinned state
+        self._pos_pinned = True
+        self._pos_pin_frame = frame
+
+        # Auto-set range from anchor extent + blend
+        blend = self._blend_spin.value()
+        n_frames = tw.shape[0]
+        first_anchor_frame = self._pos_anchors[0][0]
+        last_anchor_frame = self._pos_anchors[-1][0]
+        self._foot_range_start.setValue(max(0, first_anchor_frame - blend))
+        self._foot_range_end.setValue(min(n_frames - 1, last_anchor_frame + blend))
+
+        # Refresh UI
+        self._refresh_pos_anchor_table()
+        self._push_pos_anchor_markers()
+
+        n = len(self._pos_anchors)
+        self._pos_correction_status.setText(
+            f"Anchor at frame {frame} — {n} anchor{'s' if n != 1 else ''} set. "
+            f"Drag more or Apply."
+        )
+        log.info(
+            "Position anchor: pid=%d, frame=%d, target=(%.2f, %.2f, %.2f)",
+            person_id, frame, target[0], target[1], target[2],
+        )
+
+    def _on_apply_position_lock(self):
+        """Compute position offsets from anchors and bake into transl_world."""
+        if not self._pos_anchors:
+            self._pos_correction_status.setText("No anchors set — Shift+drag pelvis first")
+            return
+        if self._session is None or self._current_person < 0:
+            self._pos_correction_status.setText("No person selected")
+            return
+
+        pid = self._current_person
+        track = self._session.person_tracks.get(pid)
+        if track is None or track.smplx_params is None:
+            self._pos_correction_status.setText("No params for current person")
+            return
+        if "transl_world" not in track.smplx_params:
+            self._pos_correction_status.setText("No world translations — use orbit mode")
+            return
+
+        try:
+            from pose_correction import compute_position_offsets
+        except ImportError:
+            self._pos_correction_status.setText("Backend unavailable (pose_correction)")
+            return
+
+        tw = track.smplx_params["transl_world"]
+        f_start = self._foot_range_start.value()
+        f_end = self._foot_range_end.value()
+        blend = self._blend_spin.value()
+
+        if f_start >= f_end:
+            self._pos_correction_status.setText("Invalid range: start must be < end")
+            return
+
+        offsets = compute_position_offsets(
+            transl=tw,
+            anchors=[(f, pos) for f, pos in self._pos_anchors],
+            frame_start=f_start,
+            frame_end=f_end,
+            blend_frames=blend,
+            propagate=True,
+        )
+
+        if not offsets:
+            self._pos_correction_status.setText("No offsets computed")
+            return
+
+        # Snapshot for undo (from f_start through end of track)
+        num_frames = tw.shape[0]
+        old_tw = tw[f_start:].copy()
+
+        # Extract tail offset for propagation beyond f_end
+        tail_offset = offsets.get(f_end, np.zeros(3, dtype=np.float32))
+
+        # Apply offsets within the corrected range
+        for f, offset in offsets.items():
+            if 0 <= f < num_frames:
+                tw[f] += offset
+
+        # Propagate tail offset to all frames beyond f_end
+        if f_end + 1 < num_frames:
+            tw[f_end + 1:] += tail_offset
+
+        # Undo/redo closures
+        def undo(
+            _tw=tw, _start=f_start, _old=old_tw,
+        ):
+            _tw[_start:] = _old
+            self._viewport.refresh()
+
+        def redo(
+            _tw=tw, _start=f_start, _num=num_frames,
+            _offsets=offsets, _tail=tail_offset, _fend=f_end,
+        ):
+            for _f, _off in _offsets.items():
+                if 0 <= _f < _num:
+                    _tw[_f] += _off
+            if _fend + 1 < _num:
+                _tw[_fend + 1:] += _tail
+            self._viewport.refresh()
+
+        self._session.undo_stack.push(
+            UndoEntry("Position lock correction", undo, redo)
+        )
+
+        # Track the corrected span for timeline markers
+        self._pos_applied_spans.append((f_start, num_frames - 1))
+        if self._track_overview is not None:
+            self._track_overview.set_track_markers(
+                pid,
+                position_correction_frames=list(
+                    range(f_start, min(f_end + 1, num_frames))
+                ),
+            )
+
+        self._viewport.refresh()
+
+        n_anchors = len(self._pos_anchors)
+        n_frames_corrected = len(offsets) + max(0, num_frames - 1 - f_end)
+        self._pos_correction_status.setText(
+            f"Applied {n_anchors} anchor{'s' if n_anchors != 1 else ''} — "
+            f"{n_frames_corrected} frames corrected ({f_start}–{num_frames - 1})"
+        )
+        log.info(
+            "Position lock: pid=%d, %d anchors, range=%d-%d, %d offsets applied",
+            pid, n_anchors, f_start, f_end, n_frames_corrected,
+        )
+
+        # Clear anchors (consumed) and reset pin state
+        self._pos_anchors.clear()
+        self._pos_pinned = False
+        self._pos_pin_frame = -1
+        self._refresh_pos_anchor_table()
+        self._push_pos_anchor_markers()
+
+    def _on_clear_pos_anchors(self):
+        """Clear all position anchors and reset state."""
+        self._pos_anchors.clear()
+        self._pos_pinned = False
+        self._pos_pin_frame = -1
+        self._refresh_pos_anchor_table()
+        self._push_pos_anchor_markers()
+
+        # Also clear timeline markers
+        pid = self._current_person
+        if pid in self._position_correction_frames:
+            self._position_correction_frames[pid].clear()
+        if self._track_overview is not None and pid >= 0:
+            self._track_overview.set_track_markers(
+                pid,
+                position_correction_frames=[],
+            )
+        self._pos_correction_status.setText("No anchors set — Shift+drag pelvis")
+
+    def _refresh_pos_anchor_table(self):
+        """Refresh the position anchor table widget from internal state."""
+        self._pos_anchor_table.setRowCount(len(self._pos_anchors))
+        for row, (frame, pos) in enumerate(self._pos_anchors):
+            self._pos_anchor_table.setItem(
+                row, 0, QTableWidgetItem(str(frame))
+            )
+            self._pos_anchor_table.setItem(
+                row, 1,
+                QTableWidgetItem(f"{pos[0]:.2f}, {pos[2]:.2f}"),
+            )
+            del_btn = QPushButton("\u00d7")  # ×
+            del_btn.setFixedSize(24, 20)
+            del_btn.setStyleSheet("border: none; font-weight: bold;")
+            del_btn.clicked.connect(lambda _checked, r=row: self._delete_pos_anchor(r))
+            self._pos_anchor_table.setCellWidget(row, 2, del_btn)
+
+    def _delete_pos_anchor(self, row: int):
+        """Remove a single position anchor by row index."""
+        if 0 <= row < len(self._pos_anchors):
+            self._pos_anchors.pop(row)
+            self._refresh_pos_anchor_table()
+            self._push_pos_anchor_markers()
+            n = len(self._pos_anchors)
+            self._pos_correction_status.setText(
+                f"{n} anchor{'s' if n != 1 else ''} set — drag more or Apply"
+                if n > 0 else "No anchors set — Shift+drag pelvis"
+            )
+
+    def _push_pos_anchor_markers(self):
+        """Push position anchor frames to the track overview as coral squares
+        and 3D crosshair markers to the viewport."""
+        if self._track_overview is None or self._current_person < 0:
+            return
+        anchor_frames = sorted({a[0] for a in self._pos_anchors})
+        self._track_overview.set_track_markers(
+            self._current_person,
+            position_correction_frames=anchor_frames,
+        )
+        if self._viewport is not None:
+            self._viewport.set_position_anchor_markers(
+                [pos for (_frame, pos) in self._pos_anchors]
+            )
 
     def _update_foot_velocity(self):
         """Compute and display foot speed at the current frame."""

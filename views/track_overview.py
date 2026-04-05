@@ -74,6 +74,7 @@ _COLOR_FOOT_SLIDE = QColor("#00b894")  # teal, foot-slide correction spans
 _COLOR_FOOT_SLIDE.setAlpha(80)
 _COLOR_DRIFT = QColor("#6c5ce7")  # purple, drift correction spans
 _COLOR_DRIFT.setAlpha(80)
+_COLOR_POSITION = QColor("#e17055")  # coral, position correction markers
 
 
 def _conf_color(conf: float) -> QColor:
@@ -112,6 +113,7 @@ class _TrackLaneItem(QGraphicsItem):
         self._foot_slide_spans: list[tuple[int, int]] = []
         self._drift_correction_spans: list[tuple[int, int]] = []
         self._foot_pin_frames: list[int] = []
+        self._position_correction_frames: list[int] = []
         self._collapsed = False
         self.setPos(0, y_pos)
 
@@ -246,6 +248,16 @@ class _TrackLaneItem(QGraphicsItem):
                 if f_start <= f < f_end:
                     painter.drawEllipse(QPointF(f + 0.5, pin_cy), pin_rx, 2.5)
 
+        # -- position correction markers (coral squares, mid-lane) ---------
+        if self._position_correction_frames:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(_COLOR_POSITION)
+            cy = LANE_HEIGHT / 2.0
+            hw = 2.5 * inv
+            for f in self._position_correction_frames:
+                if f_start <= f < f_end:
+                    painter.drawRect(QRectF(f + 0.5 - hw, cy - 2.5, 2 * hw, 5.0))
+
         # -- lane border --------------------------------------------------
         pen = QPen(_COLOR_BORDER, 1)
         pen.setCosmetic(True)
@@ -298,6 +310,10 @@ class _TrackLaneItem(QGraphicsItem):
 
     def set_foot_pin_frames(self, frames: list[int]):
         self._foot_pin_frames = list(frames)
+        self.update()
+
+    def set_position_correction_frames(self, frames: list[int]):
+        self._position_correction_frames = list(frames)
         self.update()
 
     def set_collapsed(self, collapsed: bool):
@@ -650,6 +666,7 @@ class TrackOverview(QWidget):
         foot_slide_spans: list[tuple[int, int]] | None = None,
         foot_pin_frames: list[int] | None = None,
         drift_correction_spans: list[tuple[int, int]] | None = None,
+        position_correction_frames: list[int] | None = None,
     ):
         """Set additional markers for a specific person's track lane."""
         lane = self._lanes.get(person_id)
@@ -671,6 +688,8 @@ class TrackOverview(QWidget):
             lane.set_foot_pin_frames(foot_pin_frames)
         if drift_correction_spans is not None:
             lane.set_drift_correction_spans(drift_correction_spans)
+        if position_correction_frames is not None:
+            lane.set_position_correction_frames(position_correction_frames)
 
     def set_num_frames(self, num_frames: int):
         """Update total frame count for timeline scaling."""
