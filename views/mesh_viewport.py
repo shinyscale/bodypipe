@@ -584,6 +584,27 @@ def estimate_K(width: int, height: int) -> np.ndarray:
     return K
 
 
+def scale_K_to_viewport(
+    K: np.ndarray,
+    img_w: int,
+    img_h: int,
+    vp_w: int,
+    vp_h: int,
+) -> np.ndarray:
+    """Scale intrinsics *K* from image coords to viewport coords (fit, centered).
+
+    Uniform-scales so the full image fits inside the viewport (letterbox/pillarbox),
+    then shifts cx/cy so the image is centered in the viewport.
+    """
+    s = min(vp_w / img_w, vp_h / img_h)
+    K_s = K.astype(np.float32).copy()
+    K_s[0, 0] *= s   # fx
+    K_s[1, 1] *= s   # fy
+    K_s[0, 2] = K[0, 2] * s + (vp_w - img_w * s) / 2  # cx
+    K_s[1, 2] = K[1, 2] * s + (vp_h - img_h * s) / 2  # cy
+    return K_s
+
+
 def compute_orbit_view(
     yaw_deg: float,
     pitch_deg: float,
@@ -935,12 +956,9 @@ def compute_frustum_lines(
     # Transform to world (OpenCV cam: Z-forward, Y-down)
     corners_world = (R @ rays_cam.T).T + t  # (4, 3)
 
-    # Convert origin and corners to GL coords (Y-up): swap Y and Z, negate new Z
-    def cv_to_gl(p):
-        return np.array([p[0], -p[1], -p[2]], dtype=np.float32)
-
-    origin = cv_to_gl(t)
-    gl_corners = np.array([cv_to_gl(c) for c in corners_world])
+    # c2w translations are already in Y-up world space
+    origin = t.astype(np.float32)
+    gl_corners = corners_world.astype(np.float32)
 
     verts = []
     # 4 pyramid edges (origin → corner)
@@ -954,7 +972,7 @@ def compute_frustum_lines(
     # Up tick on top edge midpoint
     top_mid = (gl_corners[0] + gl_corners[1]) * 0.5
     cam_up = R @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
-    cam_up_gl = np.array([cam_up[0], -cam_up[1], -cam_up[2]], dtype=np.float32)
+    cam_up_gl = cam_up.astype(np.float32)
     tick_end = top_mid + cam_up_gl * (depth * 0.15)
     verts.append(top_mid)
     verts.append(tick_end)
@@ -989,13 +1007,8 @@ def compute_camera_trail(
     if end - start < 2:
         return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
 
-    # Extract origins and convert OpenCV → GL (Y-up)
-    origins = c2w_all[start:end, :3, 3].copy()  # (K, 3)
-    gl_origins = np.column_stack([
-        origins[:, 0],
-        -origins[:, 1],
-        -origins[:, 2],
-    ]).astype(np.float32)
+    # Extract origins (already in Y-up world space)
+    gl_origins = c2w_all[start:end, :3, 3].astype(np.float32)
 
     # Build line pairs: frame[i] → frame[i+1]
     K = gl_origins.shape[0]
@@ -1367,6 +1380,8 @@ class MeshViewport(_BaseWidget):
         if frame_idx == self._current_frame:
             return
         self._current_frame = frame_idx
+        if self._camera_mode == "incam" and self._data_is_global:
+            self._update_camera()
         self._refresh_mesh()
 
     @property
@@ -1411,7 +1426,7 @@ class MeshViewport(_BaseWidget):
         self._vertex_cache.clear()  # vertices depend on camera mode (incam vs world params)
         if mode == "orbit":
             self._orbit_auto_centered = False  # force re-center on mode switch
-            self._auto_center_orbit()
+        self._refresh_mesh()  # recompute joints/vertices in new mode's coordinate space
         self._update_camera()
         self.camera_changed.emit(self._camera_state())
 
@@ -1752,6 +1767,29 @@ class MeshViewport(_BaseWidget):
             }
         return {"mode": "incam"}
 
+    def _use_world_params(self) -> bool:
+        """Whether to use world-space orient/transl for joints and vertices."""
+        if not self._data_is_global:
+            return False
+        if self._camera_mode == "orbit":
+            return True
+        # incam: need per-frame camera pose to project world-space data
+        sess = self._session
+        return (sess is not None
+                and (sess.derived_c2w is not None or sess.slam_c2w is not None))
+
+    def _incam_world_view(self, frame_idx: int) -> np.ndarray | None:
+        """Per-frame incam view matrix from camera-to-world data."""
+        sess = self._session
+        if sess is None:
+            return None
+        c2w_all = sess.derived_c2w if sess.derived_c2w is not None else sess.slam_c2w
+        if c2w_all is None:
+            return None
+        idx = min(frame_idx, len(c2w_all) - 1)
+        w2c = np.linalg.inv(c2w_all[idx])
+        return (_CV_TO_GL @ w2c).astype(np.float32)
+
     def _update_camera(self):
         """Recompute model/view/projection from current camera state."""
         if self._camera_mode == "orbit":
@@ -1769,7 +1807,11 @@ class MeshViewport(_BaseWidget):
             )
         else:  # incam
             self._model_mat = np.eye(4, dtype=np.float32)
-            self._view = _CV_TO_GL.copy()
+            world_view = self._incam_world_view(self._current_frame)
+            if world_view is not None and self._data_is_global:
+                self._view = world_view
+            else:
+                self._view = _CV_TO_GL.copy()  # fallback: camera-space data
         w = self.width() if self.width() > 0 else 200
         h = self.height() if self.height() > 0 else 150
         self._update_projection(w, h)
@@ -2192,11 +2234,11 @@ class MeshViewport(_BaseWidget):
             )
             return None
 
-        # In orbit mode, use world-space orient/transl if available
+        # Use world-space orient/transl if available and appropriate
         # so characters stay grounded while the camera orbits freely
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
+        if ("global_orient_world" in params
+                and "transl_world" in params
+                and self._use_world_params()):
             params = self._world_params_for_person(params, self._person_id)
 
         # Apply interpolation between correction keyframes
@@ -2484,11 +2526,11 @@ class MeshViewport(_BaseWidget):
         if params is None:
             return None
 
-        # In orbit mode, use world-space orient/transl so the mesh matches
+        # Use world-space orient/transl so the mesh matches
         # the world-grounded skeleton positions
-        if (self._camera_mode == "orbit"
-                and "global_orient_world" in params
-                and "transl_world" in params):
+        if ("global_orient_world" in params
+                and "transl_world" in params
+                and self._use_world_params()):
             params = self._world_params_for_person(params, person_id)
 
         # Apply interpolation between correction keyframes
@@ -2654,8 +2696,8 @@ class MeshViewport(_BaseWidget):
         """
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
-        # Grid floor (orbit mode only)
-        if self._show_grid and self._camera_mode == "orbit":
+        # Grid floor
+        if self._show_grid:
             self._draw_grid()
 
         # Position anchor markers (after grid, before mesh/skeleton)
@@ -2755,8 +2797,8 @@ class MeshViewport(_BaseWidget):
             gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_FALSE)
 
-        # Grid floor (orbit mode only, drawn first so mesh occludes it)
-        if self._show_grid and self._camera_mode == "orbit":
+        # Grid floor (drawn first so mesh occludes it)
+        if self._show_grid:
             self._draw_grid()
 
         # Position anchor markers (after grid, before mesh/skeleton)
@@ -3242,7 +3284,7 @@ class MeshViewport(_BaseWidget):
         # Trail
         trail_pos, trail_col = compute_camera_trail(c2w_all, frame)
         # Camera origin dot (in GL coords)
-        origin_gl = np.array([[c2w[0, 3], -c2w[1, 3], -c2w[2, 3]]], dtype=np.float32)
+        origin_gl = c2w[:3, 3].reshape(1, 3).astype(np.float32)
         dot_col = np.array([[0.0, 1.0, 1.0]], dtype=np.float32)
 
         self._shader.bind()
@@ -3454,6 +3496,15 @@ class MeshViewport(_BaseWidget):
                 self._camera_mode, self._gl_ready,
             )
 
+        # Compute grid floor level for non-orbit modes (orbit computes in _auto_center_orbit)
+        if self._joint_positions is not None and self._camera_mode != "orbit":
+            pts = self._joint_positions
+            if self._data_is_global:
+                self._grid_y = float(np.min(pts[:, 1]))
+            else:
+                # CV space: Y-down, so feet = max Y. GL space: Y-up, feet = -max(Y)
+                self._grid_y = float(-np.max(pts[:, 1]))
+
         # Compute joints for ALL persons (multi-person view)
         self._all_joint_positions.clear()
         self._all_active_skels.clear()
@@ -3463,10 +3514,10 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
                     continue
-                # In orbit mode, use world-space orient/transl
-                if (self._camera_mode == "orbit"
-                        and "global_orient_world" in params
-                        and "transl_world" in params):
+                # Use world-space orient/transl when appropriate
+                if ("global_orient_world" in params
+                        and "transl_world" in params
+                        and self._use_world_params()):
                     params = self._world_params_for_person(params, pid)
                 try:
                     joints = forward_kinematics(params, self._current_frame)
@@ -3562,11 +3613,18 @@ class MeshViewport(_BaseWidget):
         else:
             if self._session and self._session.camera_K is not None:
                 K = self._session.camera_K
+                img_w = self._session.img_width or w
+                img_h = self._session.img_height or h
             elif self._session and self._session.img_width > 0:
-                K = estimate_K(self._session.img_width, self._session.img_height)
+                img_w = self._session.img_width
+                img_h = self._session.img_height
+                K = estimate_K(img_w, img_h)
             else:
                 K = estimate_K(w, h)
-            self._projection = k_to_projection(K, w, h)
+                img_w, img_h = w, h
+            # Scale K from image coords to widget coords (fit + center)
+            K_vp = scale_K_to_viewport(K, img_w, img_h, w, h)
+            self._projection = k_to_projection(K_vp, w, h)
 
     def _set_mat4(self, name: str, mat: np.ndarray):
         loc = self._shader.uniformLocation(name)
