@@ -1245,6 +1245,8 @@ class MeshViewport(_BaseWidget):
         # Grid floor state (orbit mode reference plane)
         self._show_grid: bool = True  # visible by default in orbit mode
         self._grid_y: float = 0.0  # Y level of the grid in GL space
+        self._grid_center_x: float = 0.0
+        self._grid_center_z: float = 0.0
 
         # Interpolation preview: SLERP between correction keyframes
         self._interpolation_enabled: bool = True
@@ -1872,6 +1874,8 @@ class MeshViewport(_BaseWidget):
         self._orbit_distance = max(float(extent) * 2.5, 1.0)
         # Place grid floor at lowest point (feet)
         self._grid_y = float(np.min(gl_pts[:, 1]))
+        self._grid_center_x = float(self._orbit_center[0])
+        self._grid_center_z = float(self._orbit_center[2])
         self._orbit_auto_centered = True
 
     def mousePressEvent(self, event):
@@ -3189,10 +3193,16 @@ class MeshViewport(_BaseWidget):
         if not _HAS_GL or not self._gl_ready:
             return
 
+        if self._camera_mode == "orbit":
+            cx = self._orbit_center[0]
+            cz = self._orbit_center[2]
+        else:
+            cx = self._grid_center_x
+            cz = self._grid_center_z
         positions, colors = compute_grid_lines(
             y=self._grid_y,
-            center_x=self._orbit_center[0],
-            center_z=self._orbit_center[2],
+            center_x=cx,
+            center_z=cz,
         )
         if len(positions) == 0:
             return
@@ -3529,6 +3539,9 @@ class MeshViewport(_BaseWidget):
                 # The _CV_TO_GL view matrix negates Y when rendering,
                 # so store the raw camera-space value (no pre-negate).
                 self._grid_y = float(np.max(pts[:, 1]))
+            # Track grid center to body's XZ position (pelvis = joint 0)
+            self._grid_center_x = float(pts[0, 0])
+            self._grid_center_z = float(pts[0, 2])
 
         # Compute joints for ALL persons (multi-person view)
         self._all_joint_positions.clear()
