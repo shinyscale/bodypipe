@@ -411,6 +411,7 @@ class VideoPlayer(QWidget):
     frame_clicked = Signal(float, float)
     bbox_dragged = Signal(float, float, float, float)  # (x1, y1, x2, y2) normalized
     playback_toggled = Signal(bool)
+    loop_toggled = Signal(bool)
     scrub_started = Signal()   # slider press — user is actively scrubbing
     scrub_ended = Signal()     # slider release — scrubbing finished
     speed_changed = Signal(float)  # emitted on user speed chip click
@@ -422,6 +423,7 @@ class VideoPlayer(QWidget):
         self._fps = 30.0
         self._current_frame = 0
         self._playing = False
+        self._looping = False
         self._playback_speed = 1.0
         self._transport_hidden = False
         self._cache = FrameCache()
@@ -540,44 +542,79 @@ class VideoPlayer(QWidget):
             overlay_layout.addWidget(chip)
         self._speed_chips[1.0].setChecked(True)
 
-        # --- Hidden transport buttons (keyboard-only, backward compat) ---
-        self._btn_first = QToolButton(self)
-        self._btn_first.setText("|<")
-        self._btn_first.setToolTip("First frame (Home)")
-        self._btn_first.setFixedSize(32, 28)
-        self._btn_first.hide()
+        # --- Persistent transport bar (between display and slider) ---
+        _bar_btn_style = (
+            "QToolButton { background: transparent; "
+            "color: #eff0f1; border: none; border-radius: 3px; font-size: 13px; }"
+            "QToolButton:hover { background: rgba(202,149,46,80); }"
+            "QToolButton:pressed { background: rgba(202,149,46,160); }"
+            "QToolButton:checked { background: rgba(202,149,46,200); color: #eff0f1; }"
+        )
 
-        self._btn_back10 = QToolButton(self)
-        self._btn_back10.setText("<<")
-        self._btn_back10.setToolTip("Back 10 frames (Ctrl+Left)")
-        self._btn_back10.setFixedSize(32, 28)
-        self._btn_back10.hide()
+        transport_row = QHBoxLayout()
+        transport_row.setContentsMargins(4, 2, 4, 2)
+        transport_row.setSpacing(2)
 
-        self._btn_fwd10 = QToolButton(self)
-        self._btn_fwd10.setText(">>")
-        self._btn_fwd10.setToolTip("Forward 10 frames (Ctrl+Right)")
-        self._btn_fwd10.setFixedSize(32, 28)
-        self._btn_fwd10.hide()
+        self._bar_first = QToolButton()
+        self._bar_first.setText("\u23ee")
+        self._bar_first.setToolTip("Go to start (Home)")
+        self._bar_first.setFixedSize(24, 22)
 
-        self._btn_last = QToolButton(self)
-        self._btn_last.setText(">|")
-        self._btn_last.setToolTip("Last frame (End)")
-        self._btn_last.setFixedSize(32, 28)
-        self._btn_last.hide()
+        self._bar_back1 = QToolButton()
+        self._bar_back1.setText("\u25c2")
+        self._bar_back1.setToolTip("Back 1 frame (Left)")
+        self._bar_back1.setFixedSize(24, 22)
 
-        # --- Slider row (always visible, below display) ---
+        self._bar_play = QToolButton()
+        self._bar_play.setText("\u25b6")
+        self._bar_play.setToolTip("Play/Pause (Space)")
+        self._bar_play.setFixedSize(28, 22)
+
+        self._bar_fwd1 = QToolButton()
+        self._bar_fwd1.setText("\u25b8")
+        self._bar_fwd1.setToolTip("Forward 1 frame (Right)")
+        self._bar_fwd1.setFixedSize(24, 22)
+
+        self._bar_last = QToolButton()
+        self._bar_last.setText("\u23ed")
+        self._bar_last.setToolTip("Go to end (End)")
+        self._bar_last.setFixedSize(24, 22)
+
+        self._bar_loop = QToolButton()
+        self._bar_loop.setText("\u21bb")
+        self._bar_loop.setToolTip("Loop (L)")
+        self._bar_loop.setCheckable(True)
+        self._bar_loop.setFixedSize(24, 22)
+
+        for btn in (self._bar_first, self._bar_back1, self._bar_play,
+                    self._bar_fwd1, self._bar_last, self._bar_loop):
+            btn.setStyleSheet(_bar_btn_style)
+            btn.setFocusPolicy(Qt.NoFocus)
+
+        transport_row.addWidget(self._bar_first)
+        transport_row.addWidget(self._bar_back1)
+        transport_row.addWidget(self._bar_play)
+        transport_row.addWidget(self._bar_fwd1)
+        transport_row.addWidget(self._bar_last)
+        transport_row.addSpacing(8)
+        transport_row.addWidget(self._bar_loop)
+        transport_row.addStretch()
+
+        self._frame_label = QLabel("0 / 0")
+        self._frame_label.setMinimumWidth(100)
+        transport_row.addWidget(self._frame_label)
+
+        self._fps_label = QLabel("")
+        self._fps_label.setMinimumWidth(70)
+        transport_row.addWidget(self._fps_label)
+
+        layout.addLayout(transport_row)
+
+        # --- Slider row (always visible, below transport bar) ---
         slider_row = QHBoxLayout()
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(0, 0)
         slider_row.addWidget(self._slider, 1)
-
-        self._frame_label = QLabel("0 / 0")
-        self._frame_label.setMinimumWidth(100)
-        slider_row.addWidget(self._frame_label)
-
-        self._fps_label = QLabel("")
-        self._fps_label.setMinimumWidth(70)
-        slider_row.addWidget(self._fps_label)
 
         layout.addLayout(slider_row)
 
@@ -587,12 +624,16 @@ class VideoPlayer(QWidget):
         self._slider.valueChanged.connect(self._on_slider_changed)
         self._slider.sliderPressed.connect(self.scrub_started.emit)
         self._slider.sliderReleased.connect(self._on_slider_released)
-        self._btn_first.clicked.connect(lambda: self.seek(0))
-        self._btn_last.clicked.connect(lambda: self.seek(self._num_frames - 1))
+        # Persistent transport bar buttons
+        self._bar_first.clicked.connect(lambda: self.seek(0))
+        self._bar_last.clicked.connect(lambda: self.seek(self._num_frames - 1))
+        self._bar_back1.clicked.connect(lambda: self.seek(self._current_frame - 1))
+        self._bar_fwd1.clicked.connect(lambda: self.seek(self._current_frame + 1))
+        self._bar_play.clicked.connect(self._toggle_play)
+        self._bar_loop.clicked.connect(self._toggle_loop)
+        # Overlay buttons
         self._btn_back1.clicked.connect(lambda: self.seek(self._current_frame - 1))
         self._btn_fwd1.clicked.connect(lambda: self.seek(self._current_frame + 1))
-        self._btn_back10.clicked.connect(lambda: self.seek(self._current_frame - 10))
-        self._btn_fwd10.clicked.connect(lambda: self.seek(self._current_frame + 10))
         self._btn_play.clicked.connect(self._toggle_play)
         self._speed_group.buttonClicked.connect(self._on_speed_chip_clicked)
 
@@ -708,6 +749,29 @@ class VideoPlayer(QWidget):
             interval = max(1, int(1000 / (self._fps * self._playback_speed)))
             self._play_timer.setInterval(interval)
 
+    @property
+    def is_playing(self) -> bool:
+        return self._playing
+
+    @property
+    def is_looping(self) -> bool:
+        return self._looping
+
+    def play(self):
+        """Start playback (no-op if already playing)."""
+        if not self._playing:
+            self._toggle_play()
+
+    def stop(self):
+        """Stop playback (no-op if already stopped)."""
+        if self._playing:
+            self._toggle_play()
+
+    def set_looping(self, looping: bool):
+        """Set loop mode from external source (no signal emitted)."""
+        self._looping = looping
+        self._bar_loop.setChecked(looping)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -765,12 +829,17 @@ class VideoPlayer(QWidget):
     def _toggle_play(self):
         self._playing = not self._playing
         if self._playing:
+            # Play-from-end: wrap to start if at the last frame
+            if self._current_frame >= self._num_frames - 1:
+                self.seek(0)
             self._btn_play.setText("\u275a\u275a")
+            self._bar_play.setText("\u275a\u275a")
             interval = max(1, int(1000 / (self._fps * self._playback_speed)))
             self._play_timer.start(interval)
             self._cache.readahead = FrameCache.PLAYBACK_READAHEAD
         else:
             self._btn_play.setText("\u25b6")
+            self._bar_play.setText("\u25b6")
             self._play_timer.stop()
             self._cache.readahead = FrameCache.DEFAULT_READAHEAD
         self.playback_toggled.emit(self._playing)
@@ -780,15 +849,25 @@ class VideoPlayer(QWidget):
         step = max(1, round(self._playback_speed))
         next_frame = self._current_frame + step
         if next_frame >= self._num_frames:
-            self._toggle_play()  # stop at end
+            if self._looping:
+                self.seek(0)
+            else:
+                self._toggle_play()  # stop at end
             return
         self.seek(next_frame)
+
+    def _toggle_loop(self):
+        self._looping = not self._looping
+        self._bar_loop.setChecked(self._looping)
+        self.loop_toggled.emit(self._looping)
 
     def keyPressEvent(self, event):
         key = event.key()
         mod = event.modifiers()
         if key == Qt.Key_Space:
             self._toggle_play()
+        elif key == Qt.Key_L:
+            self._toggle_loop()
         elif key == Qt.Key_Left:
             step = 10 if mod & Qt.ControlModifier else 1
             self.seek(self._current_frame - step)

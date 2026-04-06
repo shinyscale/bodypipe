@@ -529,6 +529,9 @@ class TrackOverview(QWidget):
 
     person_clicked = Signal(int, int)  # (person_id, frame_index)
     speed_changed = Signal(float)  # emitted on user speed chip click
+    play_toggled = Signal()        # play/pause clicked
+    go_to_start = Signal()         # go-to-start clicked
+    loop_toggled = Signal(bool)    # loop toggled
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -566,12 +569,52 @@ class TrackOverview(QWidget):
         self._view.frame_clicked.connect(self.person_clicked)
         right.addWidget(self._view, 1)
 
-        # Footer — speed chips (synced with VideoPlayer overlay)
+        # Footer — transport buttons + speed chips
         self._footer = QWidget()
         self._footer.setFixedHeight(24)
         footer_layout = QHBoxLayout(self._footer)
         footer_layout.setContentsMargins(4, 2, 4, 2)
         footer_layout.setSpacing(4)
+
+        _transport_style = (
+            "QToolButton { background: transparent; "
+            "color: #eff0f1; border: none; border-radius: 2px; font-size: 11px; }"
+            "QToolButton:hover { background: rgba(202,149,46,80); }"
+            "QToolButton:pressed { background: rgba(202,149,46,160); }"
+            "QToolButton:checked { background: rgba(202,149,46,200); color: #eff0f1; }"
+        )
+
+        self._footer_first = QToolButton()
+        self._footer_first.setText("\u23ee")
+        self._footer_first.setToolTip("Go to start")
+        self._footer_first.setFixedSize(20, 18)
+        self._footer_first.setStyleSheet(_transport_style)
+        self._footer_first.setFocusPolicy(Qt.NoFocus)
+        self._footer_first.clicked.connect(self.go_to_start.emit)
+        footer_layout.addWidget(self._footer_first)
+
+        self._footer_play = QToolButton()
+        self._footer_play.setText("\u25b6")
+        self._footer_play.setToolTip("Play/Pause")
+        self._footer_play.setFixedSize(22, 18)
+        self._footer_play.setStyleSheet(_transport_style)
+        self._footer_play.setFocusPolicy(Qt.NoFocus)
+        self._footer_play.clicked.connect(self.play_toggled.emit)
+        footer_layout.addWidget(self._footer_play)
+
+        self._footer_loop = QToolButton()
+        self._footer_loop.setText("\u21bb")
+        self._footer_loop.setToolTip("Loop")
+        self._footer_loop.setCheckable(True)
+        self._footer_loop.setFixedSize(20, 18)
+        self._footer_loop.setStyleSheet(_transport_style)
+        self._footer_loop.setFocusPolicy(Qt.NoFocus)
+        self._footer_loop.clicked.connect(
+            lambda checked: self.loop_toggled.emit(checked)
+        )
+        footer_layout.addWidget(self._footer_loop)
+
+        footer_layout.addSpacing(8)
         footer_layout.addStretch()
 
         self._speed_group = QButtonGroup(self)
@@ -718,6 +761,18 @@ class TrackOverview(QWidget):
             if chip is button:
                 self.speed_changed.emit(speed)
                 break
+
+    # -- transport sync ---------------------------------------------------
+
+    def set_playing(self, playing: bool):
+        """Update play button icon (visual only, no signal emitted)."""
+        self._footer_play.setText("\u275a\u275a" if playing else "\u25b6")
+
+    def set_loop(self, looping: bool):
+        """Update loop button checked state (no signal emitted)."""
+        self._footer_loop.blockSignals(True)
+        self._footer_loop.setChecked(looping)
+        self._footer_loop.blockSignals(False)
 
     # -- internal ---------------------------------------------------------
 

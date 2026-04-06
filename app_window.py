@@ -890,6 +890,7 @@ class AppWindow(QMainWindow):
         self._identity_inspector.track_modified.connect(self._on_tracks_modified)
         self._identity_inspector.reprocess_requested.connect(self._on_reprocess_requested)
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
+        self._pose_corrector.person_requested.connect(self._on_identity_person_changed)
 
         # Auto-raise PoseCorrector dock when a joint is clicked in 3D viewport
         self._mesh_viewport.joint_clicked.connect(self._on_joint_clicked_auto_raise)
@@ -897,6 +898,15 @@ class AppWindow(QMainWindow):
         # Speed sync between video player and track timeline
         self._video_player.speed_changed.connect(self._track_overview.set_speed)
         self._track_overview.speed_changed.connect(self._video_player.set_playback_speed)
+
+        # Track overview transport → video player
+        self._track_overview.play_toggled.connect(self._video_player._toggle_play)
+        self._track_overview.go_to_start.connect(lambda: self._video_player.seek(0))
+        self._track_overview.loop_toggled.connect(self._video_player.set_looping)
+
+        # Video player → track overview (visual sync)
+        self._video_player.playback_toggled.connect(self._track_overview.set_playing)
+        self._video_player.loop_toggled.connect(self._track_overview.set_loop)
 
         # Session library → load session on double-click
         self._session_library.session_load_requested.connect(
@@ -952,6 +962,14 @@ class AppWindow(QMainWindow):
         )
         self._mode_label.setText(f"{mode.value} (#{list(InteractionMode).index(mode) + 1})")
 
+    def _sync_camera_mode(self, mode: str):
+        """Set viewport camera mode AND sync the toolbar dropdown."""
+        self._mesh_viewport.set_camera_mode(mode)
+        combo = self._mesh_dock._camera_combo
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0 if mode == "incam" else 1)
+        combo.blockSignals(False)
+
     def keyPressEvent(self, event):
         """Route key events based on active interaction mode.
 
@@ -973,7 +991,7 @@ class AppWindow(QMainWindow):
             # Toggle camera mode between incam and orbit
             vp = self._mesh_viewport
             new_mode = "orbit" if vp._camera_mode == "incam" else "incam"
-            vp.set_camera_mode(new_mode)
+            self._sync_camera_mode(new_mode)
             self.set_status(f"Camera: {new_mode}")
             return
         if not mod and key == Qt.Key_M:
@@ -1071,7 +1089,7 @@ class AppWindow(QMainWindow):
         """Nudge the orbit camera by the given yaw/pitch degrees."""
         vp = self._mesh_viewport
         if vp._camera_mode != "orbit":
-            vp.set_camera_mode("orbit")
+            self._sync_camera_mode("orbit")
         vp._orbit_yaw += yaw
         vp._orbit_pitch = float(np.clip(vp._orbit_pitch + pitch, -89, 89))
         vp._update_camera()
@@ -1442,7 +1460,7 @@ class AppWindow(QMainWindow):
             params = track.soma_params or track.smplx_params
             if params is not None and "transl_world" in params:
                 if self._mesh_viewport._camera_mode != "orbit":
-                    self._mesh_viewport.set_camera_mode("orbit")
+                    self._sync_camera_mode("orbit")
 
         # Broadcast current frame to all panels
         frame = self._session.current_frame
@@ -1548,7 +1566,9 @@ class AppWindow(QMainWindow):
         if multi_result is not None:
             self._load_person_tracks_from_result(multi_result)
 
+        self._session.current_frame = 0
         self._refresh_all_panels()
+        self._video_player.seek(0)
 
         # Auto-detect pose issues and switch to Correction workspace
         if self._session.person_tracks:
@@ -1820,6 +1840,10 @@ class AppWindow(QMainWindow):
 
             params = dict(params)  # shallow copy to add keys
 
+            # Stash K_fullimg so _load_crop_metadata can extract K_crop
+            if K is not None:
+                params["K_fullimg"] = K
+
             # --- Raw body pose (pre-IK) for dance/rapid motion toggle ---
             raw_bp = results.get("raw_body_pose")
             if raw_bp is not None:
@@ -1829,7 +1853,7 @@ class AppWindow(QMainWindow):
                         params["body_pose_raw"].shape[0], -1, 3
                     )
 
-            # --- Augment with hand data from hybrid file ---
+            # --- Augment with hand data from hybrid file or HaMeR-merged results ---
             hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
             if hybrid_pts:
                 try:
@@ -1845,6 +1869,26 @@ class AppWindow(QMainWindow):
                     log.warning("Hybrid hand load failed:\n%s",
                                 __import__("traceback").format_exc())
 
+            # Fall back to top-level hand data in hmr4d_results.pt
+            # (written by HaMeR when SMPLest-X is skipped)
+            if "left_hand_pose" not in params:
+                for key in ["left_hand_pose", "right_hand_pose"]:
+                    if key in results:
+                        val = results[key]
+                        params[key] = (val.numpy() if hasattr(val, "numpy")
+                                       else np.array(val))
+
+            # --- Add SMPL-X hand mean pose (natural ~30° finger curl) ---
+            # Hand data from SMPLest-X and HaMeR is in offset-from-mean space;
+            # add the mean so the viewport shows correct finger articulation,
+            # matching what the BVH export does via _add_hand_mean_pose().
+            if "left_hand_pose" in params:
+                try:
+                    from smplx_to_bvh import _add_hand_mean_pose
+                    params = _add_hand_mean_pose(params)
+                except Exception:
+                    log.debug("Hand mean pose not applied (smplx model unavailable)")
+
             if "left_hand_pose" in params:
                 lh = params["left_hand_pose"]
                 msg = (f"Hand data: shape={lh.shape}, "
@@ -1852,7 +1896,7 @@ class AppWindow(QMainWindow):
                 self._log_panel.append_line(msg, "info")
             else:
                 self._log_panel.append_line(
-                    f"No hybrid file in {person_dir.name} — hands will be rest pose",
+                    f"No hand data in {person_dir.name} — hands will be rest pose",
                     "warning",
                 )
 
