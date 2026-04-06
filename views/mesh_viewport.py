@@ -3526,8 +3526,9 @@ class MeshViewport(_BaseWidget):
                 self._grid_y = float(np.min(pts[:, 1]))
             else:
                 # CV / crop-camera space (Y-down): feet = max Y.
-                # GL renders Y-up, so negate to place grid at feet.
-                self._grid_y = float(-np.max(pts[:, 1]))
+                # The _CV_TO_GL view matrix negates Y when rendering,
+                # so store the raw camera-space value (no pre-negate).
+                self._grid_y = float(np.max(pts[:, 1]))
 
         # Compute joints for ALL persons (multi-person view)
         self._all_joint_positions.clear()
