@@ -1884,7 +1884,14 @@ class AppWindow(QMainWindow):
 
             K = results.get("K_fullimg")
             if K is not None and self._session.camera_K is None:
-                self._session.camera_K = K[0].numpy()
+                # K_fullimg is actually estimate_K(crop_w, crop_h) — crop K,
+                # not full-frame K.  Compute true full-frame intrinsics so the
+                # frustum, FOV spinbox, and ray unproject use correct values.
+                from views.mesh_viewport import estimate_K as _estimate_K
+                self._session.camera_K = _estimate_K(
+                    self._session.img_width or 1920,
+                    self._session.img_height or 1080,
+                )
                 # Sync FOV spinbox to match loaded intrinsics
                 fov = self._mesh_viewport.get_frustum_fov()
                 self._mesh_dock._fov_spin.blockSignals(True)
@@ -1982,26 +1989,9 @@ class AppWindow(QMainWindow):
                 if self._session.derived_c2w is None:
                     go_incam = np.array(params["global_orient"]).astype(np.float32)
                     tr_incam = np.array(params["transl"]).astype(np.float32)
-                    # Transform crop-space translations to full-frame before c2w
-                    try:
-                        import json as _json
-                        _meta_path = person_dir / "person_meta.json"
-                        _meta = _json.loads(_meta_path.read_text())
-                        _bbox = _meta.get("crop_bbox")
-                        if _bbox is not None and len(_bbox) == 4 and K is not None:
-                            from views.mesh_viewport import estimate_K
-                            K_crop = K[0].numpy() if hasattr(K[0], "numpy") else np.array(K[0])
-                            K_full = estimate_K(
-                                self._session.img_width or 1920,
-                                self._session.img_height or 1080,
-                            )
-                            tr_incam = _crop_transl_to_fullframe(
-                                tr_incam, K_crop.astype(np.float32),
-                                K_full, float(_bbox[0]), float(_bbox[1]),
-                            )
-                    except Exception:
-                        log.debug("crop→fullframe transform skipped for c2w:\n%s",
-                                  __import__("traceback").format_exc())
+                    # Use raw incam params — they are self-consistent with
+                    # global params.  Do NOT transform to full-frame space;
+                    # that breaks the c2w = R_world @ R_incam^T relationship.
                     c2w = _compute_camera_c2w(
                         go_incam, tr_incam, go_world, tr_world
                     )

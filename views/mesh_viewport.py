@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Signal, Qt, QSize
+from PySide6.QtCore import Signal, Qt, QRect, QSize
 from PySide6.QtGui import QPainter, QFont, QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QMenu
 
@@ -1373,6 +1373,7 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params or track.smplx_params
                 if params and "transl_world" in params:
                     self._data_is_global = True
+        self._update_camera()
         self._refresh_mesh()
 
     def on_frame_changed(self, frame_idx: int):
@@ -1773,10 +1774,24 @@ class MeshViewport(_BaseWidget):
             return False
         if self._camera_mode == "orbit":
             return True
-        # incam: need per-frame camera pose to project world-space data
-        sess = self._session
-        return (sess is not None
-                and (sess.derived_c2w is not None or sess.slam_c2w is not None))
+        return False  # incam: camera-space + crop→fullframe transform
+
+    def _incam_transform_points(self, pts: np.ndarray, person_id: int) -> np.ndarray:
+        """Transform points from crop camera space to full-frame camera space (incam only)."""
+        if self._camera_mode != "incam" or self._session is None:
+            return pts
+        track = self._session.person_tracks.get(person_id)
+        if track is None or track.K_crop is None or track.crop_bbox is None:
+            return pts
+        img_w = self._session.img_width or 1920
+        img_h = self._session.img_height or 1080
+        K_full = estimate_K(img_w, img_h)
+        K_c = track.K_crop
+        x1, y1 = track.crop_bbox[0], track.crop_bbox[1]
+        X, Y, Z = pts[..., 0], pts[..., 1], pts[..., 2]
+        X_f = (K_c[0, 0] * X + (K_c[0, 2] + x1 - K_full[0, 2]) * Z) / K_full[0, 0]
+        Y_f = (K_c[1, 1] * Y + (K_c[1, 2] + y1 - K_full[1, 2]) * Z) / K_full[1, 1]
+        return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
 
     def _incam_world_view(self, frame_idx: int) -> np.ndarray | None:
         """Per-frame incam view matrix from camera-to-world data."""
@@ -1807,11 +1822,7 @@ class MeshViewport(_BaseWidget):
             )
         else:  # incam
             self._model_mat = np.eye(4, dtype=np.float32)
-            world_view = self._incam_world_view(self._current_frame)
-            if world_view is not None and self._data_is_global:
-                self._view = world_view
-            else:
-                self._view = _CV_TO_GL.copy()  # fallback: camera-space data
+            self._view = _CV_TO_GL.copy()
         w = self.width() if self.width() > 0 else 200
         h = self.height() if self.height() > 0 else 150
         self._update_projection(w, h)
@@ -2251,7 +2262,10 @@ class MeshViewport(_BaseWidget):
                 params = self._apply_override_to_params(params, self._current_frame)
 
         try:
-            return forward_kinematics(params, self._current_frame)
+            joints = forward_kinematics(params, self._current_frame)
+            if joints is not None:
+                joints = self._incam_transform_points(joints, self._person_id)
+            return joints
         except Exception as e:
             import traceback as _tb
             logger.warning("FK failed (pid=%d, f=%d): %s\n%s",
@@ -2598,6 +2612,7 @@ class MeshViewport(_BaseWidget):
                 )  # (1, V, 3)
 
                 vertices = verts[0].cpu().numpy().astype(np.float32)
+                vertices = self._incam_transform_points(vertices, person_id)
                 normals = compute_normals(vertices, self._faces)
 
                 result = (vertices, normals)
@@ -2782,7 +2797,14 @@ class MeshViewport(_BaseWidget):
                 self._video_frame.data, fw, fh, bpl,
                 QImage.Format.Format_RGB888,
             )
-            painter.drawImage(self.rect(), qimg)
+            vp_w, vp_h = self.width(), self.height()
+            s = min(vp_w / fw, vp_h / fh)
+            scaled_w = int(fw * s)
+            scaled_h = int(fh * s)
+            x_off = (vp_w - scaled_w) // 2
+            y_off = (vp_h - scaled_h) // 2
+            painter.fillRect(self.rect(), QColor(0, 0, 0))
+            painter.drawImage(QRect(x_off, y_off, scaled_w, scaled_h), qimg)
 
         painter.beginNativePainting()
 
@@ -3499,10 +3521,12 @@ class MeshViewport(_BaseWidget):
         # Compute grid floor level for non-orbit modes (orbit computes in _auto_center_orbit)
         if self._joint_positions is not None and self._camera_mode != "orbit":
             pts = self._joint_positions
-            if self._data_is_global:
+            if self._use_world_params():
+                # World space (Y-up): feet = min Y
                 self._grid_y = float(np.min(pts[:, 1]))
             else:
-                # CV space: Y-down, so feet = max Y. GL space: Y-up, feet = -max(Y)
+                # CV / crop-camera space (Y-down): feet = max Y.
+                # GL renders Y-up, so negate to place grid at feet.
                 self._grid_y = float(-np.max(pts[:, 1]))
 
         # Compute joints for ALL persons (multi-person view)
@@ -3522,6 +3546,7 @@ class MeshViewport(_BaseWidget):
                 try:
                     joints = forward_kinematics(params, self._current_frame)
                     if joints is not None:
+                        joints = self._incam_transform_points(joints, pid)
                         self._all_joint_positions[pid] = joints
                         self._all_active_skels[pid] = skel
                 except Exception:
@@ -3611,18 +3636,12 @@ class MeshViewport(_BaseWidget):
         if self._camera_mode == "orbit":
             self._projection = perspective_fov(_ORBIT_DEFAULT_FOV, w / h)
         else:
-            if self._session and self._session.camera_K is not None:
-                K = self._session.camera_K
+            img_w = w
+            img_h = h
+            if self._session is not None:
                 img_w = self._session.img_width or w
                 img_h = self._session.img_height or h
-            elif self._session and self._session.img_width > 0:
-                img_w = self._session.img_width
-                img_h = self._session.img_height
-                K = estimate_K(img_w, img_h)
-            else:
-                K = estimate_K(w, h)
-                img_w, img_h = w, h
-            # Scale K from image coords to widget coords (fit + center)
+            K = estimate_K(img_w, img_h)
             K_vp = scale_K_to_viewport(K, img_w, img_h, w, h)
             self._projection = k_to_projection(K_vp, w, h)
 
