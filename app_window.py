@@ -73,6 +73,59 @@ def _compute_camera_c2w(go_incam, tr_incam, go_world, tr_world):
     return c2w
 
 
+def _crop_transl_to_fullframe(tr_crop, K_crop, K_full, crop_x1, crop_y1):
+    """Convert SMPL translations from crop camera space to full-frame camera space.
+
+    Same math as mesh_viewport._incam_transform_points but operates on (N,3)
+    numpy arrays (pure numpy, no OpenGL context needed).
+    """
+    X, Y, Z = tr_crop[:, 0], tr_crop[:, 1], tr_crop[:, 2]
+    X_f = (K_crop[0, 0] * X + (K_crop[0, 2] + crop_x1 - K_full[0, 2]) * Z) / K_full[0, 0]
+    Y_f = (K_crop[1, 1] * Y + (K_crop[1, 2] + crop_y1 - K_full[1, 2]) * Z) / K_full[1, 1]
+    return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
+
+
+def _smooth_c2w(c2w, med_kernel=5, sigma=2.0):
+    """Temporal smoothing of camera-to-world matrices.
+
+    Translation: median filter (removes outlier spikes) then Gaussian smoothing.
+    Rotation: quaternion Gaussian smoothing with sign consistency.
+    """
+    from scipy.ndimage import median_filter, gaussian_filter1d
+    from scipy.spatial.transform import Rotation
+
+    N = c2w.shape[0]
+    if N < 3:
+        return c2w
+
+    out = c2w.copy()
+
+    # --- Smooth translation ---
+    for axis in range(3):
+        t = out[:, axis, 3].copy()
+        t = median_filter(t, size=min(med_kernel, N | 1))  # must be odd
+        t = gaussian_filter1d(t, sigma=sigma)
+        out[:, axis, 3] = t
+
+    # --- Smooth rotation via quaternions ---
+    R_mats = out[:, :3, :3].copy()
+    quats = Rotation.from_matrix(R_mats).as_quat()  # (N, 4) xyzw
+
+    # Sign consistency: flip quaternion if dot with previous is negative
+    for i in range(1, N):
+        if np.dot(quats[i], quats[i - 1]) < 0:
+            quats[i] = -quats[i]
+
+    # Gaussian smooth each component, then re-normalize
+    for c in range(4):
+        quats[:, c] = gaussian_filter1d(quats[:, c], sigma=sigma)
+    norms = np.linalg.norm(quats, axis=-1, keepdims=True)
+    quats = quats / np.where(norms > 1e-8, norms, np.ones_like(norms))
+
+    out[:, :3, :3] = Rotation.from_quat(quats).as_matrix()
+    return out
+
+
 def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
     """Apply One Euro filter to hand poses — same params as BVH export."""
     from smplx_to_bvh import _smooth_rotations_one_euro
@@ -1929,9 +1982,30 @@ class AppWindow(QMainWindow):
                 if self._session.derived_c2w is None:
                     go_incam = np.array(params["global_orient"]).astype(np.float32)
                     tr_incam = np.array(params["transl"]).astype(np.float32)
-                    self._session.derived_c2w = _compute_camera_c2w(
+                    # Transform crop-space translations to full-frame before c2w
+                    try:
+                        import json as _json
+                        _meta_path = person_dir / "person_meta.json"
+                        _meta = _json.loads(_meta_path.read_text())
+                        _bbox = _meta.get("crop_bbox")
+                        if _bbox is not None and len(_bbox) == 4 and K is not None:
+                            from views.mesh_viewport import estimate_K
+                            K_crop = K[0].numpy() if hasattr(K[0], "numpy") else np.array(K[0])
+                            K_full = estimate_K(
+                                self._session.img_width or 1920,
+                                self._session.img_height or 1080,
+                            )
+                            tr_incam = _crop_transl_to_fullframe(
+                                tr_incam, K_crop.astype(np.float32),
+                                K_full, float(_bbox[0]), float(_bbox[1]),
+                            )
+                    except Exception:
+                        log.debug("crop→fullframe transform skipped for c2w:\n%s",
+                                  __import__("traceback").format_exc())
+                    c2w = _compute_camera_c2w(
                         go_incam, tr_incam, go_world, tr_world
                     )
+                    self._session.derived_c2w = _smooth_c2w(c2w)
                 # Multi-person lateral offset
                 offset_cam = self._get_person_world_offset(person_dir)
                 if offset_cam is not None:
