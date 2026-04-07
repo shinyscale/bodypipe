@@ -1795,6 +1795,31 @@ class MeshViewport(_BaseWidget):
         Y_f = (K_c[1, 1] * Y + (K_c[1, 2] + y1 - K_full[1, 2]) * Z) / K_full[1, 1]
         return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
 
+    def _grid_center_x_from_bbox(self) -> float | None:
+        """Compute grid center X from per-frame bbox and pelvis depth.
+
+        The single ``crop_bbox`` in ``_incam_transform_points`` doesn't capture
+        per-frame horizontal motion.  Per-frame ``track.bboxes`` do — back-project
+        the bbox center to 3D camera space using the pelvis depth.
+        """
+        if self._camera_mode != "incam" or self._session is None:
+            return None
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None or track.bboxes is None:
+            return None
+        if self._current_frame >= len(track.bboxes):
+            return None
+        bbox = track.bboxes[self._current_frame]
+        bbox_cx = float(bbox[0] + bbox[2]) / 2.0
+        # Pelvis depth in camera space (Z > 0 for points in front of camera)
+        Z = float(self._joint_positions[0, 2]) if self._joint_positions is not None else 1.0
+        if Z < 0.1:
+            return None
+        img_w = self._session.img_width or 1920
+        img_h = self._session.img_height or 1080
+        K = estimate_K(img_w, img_h)
+        return float((bbox_cx - K[0, 2]) * Z / K[0, 0])
+
     def _incam_world_view(self, frame_idx: int) -> np.ndarray | None:
         """Per-frame incam view matrix from camera-to-world data."""
         sess = self._session
@@ -3539,9 +3564,12 @@ class MeshViewport(_BaseWidget):
                 # The _CV_TO_GL view matrix negates Y when rendering,
                 # so store the raw camera-space value (no pre-negate).
                 self._grid_y = float(np.max(pts[:, 1]))
-            # Track grid center to body's XZ position (pelvis = joint 0)
-            self._grid_center_x = float(pts[0, 0])
+            # Track grid center XZ — depth from pelvis, horizontal from
+            # per-frame bbox (the fixed crop_bbox in _incam_transform_points
+            # doesn't capture per-frame horizontal motion).
             self._grid_center_z = float(pts[0, 2])
+            bbox_x = self._grid_center_x_from_bbox()
+            self._grid_center_x = bbox_x if bbox_x is not None else float(pts[0, 0])
 
         # Compute joints for ALL persons (multi-person view)
         self._all_joint_positions.clear()
