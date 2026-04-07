@@ -20,9 +20,10 @@ _FULL_STAGES: list[tuple[float, float, str]] = [
     (0.02, 0.35, "GVHMR body solve"),
     (0.35, 0.50, "SMPLest-X hand solve"),
     (0.50, 0.52, "Merging body + hands"),
-    (0.52, 0.72, "Face pipeline"),
-    (0.72, 0.85, "BVH/FBX conversion"),
-    (0.85, 1.00, "Rendering"),
+    (0.52, 0.60, "Physics refinement"),
+    (0.60, 0.75, "Face pipeline"),
+    (0.75, 0.88, "BVH/FBX conversion"),
+    (0.88, 1.00, "Rendering"),
 ]
 
 # Stage fraction ranges for GEM-X pipeline (single-pass, fewer stages).
@@ -203,8 +204,19 @@ class FullPipelineWorker(SubprocessWorkerBase):
             if self._cancelled:
                 return
 
-            # Stage 4: Face pipeline
+            # Stage 4: Physics refinement
             self._emit_stage(4)
+            if self._config.use_physics_refine and world_params is not None:
+                world_params = self._run_physics_refine(world_params)
+            elif self._config.use_physics_refine:
+                self.log_line.emit("Physics refinement enabled but no params available, skipping.")
+            else:
+                self.log_line.emit("Physics refinement disabled, skipping.")
+            if self._cancelled:
+                return
+
+            # Stage 5: Face pipeline
+            self._emit_stage(5)
             if self._config.use_face:
                 self._run_face(results)
             else:
@@ -212,14 +224,14 @@ class FullPipelineWorker(SubprocessWorkerBase):
             if self._cancelled:
                 return
 
-            # Stage 5: BVH/FBX conversion
-            self._emit_stage(5)
+            # Stage 6: BVH/FBX conversion
+            self._emit_stage(6)
             self._run_bvh_fbx(results, world_params, smplestx_ran)
             if self._cancelled:
                 return
 
-            # Stage 6: Rendering
-            self._emit_stage(6)
+            # Stage 7: Rendering
+            self._emit_stage(7)
             self._run_rendering(results, camera_params, world_params, smplestx_ran)
             if self._cancelled:
                 return
@@ -368,7 +380,74 @@ class FullPipelineWorker(SubprocessWorkerBase):
         return world_params, camera_params
 
     # ------------------------------------------------------------------
-    # Stage 4: Face pipeline
+    # Stage 4: Physics refinement
+    # ------------------------------------------------------------------
+
+    def _run_physics_refine(self, world_params: dict) -> dict:
+        """Run PHC physics refinement on world-space params.
+
+        Runs synchronously (not as nested QThread) since we're already on a
+        worker thread. Returns refined params, or original params on failure.
+        """
+        try:
+            from workers.physics.gvhmr_to_amass import params_to_amass_npz
+            from workers.physics.phc_runner import run_phc_local
+            from workers.physics.phc_to_smpl import phc_output_to_params
+            from workers.physics.evaluate import evaluate_refinement
+        except ImportError as exc:
+            self.log_line.emit(f"WARNING: Physics modules not available: {exc}")
+            return world_params
+
+        progress_cb = self._stage_progress_callback(4)
+
+        try:
+            # Convert to AMASS
+            phc_dir = self._output_dir / "physics"
+            phc_dir.mkdir(parents=True, exist_ok=True)
+            input_npz = phc_dir / "phc_input.npz"
+            params_to_amass_npz(world_params, input_npz, fps=int(self._fps))
+            self.log_line.emit(f"Physics: AMASS input saved -> {input_npz}")
+            progress_cb(0.1, "Running PHC...")
+
+            # Run PHC
+            phc_output_dir = phc_dir / "phc_output"
+            result = run_phc_local(input_npz, phc_output_dir)
+
+            if not result.success:
+                self.log_line.emit(
+                    f"WARNING: PHC failed, using original params. "
+                    f"Log: {result.log[-300:]}"
+                )
+                return world_params
+
+            progress_cb(0.8, "Converting PHC output...")
+            refined = phc_output_to_params(result.output_path, world_params)
+
+            # Evaluate
+            progress_cb(0.9, "Evaluating refinement...")
+            try:
+                metrics = evaluate_refinement(world_params, refined, fps=self._fps)
+                for key, val in metrics.items():
+                    if isinstance(val, dict):
+                        for sk, sv in val.items():
+                            self.log_line.emit(f"  Physics {key}.{sk}: {sv:.4f}")
+                    elif isinstance(val, float):
+                        self.log_line.emit(f"  Physics {key}: {val:.4f}")
+            except Exception as exc:
+                self.log_line.emit(f"WARNING: Physics metrics failed: {exc}")
+
+            progress_cb(1.0, "Physics refinement complete")
+            self.log_line.emit(
+                f"Physics refinement: {refined['num_frames']} frames refined"
+            )
+            return refined
+
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: Physics refinement failed: {exc}")
+            return world_params
+
+    # ------------------------------------------------------------------
+    # Stage 5: Face pipeline
     # ------------------------------------------------------------------
 
     def _run_face(self, results: dict) -> None:
@@ -409,7 +488,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
 
         # Face blendshape extraction
         face_csv_path = str(self._output_dir / f"{stem}_arkit_blendshapes.csv")
-        progress_cb = self._stage_progress_callback(4)
+        progress_cb = self._stage_progress_callback(5)
         try:
             run_face_pipeline(
                 video_str,
@@ -446,7 +525,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
             self.log_line.emit(f"WARNING: Face mesh render failed: {exc}")
 
     # ------------------------------------------------------------------
-    # Stage 5: BVH/FBX conversion
+    # Stage 6: BVH/FBX conversion
     # ------------------------------------------------------------------
 
     def _run_bvh_fbx(
@@ -560,7 +639,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
             self.log_line.emit(f"WARNING: FBX conversion failed: {exc}")
 
     # ------------------------------------------------------------------
-    # Stage 6: Rendering
+    # Stage 7: Rendering
     # ------------------------------------------------------------------
 
     def _run_rendering(
@@ -586,7 +665,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
             )
             return
 
-        progress_cb = self._stage_progress_callback(6)
+        progress_cb = self._stage_progress_callback(7)
         render_params = camera_params if camera_params is not None else world_params
 
         # Skeleton overlay
@@ -752,6 +831,10 @@ class MultiPersonWorker(QThread):
             if self._config.hand_source == "hamer":
                 self._try_hamer_multi(result)
 
+            # ── Post-pipeline physics refinement (per-person) ──
+            if self._config.use_physics_refine:
+                self._run_physics_multi(result)
+
             # ── Post-pipeline FBX batch conversion ──
             fbx_files = self._convert_bvh_to_fbx_batch(result)
 
@@ -793,6 +876,29 @@ class MultiPersonWorker(QThread):
         total_persons = len(person_dirs)
         self.progress.emit(0.85, f"Running HaMeR hand reconstruction ({total_persons} persons)...")
 
+        # Pre-scan: skip model load entirely if all persons already have hand data
+        needs_hamer = []
+        for i, person_dir in enumerate(person_dirs):
+            person_dir = Path(person_dir)
+            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
+            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
+            pt_path = (hybrid_pts[-1] if hybrid_pts
+                       else gvhmr_pts[0] if gvhmr_pts else None)
+            if pt_path is not None:
+                try:
+                    data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                    lh = data.get("left_hand_pose")
+                    if (lh is not None and hasattr(lh, 'numel')
+                            and lh.numel() > 0 and lh.abs().sum() > 0):
+                        continue
+                except Exception:
+                    pass
+            needs_hamer.append(i)
+
+        if not needs_hamer:
+            self.log_line.emit("[HaMeR] All persons already have hand data, skipping model load.")
+            return
+
         # Load the HaMeR model once and share across all persons
         try:
             shared_model, shared_model_cfg = _load_hamer_model("cuda")
@@ -807,6 +913,30 @@ class MultiPersonWorker(QThread):
 
             base_frac = 0.85 + (i / total_persons) * 0.07
             self.progress.emit(base_frac, f"HaMeR hands: person {i + 1}/{total_persons}")
+
+            # Resolve target .pt BEFORE inference
+            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
+            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
+            pt_path = (hybrid_pts[-1] if hybrid_pts
+                       else gvhmr_pts[0] if gvhmr_pts else None)
+            if pt_path is None:
+                self.log_line.emit(
+                    f"[HaMeR] Person {i}: no params .pt found, skipping."
+                )
+                continue
+
+            # Skip if hand data already present
+            try:
+                existing = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                lh = existing.get("left_hand_pose")
+                if (lh is not None and hasattr(lh, 'numel')
+                        and lh.numel() > 0 and lh.abs().sum() > 0):
+                    self.log_line.emit(
+                        f"[HaMeR] Person {i}: hands already in {pt_path.name}, skipping."
+                    )
+                    continue
+            except Exception:
+                pass
 
             # Find isolated video for this person
             video_path = person_videos[i] if i < len(person_videos) else None
@@ -824,12 +954,14 @@ class MultiPersonWorker(QThread):
                     f"[HaMeR] Person {i}: using ViTPose {vitpose_pt}"
                 )
 
+            viz_path = person_dir / "hamer_hands.mp4"
             try:
                 hamer_result = run_hamer(
                     video_path=str(video_path),
                     vitpose_path=vitpose_pt,
                     model=shared_model,
                     model_cfg=shared_model_cfg,
+                    viz_output_path=str(viz_path),
                 )
             except Exception as exc:
                 self.log_line.emit(
@@ -840,18 +972,6 @@ class MultiPersonWorker(QThread):
             if hamer_result is None:
                 self.log_line.emit(
                     f"[HaMeR] Person {i}: no results returned."
-                )
-                continue
-
-            # Find the existing params file to update
-            # Prefer hybrid (GVHMR+SMPLest-X), fall back to raw GVHMR
-            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
-            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
-            pt_path = (hybrid_pts[-1] if hybrid_pts
-                       else gvhmr_pts[0] if gvhmr_pts else None)
-            if pt_path is None:
-                self.log_line.emit(
-                    f"[HaMeR] Person {i}: no params .pt found, skipping."
                 )
                 continue
 
@@ -901,6 +1021,105 @@ class MultiPersonWorker(QThread):
         # Free shared model
         del shared_model, shared_model_cfg
         torch.cuda.empty_cache()
+
+    def _run_physics_multi(self, result) -> None:
+        """Run PHC physics refinement per-person.
+
+        For each person directory, loads params, runs physics refinement,
+        saves refined params, and re-exports BVH.
+        """
+        try:
+            from workers.physics.gvhmr_to_amass import params_to_amass_npz
+            from workers.physics.phc_runner import run_phc_local
+            from workers.physics.phc_to_smpl import phc_output_to_params
+            from workers.physics.evaluate import evaluate_refinement
+            from smplx_to_bvh import extract_gvhmr_params
+        except ImportError as exc:
+            self.log_line.emit(f"WARNING: Physics modules not available: {exc}")
+            return
+
+        import torch
+
+        person_dirs = getattr(result, "person_dirs", None) or []
+        if not person_dirs:
+            return
+
+        total = len(person_dirs)
+        self.progress.emit(0.85, f"Physics refinement ({total} persons)...")
+
+        for i, person_dir in enumerate(person_dirs):
+            if self._cancelled:
+                return
+            person_dir = Path(person_dir)
+
+            base_frac = 0.85 + (i / total) * 0.07
+            self.progress.emit(base_frac, f"Physics: person {i + 1}/{total}")
+
+            # Find params file
+            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
+            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
+            pt_path = (hybrid_pts[-1] if hybrid_pts
+                       else gvhmr_pts[0] if gvhmr_pts else None)
+            if pt_path is None:
+                self.log_line.emit(f"[Physics] Person {i}: no params .pt, skipping.")
+                continue
+
+            try:
+                params = extract_gvhmr_params(str(pt_path))
+
+                phc_dir = person_dir / "physics"
+                phc_dir.mkdir(parents=True, exist_ok=True)
+                input_npz = phc_dir / "phc_input.npz"
+                params_to_amass_npz(params, input_npz)
+
+                phc_output_dir = phc_dir / "phc_output"
+                phc_result = run_phc_local(input_npz, phc_output_dir)
+
+                if not phc_result.success:
+                    self.log_line.emit(
+                        f"[Physics] Person {i}: PHC failed, skipping. "
+                        f"{phc_result.log[-200:]}"
+                    )
+                    continue
+
+                refined = phc_output_to_params(phc_result.output_path, params)
+
+                # Update the .pt file with refined body params
+                data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                n = refined["num_frames"]
+                data["global_orient"] = torch.tensor(
+                    refined["global_orient"].reshape(n, -1), dtype=torch.float32
+                )
+                data["body_pose"] = torch.tensor(
+                    refined["body_pose"].reshape(n, -1), dtype=torch.float32
+                )
+                data["transl"] = torch.tensor(
+                    refined["transl"].reshape(n, -1), dtype=torch.float32
+                )
+                torch.save(data, str(pt_path))
+                self.log_line.emit(
+                    f"[Physics] Person {i}: refined {n} frames -> {pt_path.name}"
+                )
+
+                # Re-export BVH
+                try:
+                    from multi_person_split import _export_person_bvh
+                    bvh_path = _export_person_bvh(person_dir)
+                    if bvh_path:
+                        self.log_line.emit(
+                            f"[Physics] Person {i}: re-exported BVH -> {bvh_path.name}"
+                        )
+                except Exception as exc:
+                    self.log_line.emit(
+                        f"[Physics] Person {i}: BVH re-export failed — {exc}"
+                    )
+
+            except Exception as exc:
+                self.log_line.emit(f"[Physics] Person {i}: failed — {exc}")
+                continue
+
+            done_frac = 0.85 + ((i + 1) / total) * 0.07
+            self.progress.emit(done_frac, f"Physics: person {i + 1}/{total} complete")
 
     def _convert_bvh_to_fbx_batch(self, result) -> list[str]:
         """Convert per-person BVH files to FBX after split pipeline completes.

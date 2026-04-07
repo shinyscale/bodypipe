@@ -1938,16 +1938,12 @@ class AppWindow(QMainWindow):
                         params[key] = (val.numpy() if hasattr(val, "numpy")
                                        else np.array(val))
 
-            # --- Add SMPL-X hand mean pose (natural ~30° finger curl) ---
-            # Hand data from SMPLest-X and HaMeR is in offset-from-mean space;
-            # add the mean so the viewport shows correct finger articulation,
-            # matching what the BVH export does via _add_hand_mean_pose().
-            if "left_hand_pose" in params:
-                try:
-                    from smplx_to_bvh import _add_hand_mean_pose
-                    params = _add_hand_mean_pose(params)
-                except Exception:
-                    log.debug("Hand mean pose not applied (smplx model unavailable)")
+            # --- Hand pose mean handling ---
+            # HaMeR outputs absolute MANO rotations (not offset-from-mean).
+            # SmplxLite's other_default_pose already contains the hand mean;
+            # our forward() replaces it with the provided hand data directly.
+            # Do NOT add the mean here — it would double-count the natural
+            # finger curl, causing hyperextension.
 
             if "left_hand_pose" in params:
                 lh = params["left_hand_pose"]

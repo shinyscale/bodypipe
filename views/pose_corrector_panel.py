@@ -834,6 +834,7 @@ class PoseCorrectorPanel(QWidget):
     joint_selected = Signal(int)
     correction_applied = Signal(int, int)
     frame_requested = Signal(int)  # corrections table "Go" → seek to frame
+    person_requested = Signal(int)  # issue nav → select person
     export_requested = Signal(str)  # "bvh" or "fbx"
 
     def __init__(
@@ -1288,6 +1289,14 @@ class PoseCorrectorPanel(QWidget):
         export_row.addWidget(self._reexport_fbx_btn)
         lay.addLayout(export_row)
 
+        # Hand tracking overlay video
+        self._view_hand_viz_btn = QPushButton("View Hand Tracking")
+        self._view_hand_viz_btn.setToolTip(
+            "Open the HaMeR hand detection overlay video for this person"
+        )
+        self._view_hand_viz_btn.clicked.connect(self._open_hand_viz)
+        lay.addWidget(self._view_hand_viz_btn)
+
         self._export_status = QLabel("")
         self._export_status.setStyleSheet(
             f"color: {COLORS['text_secondary']}; font-size: 11px;"
@@ -1702,7 +1711,9 @@ class PoseCorrectorPanel(QWidget):
         if person_id == self._current_person:
             return
         self._current_person = person_id
-        self._viewport.set_person(person_id)
+        # Note: don't forward to self._viewport.set_person() here — AppWindow
+        # already calls the shared viewport directly, and double-dispatching
+        # would bypass the viewport's early-return guard when mocked in tests.
         # Sync dropdown — repopulate if requested person isn't in the combo
         found = False
         for i in range(self._person_combo.count()):
@@ -1734,7 +1745,8 @@ class PoseCorrectorPanel(QWidget):
     def on_frame_changed(self, frame_idx: int):
         """Update frame externally."""
         self._current_frame = frame_idx
-        self._viewport.on_frame_changed(frame_idx)
+        # Note: don't forward to self._viewport.on_frame_changed() here —
+        # AppWindow already calls the shared viewport directly.
         # Clear any in-progress preview when navigating frames
         self._viewport.set_pose_override(None)
         self._update_sliders()
@@ -1788,12 +1800,9 @@ class PoseCorrectorPanel(QWidget):
         person_id = self._person_combo.itemData(idx)
         if person_id is None:
             return
-        self._current_person = person_id
-        self._viewport.set_person(person_id)
         self._viewport.set_pose_override(None)
-        self._update_sliders()
-        self._refresh_corrections_table()
-        self._refresh_space_table()
+        # Emit signal so AppWindow updates viewport, session, and all panels
+        self.person_requested.emit(person_id)
 
     def _use_world_orient(self) -> bool:
         """True when the viewport renders world-space orientation (orbit mode)."""
@@ -3234,6 +3243,24 @@ class PoseCorrectorPanel(QWidget):
     # BVH/FBX export
     # ------------------------------------------------------------------
 
+    def _open_hand_viz(self):
+        """Open the HaMeR hand tracking overlay video for the current person."""
+        if self._current_person < 0:
+            return
+        track = self._session.person_tracks.get(self._current_person)
+        if track is None or track.person_dir is None:
+            self._export_status.setText("No person directory.")
+            return
+        viz_path = Path(track.person_dir) / "hamer_hands.mp4"
+        if not viz_path.is_file():
+            self._export_status.setText(
+                f"No hand tracking video. Re-run pipeline with HaMeR enabled."
+            )
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(viz_path)))
+
     def _on_reexport_bvh(self):
         """Re-export corrected BVH for the current person."""
         if self._current_person < 0:
@@ -3539,9 +3566,10 @@ class PoseCorrectorPanel(QWidget):
         self._issues_label.setText(
             f"[{idx + 1}/{n}] P{issue.person_id}: {issue.description}"
         )
-        # Select the issue's person if different
+        # Select the issue's person if different (emit signal so AppWindow
+        # can update both the viewport and this panel via set_person)
         if issue.person_id != self._current_person:
-            self.set_person(issue.person_id)
+            self.person_requested.emit(issue.person_id)
         # Seek to the issue's frame
         self.frame_requested.emit(issue.frame)
         # Highlight row in table
