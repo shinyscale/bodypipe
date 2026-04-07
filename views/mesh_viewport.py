@@ -1776,12 +1776,19 @@ class MeshViewport(_BaseWidget):
             return False
         if self._camera_mode == "orbit":
             return True
-        return False  # incam: camera-space + crop→fullframe transform
+        # incam: use world params only when derived_c2w is available
+        # (slam_c2w is in a different world frame than GVHMR body params)
+        if self._camera_mode == "incam" and self._session is not None:
+            if self._session.derived_c2w is not None:
+                return True
+        return False
 
     def _incam_transform_points(self, pts: np.ndarray, person_id: int) -> np.ndarray:
         """Transform points from crop camera space to full-frame camera space (incam only)."""
         if self._camera_mode != "incam" or self._session is None:
             return pts
+        if self._use_world_params():
+            return pts  # world-space data: view matrix handles positioning
         track = self._session.person_tracks.get(person_id)
         if track is None or track.K_crop is None or track.crop_bbox is None:
             return pts
@@ -1795,42 +1802,38 @@ class MeshViewport(_BaseWidget):
         Y_f = (K_c[1, 1] * Y + (K_c[1, 2] + y1 - K_full[1, 2]) * Z) / K_full[1, 1]
         return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
 
-    def _grid_center_x_from_bbox(self) -> float | None:
-        """Compute grid center X from per-frame bbox and pelvis depth.
-
-        The single ``crop_bbox`` in ``_incam_transform_points`` doesn't capture
-        per-frame horizontal motion.  Per-frame ``track.bboxes`` do — back-project
-        the bbox center to 3D camera space using the pelvis depth.
-        """
-        if self._camera_mode != "incam" or self._session is None:
-            return None
-        track = self._session.person_tracks.get(self._person_id)
-        if track is None or track.bboxes is None:
-            return None
-        if self._current_frame >= len(track.bboxes):
-            return None
-        bbox = track.bboxes[self._current_frame]
-        bbox_cx = float(bbox[0] + bbox[2]) / 2.0
-        # Pelvis depth in camera space (Z > 0 for points in front of camera)
-        Z = float(self._joint_positions[0, 2]) if self._joint_positions is not None else 1.0
-        if Z < 0.1:
-            return None
-        img_w = self._session.img_width or 1920
-        img_h = self._session.img_height or 1080
-        K = estimate_K(img_w, img_h)
-        return float((bbox_cx - K[0, 2]) * Z / K[0, 0])
-
     def _incam_world_view(self, frame_idx: int) -> np.ndarray | None:
         """Per-frame incam view matrix from camera-to-world data."""
         sess = self._session
         if sess is None:
             return None
-        c2w_all = sess.derived_c2w if sess.derived_c2w is not None else sess.slam_c2w
+        c2w_all = sess.derived_c2w
         if c2w_all is None:
             return None
         idx = min(frame_idx, len(c2w_all) - 1)
         w2c = np.linalg.inv(c2w_all[idx])
         return (_CV_TO_GL @ w2c).astype(np.float32)
+
+    def _incam_effective_K(self) -> np.ndarray | None:
+        """Effective intrinsics for incam world-space rendering.
+
+        Returns K_crop with principal point shifted by the crop offset,
+        so projecting crop-camera-space coordinates gives correct
+        full-frame pixel positions.
+        """
+        if self._session is None:
+            return None
+        tracks = self._session.person_tracks
+        if not tracks:
+            return None
+        # Use primary person (first track — the one derived_c2w was computed from)
+        track = next(iter(tracks.values()))
+        if track.K_crop is None or track.crop_bbox is None:
+            return None
+        K = track.K_crop.astype(np.float32).copy()
+        K[0, 2] += track.crop_bbox[0]   # cx += x1
+        K[1, 2] += track.crop_bbox[1]   # cy += y1
+        return K
 
     def _update_camera(self):
         """Recompute model/view/projection from current camera state."""
@@ -1849,7 +1852,8 @@ class MeshViewport(_BaseWidget):
             )
         else:  # incam
             self._model_mat = np.eye(4, dtype=np.float32)
-            self._view = _CV_TO_GL.copy()
+            view = self._incam_world_view(self._current_frame)
+            self._view = view if view is not None else _CV_TO_GL.copy()
         w = self.width() if self.width() > 0 else 200
         h = self.height() if self.height() > 0 else 150
         self._update_projection(w, h)
@@ -2618,6 +2622,9 @@ class MeshViewport(_BaseWidget):
                 if go_frame is None or bp_frame is None:
                     return None
 
+                # SmplxLite expects flat (*, 63), not structured (*, 21, 3)
+                bp_frame = bp_frame.reshape(bp_frame.shape[0], -1)
+
                 # betas: take first row (shape is shared across frames)
                 be_frame = be_t[:1] if be_t.ndim >= 2 else be_t.unsqueeze(0)
 
@@ -2633,11 +2640,29 @@ class MeshViewport(_BaseWidget):
                     J_shaped = self._body_model.get_skeleton(be_frame)  # (1, 55, 3)
                     tr_frame = tr_frame - J_shaped[:, 0]
 
+                # Extract hand poses if available
+                lh_frame = None
+                rh_frame = None
+                lh = params.get("left_hand_pose")
+                rh = params.get("right_hand_pose")
+                if lh is not None:
+                    lh_t = _to_tensor(lh)
+                    lh_frame = _frame_slice(lh_t, frame_idx)
+                    if lh_frame is not None:
+                        lh_frame = lh_frame.reshape(1, -1)  # (1, 15, 3) → (1, 45)
+                if rh is not None:
+                    rh_t = _to_tensor(rh)
+                    rh_frame = _frame_slice(rh_t, frame_idx)
+                    if rh_frame is not None:
+                        rh_frame = rh_frame.reshape(1, -1)  # (1, 15, 3) → (1, 45)
+
                 verts = self._body_model(
                     body_pose=bp_frame,
                     betas=be_frame,
                     global_orient=go_frame,
                     transl=tr_frame,
+                    left_hand_pose=lh_frame,
+                    right_hand_pose=rh_frame,
                 )  # (1, V, 3)
 
                 vertices = verts[0].cpu().numpy().astype(np.float32)
@@ -3525,16 +3550,14 @@ class MeshViewport(_BaseWidget):
 
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
-        # In wireframe mode skip the expensive SMPL-X forward pass —
-        # only compute FK joint positions for the skeleton overlay.
+        # ---- Vertices (cached) ----
         if self._render_mode != RenderMode.WIREFRAME:
-            result = self._compute_vertices(self._person_id, self._current_frame)
-            if result is not None:
-                self._vertices, self._normals = result
+            verts_result = self._compute_vertices(self._person_id, self._current_frame)
+            if verts_result is not None:
+                self._vertices, self._normals = verts_result
                 self._n_vertices = len(self._vertices)
                 if self._gl_ready:
                     self._upload_buffers()
-                # Auto-center orbit camera on first mesh load
                 if self._camera_mode == "orbit" and not self._orbit_auto_centered:
                     self._auto_center_orbit()
                     self._update_camera()
@@ -3543,7 +3566,7 @@ class MeshViewport(_BaseWidget):
                 self._normals = None
                 self._n_indices = 0
 
-        # Recompute skeleton joint positions (lightweight FK — always computed)
+        # ---- Joints (lightweight FK — always computed) ----
         prev_joints = self._joint_positions
         self._joint_positions = self._compute_joints()
         if self._joint_positions is not None and prev_joints is None:
@@ -3553,25 +3576,17 @@ class MeshViewport(_BaseWidget):
                 self._camera_mode, self._gl_ready,
             )
 
-        # Compute grid floor level for non-orbit modes (orbit computes in _auto_center_orbit)
+        # ---- Grid ----
         if self._joint_positions is not None and self._camera_mode != "orbit":
             pts = self._joint_positions
             if self._use_world_params():
-                # World space (Y-up): feet = min Y
                 self._grid_y = float(np.min(pts[:, 1]))
             else:
-                # CV / crop-camera space (Y-down): feet = max Y.
-                # The _CV_TO_GL view matrix negates Y when rendering,
-                # so store the raw camera-space value (no pre-negate).
                 self._grid_y = float(np.max(pts[:, 1]))
-            # Track grid center XZ — depth from pelvis, horizontal from
-            # per-frame bbox (the fixed crop_bbox in _incam_transform_points
-            # doesn't capture per-frame horizontal motion).
+            self._grid_center_x = float(pts[0, 0])
             self._grid_center_z = float(pts[0, 2])
-            bbox_x = self._grid_center_x_from_bbox()
-            self._grid_center_x = bbox_x if bbox_x is not None else float(pts[0, 0])
 
-        # Compute joints for ALL persons (multi-person view)
+        # ---- Multi-person joints ----
         self._all_joint_positions.clear()
         self._all_active_skels.clear()
         if self._show_all_persons and self._session is not None:
@@ -3580,7 +3595,6 @@ class MeshViewport(_BaseWidget):
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
                     continue
-                # Use world-space orient/transl when appropriate
                 if ("global_orient_world" in params
                         and "transl_world" in params
                         and self._use_world_params()):
@@ -3594,7 +3608,7 @@ class MeshViewport(_BaseWidget):
                 except Exception:
                     pass
 
-        # Auto-center orbit camera on skeleton when no mesh is available
+        # ---- Auto-center orbit on skeleton when no mesh ----
         if (
             self._vertices is None
             and (self._joint_positions is not None or self._all_joint_positions)
@@ -3683,7 +3697,11 @@ class MeshViewport(_BaseWidget):
             if self._session is not None:
                 img_w = self._session.img_width or w
                 img_h = self._session.img_height or h
-            K = estimate_K(img_w, img_h)
+            K = None
+            if self._use_world_params():
+                K = self._incam_effective_K()
+            if K is None:
+                K = estimate_K(img_w, img_h)
             K_vp = scale_K_to_viewport(K, img_w, img_h, w, h)
             self._projection = k_to_projection(K_vp, w, h)
 
