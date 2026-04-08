@@ -482,21 +482,26 @@ _INTERNAL_TO_USER_STAGE: dict[str, str] = {
     "GVHMR body solve": "Body",
     "SMPLest-X hand solve": "Hands",
     "Merging body + hands": "Hands",
+    "Physics refinement": "Physics",
     "Face pipeline": "Face",
     "BVH/FBX conversion": "Export",
     "Rendering": "Export",
 }
 
 
-def compute_visible_stages(use_hands: bool, use_face: bool) -> list[str]:
+def compute_visible_stages(
+    use_hands: bool, use_face: bool, use_physics: bool = False
+) -> list[str]:
     """Return ordered list of user-visible pipeline stage names.
 
-    Stages are dynamic — Hands and Face only appear when enabled.
+    Stages are dynamic — Hands, Physics, and Face only appear when enabled.
     Body and Export are always present.
     """
     stages = ["Body"]
     if use_hands:
         stages.append("Hands")
+    if use_physics:
+        stages.append("Physics")
     if use_face:
         stages.append("Face")
     stages.append("Export")
@@ -504,7 +509,10 @@ def compute_visible_stages(use_hands: bool, use_face: bool) -> list[str]:
 
 
 def map_stage_label(
-    internal_label: str, use_hands: bool, use_face: bool
+    internal_label: str,
+    use_hands: bool,
+    use_face: bool,
+    use_physics: bool = False,
 ) -> str | None:
     """Map internal worker stage label to user-visible stage name.
 
@@ -515,9 +523,12 @@ def map_stage_label(
     user_stage = _INTERNAL_TO_USER_STAGE.get(internal_label)
     if user_stage is None:
         return None
-    # When hands disabled, merge is instant GVHMR-only extraction → Export
+    # When hands disabled, merge is instant GVHMR-only extraction -> Export
     if user_stage == "Hands" and not use_hands:
         return "Export"
+    # When physics disabled, swallow the stage emission
+    if user_stage == "Physics" and not use_physics:
+        return None
     # When face disabled, the worker briefly emits "Face pipeline" then skips
     if user_stage == "Face" and not use_face:
         return None
@@ -613,6 +624,21 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         self._left_layout.insertWidget(run_idx + 1, face_group)
 
+        # Physics refinement group
+        physics_group = QGroupBox("Physics Refinement")
+        physics_layout = QVBoxLayout(physics_group)
+
+        self._use_physics = QCheckBox("Enable physics refinement (PHC)")
+        self._use_physics.setChecked(False)
+        self._use_physics.setToolTip(
+            "Refine body motion through physics simulation (PHC).\n"
+            "Adds weight, inertia, and ground contact to kinematic mocap.\n"
+            "Requires PHC installed separately (see spec)."
+        )
+        physics_layout.addWidget(self._use_physics)
+
+        self._left_layout.insertWidget(run_idx + 2, physics_group)
+
         # Pipeline output settings group
         output_group = QGroupBox("Pipeline Settings")
         output_layout = QVBoxLayout(output_group)
@@ -677,7 +703,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         cam_smooth_row.addWidget(self._cam_smooth)
         output_layout.addLayout(cam_smooth_row)
 
-        self._left_layout.insertWidget(run_idx + 2, output_group)
+        self._left_layout.insertWidget(run_idx + 3, output_group)
 
         # Update run button text
         self._run_btn.setText("Run Pipeline")
@@ -789,12 +815,13 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         use_hands = self._use_hands.isChecked()
         use_face = self._use_face.isChecked()
+        use_physics = self._use_physics.isChecked()
 
-        visible = map_stage_label(stage, use_hands, use_face)
+        visible = map_stage_label(stage, use_hands, use_face, use_physics)
         if visible is not None:
             self._current_stage = visible
 
-        stages = compute_visible_stages(use_hands, use_face)
+        stages = compute_visible_stages(use_hands, use_face, use_physics)
         current = getattr(self, "_current_stage", stages[0])
         idx = stages.index(current) + 1 if current in stages else len(stages)
         total = len(stages)
@@ -812,11 +839,14 @@ class PerfPipelineSettings(SinglePipelineSettings):
         if running:
             self._current_stage = "Body"
             stages = compute_visible_stages(
-                self._use_hands.isChecked(), self._use_face.isChecked()
+                self._use_hands.isChecked(),
+                self._use_face.isChecked(),
+                self._use_physics.isChecked(),
             )
             self._progress_label.setText(f"Stage 1/{len(stages)}: Body")
         self._use_hands.setEnabled(not running)
         self._use_face.setEnabled(not running)
+        self._use_physics.setEnabled(not running)
         self._use_vitpose_face.setEnabled(not running)
         self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
         self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
@@ -870,6 +900,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
             estimation_backend=be,
             body_model=bm,
+            use_physics_refine=self._use_physics.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -877,6 +908,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         super().set_config(config)
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
+        self._use_physics.setChecked(config.use_physics_refine)
         if config.hand_mode == "smplestx_only":
             self._hand_smplestx.setChecked(True)
         else:
@@ -1077,6 +1109,15 @@ class MultiPipelineSettings(QWidget):
         self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
         self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
 
+        self._use_physics = QCheckBox("Enable physics refinement (PHC)")
+        self._use_physics.setChecked(False)
+        self._use_physics.setToolTip(
+            "Refine body motion through physics simulation (PHC) per person.\n"
+            "Adds weight, inertia, and ground contact to kinematic mocap.\n"
+            "Requires PHC installed separately (see spec)."
+        )
+        mp_layout.addWidget(self._use_physics)
+
         layout.addWidget(mp_group)
 
         # Run / Cancel / Progress
@@ -1276,6 +1317,7 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setEnabled(not running)
         self._use_inpainting.setEnabled(not running)
         self._use_hands.setEnabled(not running)
+        self._use_physics.setEnabled(not running)
         self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
         self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:
@@ -1329,6 +1371,7 @@ class MultiPipelineSettings(QWidget):
             body_model=bm,
             use_hands=self._use_hands.isChecked(),
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
+            use_physics_refine=self._use_physics.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1344,6 +1387,7 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setChecked(config.render_overlays)
         self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
+        self._use_physics.setChecked(config.use_physics_refine)
         if config.hand_source == "hamer":
             self._hand_src_hamer.setChecked(True)
         else:

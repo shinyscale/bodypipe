@@ -34,6 +34,7 @@ class PipelineConfig:
     body_model: str = "smplx"            # "smplx" | "soma"
     estimation_backend: str = "gvhmr"    # "gvhmr" | "gemx"
     kimodo_model: str = "kimodo-soma-rp"  # Kimodo model for AI correction
+    use_physics_refine: bool = False
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
 
     def to_dict(self) -> dict:
@@ -58,6 +59,7 @@ class PipelineConfig:
             "body_model": self.body_model,
             "estimation_backend": self.estimation_backend,
             "kimodo_model": self.kimodo_model,
+            "use_physics_refine": self.use_physics_refine,
             "cam_smooth_preset": self.cam_smooth_preset,
         }
 
