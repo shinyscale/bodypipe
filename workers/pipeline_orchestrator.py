@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -239,6 +240,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
             if self._cancelled:
                 return
 
+            results["stage_timings"] = self._emit_timing_summary()
             self.progress.emit(1.0, "Pipeline complete")
             results["output_dir"] = str(self._output_dir)
             self.finished.emit(results)
@@ -736,9 +738,36 @@ class FullPipelineWorker(SubprocessWorkerBase):
     # ------------------------------------------------------------------
 
     def _emit_stage(self, idx: int):
-        """Emit progress for the start of stage *idx*."""
+        """Emit progress for the start of stage *idx* and record timing."""
+        now = time.monotonic()
+        # Close previous stage timing
+        if hasattr(self, "_stage_start_time") and self._current_stage_idx >= 0:
+            elapsed = now - self._stage_start_time
+            prev_label = _FULL_STAGES[self._current_stage_idx][2]
+            self._stage_timings.append((prev_label, elapsed))
+        else:
+            self._stage_timings: list[tuple[str, float]] = []
+            self._pipeline_start_time = now
+        self._current_stage_idx = idx
+        self._stage_start_time = now
         start, _end, label = _FULL_STAGES[idx]
         self.progress.emit(start, label)
+
+    def _emit_timing_summary(self):
+        """Close the last stage and emit a timing summary to the log."""
+        now = time.monotonic()
+        if hasattr(self, "_stage_start_time") and self._current_stage_idx >= 0:
+            elapsed = now - self._stage_start_time
+            label = _FULL_STAGES[self._current_stage_idx][2]
+            self._stage_timings.append((label, elapsed))
+        total = now - getattr(self, "_pipeline_start_time", now)
+        self.log_line.emit("")
+        self.log_line.emit("── Stage Timings ──")
+        for label, secs in self._stage_timings:
+            self.log_line.emit(f"  {label:<28s} {secs:6.1f}s")
+        self.log_line.emit(f"  {'TOTAL':<28s} {total:6.1f}s")
+        self.log_line.emit("")
+        return {label: round(secs, 2) for label, secs in self._stage_timings}
 
     def _stage_progress_callback(self, stage_idx: int):
         """Return a callback mapping ``[0, 1]`` sub-stage fraction to overall."""
@@ -805,6 +834,9 @@ class MultiPersonWorker(QThread):
         try:
             from multi_person_split import split_multi_person_video
 
+            timings: list[tuple[str, float]] = []
+            pipeline_t0 = time.monotonic()
+
             def progress_callback(frac: float, msg: str):
                 if frac < 0:
                     # Log-only: stream subprocess output without updating progress bar
@@ -816,6 +848,7 @@ class MultiPersonWorker(QThread):
 
             self.progress.emit(0.02, "Starting multi-person pipeline...")
 
+            t0 = time.monotonic()
             result = split_multi_person_video(
                 video_path=str(self._video_path),
                 output_dir=str(self._output_dir),
@@ -828,26 +861,44 @@ class MultiPersonWorker(QThread):
                 estimation_backend=self._config.estimation_backend,
                 use_hands=self._config.use_hands and self._config.hand_source != "hamer",
             )
+            timings.append(("Detection + Tracking + Estimation", time.monotonic() - t0))
 
             if self._cancelled:
                 return
 
             # ── Post-pipeline HaMeR hand replacement (per-person) ──
             if self._config.hand_source == "hamer":
+                t0 = time.monotonic()
                 self._try_hamer_multi(result)
+                timings.append(("HaMeR hands", time.monotonic() - t0))
 
             # ── Post-pipeline physics refinement (per-person) ──
             if self._config.use_physics_refine:
+                t0 = time.monotonic()
                 self._run_physics_multi(result)
+                timings.append(("Physics refinement", time.monotonic() - t0))
 
             # ── Post-pipeline FBX batch conversion ──
+            t0 = time.monotonic()
             fbx_files = self._convert_bvh_to_fbx_batch(result)
+            timings.append(("BVH/FBX conversion", time.monotonic() - t0))
+
+            total = time.monotonic() - pipeline_t0
+            self.log_line.emit("")
+            self.log_line.emit("── Stage Timings ──")
+            for label, secs in timings:
+                self.log_line.emit(f"  {label:<36s} {secs:6.1f}s")
+            self.log_line.emit(f"  {'TOTAL':<36s} {total:6.1f}s")
+            self.log_line.emit("")
+
+            stage_timings = {label: round(secs, 2) for label, secs in timings}
 
             self.progress.emit(1.0, "Multi-person pipeline complete")
             self.finished.emit({
                 "output_dir": str(self._output_dir),
                 "result": result,
                 "fbx_files": fbx_files,
+                "stage_timings": stage_timings,
             })
 
         except Exception as e:

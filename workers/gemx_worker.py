@@ -8,6 +8,8 @@ for hand and face tracking.
 
 from __future__ import annotations
 
+import time
+
 import logging
 import sys
 from pathlib import Path
@@ -295,6 +297,7 @@ class GEMXWorker(SubprocessWorkerBase):
             self._emit_stage(3)
             self.log_line.emit("Rendering skipped (SOMA renderer not yet integrated).")
 
+            results["stage_timings"] = self._emit_timing_summary()
             self.progress.emit(1.0, "GEM-X pipeline complete")
             results["output_dir"] = str(self._output_dir)
             self.finished.emit(results)
@@ -337,8 +340,34 @@ class GEMXWorker(SubprocessWorkerBase):
             self.log_line.emit(f"WARNING: FBX conversion failed: {exc}")
 
     def _emit_stage(self, idx: int):
+        now = time.monotonic()
+        if hasattr(self, "_stage_start_time") and self._current_stage_idx >= 0:
+            elapsed = now - self._stage_start_time
+            prev_label = _GEMX_STAGES[self._current_stage_idx][2]
+            self._stage_timings.append((prev_label, elapsed))
+        else:
+            self._stage_timings: list[tuple[str, float]] = []
+            self._pipeline_start_time = now
+        self._current_stage_idx = idx
+        self._stage_start_time = now
         start, _end, label = _GEMX_STAGES[idx]
         self.progress.emit(start, label)
+
+    def _emit_timing_summary(self):
+        """Close the last stage and emit a timing summary to the log."""
+        now = time.monotonic()
+        if hasattr(self, "_stage_start_time") and self._current_stage_idx >= 0:
+            elapsed = now - self._stage_start_time
+            label = _GEMX_STAGES[self._current_stage_idx][2]
+            self._stage_timings.append((label, elapsed))
+        total = now - getattr(self, "_pipeline_start_time", now)
+        self.log_line.emit("")
+        self.log_line.emit("── Stage Timings ──")
+        for label, secs in self._stage_timings:
+            self.log_line.emit(f"  {label:<28s} {secs:6.1f}s")
+        self.log_line.emit(f"  {'TOTAL':<28s} {total:6.1f}s")
+        self.log_line.emit("")
+        return {label: round(secs, 2) for label, secs in self._stage_timings}
 
     def _gemx_command(self) -> list[str]:
         cmd = [

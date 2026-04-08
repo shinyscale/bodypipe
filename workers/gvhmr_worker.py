@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 
 from models.pipeline_config import PipelineConfig
@@ -92,7 +93,9 @@ class GVHMRWorker(SubprocessWorkerBase):
             self.log_line.emit(f"$ {' '.join(cmd)}")
             self.progress.emit(0.02, "Starting GVHMR pipeline...")
 
+            t0 = time.monotonic()
             returncode, log_lines = self._run_subprocess(cmd, self._gvhmr_root)
+            elapsed = time.monotonic() - t0
 
             if self._cancelled:
                 return
@@ -100,8 +103,13 @@ class GVHMRWorker(SubprocessWorkerBase):
                 self.error.emit(f"GVHMR exited with code {returncode}")
                 return
 
+            self.log_line.emit("")
+            self.log_line.emit(f"── GVHMR completed in {elapsed:.1f}s ──")
+            self.log_line.emit("")
+
             result = self._collect_results()
             result["log"] = "\n".join(log_lines)
+            result["stage_timings"] = {"GVHMR body solve": round(elapsed, 2)}
             self.finished.emit(result)
 
         except Exception as e:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from pathlib import Path
 
@@ -51,6 +53,8 @@ class ReprocessWorker(QThread):
 
             total = len(self._person_ids)
             reprocessed = []
+            person_timings: list[tuple[int, float]] = []
+            pipeline_t0 = time.monotonic()
 
             for i, pid in enumerate(self._person_ids):
                 if self._cancelled:
@@ -60,6 +64,7 @@ class ReprocessWorker(QThread):
                 if track is None or track.person_dir is None:
                     continue
 
+                person_t0 = time.monotonic()
                 self.progress.emit(i / total, f"Reprocessing person {pid}...")
 
                 # Find person_index in all_tracks by matching track_id
@@ -135,11 +140,27 @@ class ReprocessWorker(QThread):
                     crossing_threshold=self._session.crossing_threshold,
                 )
 
+                person_elapsed = time.monotonic() - person_t0
+                person_timings.append((pid, person_elapsed))
                 reprocessed.append(pid)
                 self.person_done.emit(pid)
 
+            total_elapsed = time.monotonic() - pipeline_t0
             self.progress.emit(1.0, "Done")
-            self.finished.emit({"reprocessed": reprocessed})
+
+            # Timing summary
+            stage_timings = {}
+            if person_timings:
+                self.log_line.emit("")
+                self.log_line.emit("── Reprocess Timings ──")
+                for pid, secs in person_timings:
+                    label = f"Person {pid}"
+                    self.log_line.emit(f"  {label:<28s} {secs:6.1f}s")
+                    stage_timings[label] = round(secs, 2)
+                self.log_line.emit(f"  {'TOTAL':<28s} {total_elapsed:6.1f}s")
+                self.log_line.emit("")
+
+            self.finished.emit({"reprocessed": reprocessed, "stage_timings": stage_timings})
 
         except Exception as e:
             import traceback
