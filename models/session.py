@@ -210,6 +210,7 @@ class Session:
     K_orig: np.ndarray | None = None  # (3,3) original video intrinsics (GEM-X convention)
     slam_c2w: np.ndarray | None = None  # (N, 4, 4) per-frame camera-to-world
     derived_c2w: np.ndarray | None = None  # (N, 4, 4) camera-to-world from incam/world body pose pair
+    raw_c2w: np.ndarray | None = None  # (N, 4, 4) body-derived c2w before smoothing (diagnostics)
 
     # Session metadata (serialized)
     notes: str = ""
@@ -327,6 +328,7 @@ class Session:
         self.K_orig = None
         self.slam_c2w = None
         self.derived_c2w = None
+        self.raw_c2w = None
         self.notes = ""
         self.tags.clear()
         self.version = 1

@@ -665,6 +665,18 @@ class PerfPipelineSettings(SinglePipelineSettings):
         smooth_row.addWidget(self._body_smooth)
         output_layout.addLayout(smooth_row)
 
+        # Camera Smoothing (fallback when SLAM unavailable)
+        cam_smooth_row = QHBoxLayout()
+        cam_smooth_row.addWidget(QLabel("Camera smoothing:"))
+        self._cam_smooth = QComboBox()
+        self._cam_smooth.addItems(["Light", "Moderate (default)", "Heavy"])
+        self._cam_smooth.setCurrentIndex(1)  # Moderate
+        self._cam_smooth.setToolTip(
+            "Temporal smoothing for incam camera (fallback when SLAM unavailable)"
+        )
+        cam_smooth_row.addWidget(self._cam_smooth)
+        output_layout.addLayout(cam_smooth_row)
+
         self._left_layout.insertWidget(run_idx + 2, output_group)
 
         # Update run button text
@@ -814,6 +826,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._fbx_naming.setEnabled(not running)
         self._pitch_adjust.setEnabled(not running)
         self._body_smooth.setEnabled(not running)
+        self._cam_smooth.setEnabled(not running)
 
     # ------------------------------------------------------------------
     # Settings persistence (extend with hand/face + pipeline settings)
@@ -830,6 +843,15 @@ class PerfPipelineSettings(SinglePipelineSettings):
         else:
             smooth_key = "moderate"
 
+        # Map camera smoothing combo text to internal key
+        cam_smooth_text = self._cam_smooth.currentText()
+        if "Light" in cam_smooth_text:
+            cam_smooth_key = "light"
+        elif "Heavy" in cam_smooth_text:
+            cam_smooth_key = "heavy"
+        else:
+            cam_smooth_key = "moderate"
+
         be, bm = self._selected_backend()
         return PipelineConfig(
             mode="perf",
@@ -844,6 +866,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             pitch_adjust=self._pitch_adjust.value(),
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
             body_smooth_preset=smooth_key,
+            cam_smooth_preset=cam_smooth_key,
             use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
             estimation_backend=be,
             body_model=bm,
@@ -876,6 +899,9 @@ class PerfPipelineSettings(SinglePipelineSettings):
         # Body smoothing
         smooth_map = {"light": 0, "moderate": 1, "heavy": 2}
         self._body_smooth.setCurrentIndex(smooth_map.get(config.body_smooth_preset, 1))
+
+        # Camera smoothing
+        self._cam_smooth.setCurrentIndex(smooth_map.get(config.cam_smooth_preset, 1))
 
 
 # =========================================================================

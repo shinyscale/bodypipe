@@ -85,29 +85,78 @@ def _crop_transl_to_fullframe(tr_crop, K_crop, K_full, crop_x1, crop_y1):
     return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
 
 
-def _smooth_c2w(c2w, med_kernel=5, sigma=2.0):
+class _LowPassFilter:
+    def __init__(self):
+        self.s = None
+
+    def __call__(self, value, alpha):
+        if self.s is None:
+            self.s = value
+        else:
+            self.s = alpha * value + (1.0 - alpha) * self.s
+        return self.s
+
+
+class _OneEuroFilter:
+    """Adaptive low-pass filter: smooths heavily on slow motion, backs off on fast motion."""
+
+    def __init__(self, freq: float, min_cutoff: float = 0.5, beta: float = 0.007, d_cutoff: float = 1.0):
+        import math as _math
+        self.freq = freq
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._math = _math
+        self.x_filt = _LowPassFilter()
+        self.dx_filt = _LowPassFilter()
+
+    def _alpha(self, cutoff, freq):
+        tau = 1.0 / (2.0 * self._math.pi * cutoff)
+        te = 1.0 / freq
+        return 1.0 / (1.0 + tau / te)
+
+    def __call__(self, x):
+        prev = self.x_filt.s
+        dx = 0.0 if prev is None else (x - prev) * self.freq
+        edx = self.dx_filt(dx, self._alpha(self.d_cutoff, self.freq))
+        cutoff = self.min_cutoff + self.beta * abs(edx)
+        return self.x_filt(x, self._alpha(cutoff, self.freq))
+
+
+_CAM_SMOOTH_PRESETS = {
+    "light":    {"min_cutoff": 0.8,  "beta": 0.05,  "med_kernel": 5},
+    "moderate": {"min_cutoff": 0.15, "beta": 0.01,  "med_kernel": 7},
+    "heavy":    {"min_cutoff": 0.04, "beta": 0.005, "med_kernel": 9},
+}
+
+
+def _smooth_c2w(c2w, fps=30.0, preset="moderate"):
     """Temporal smoothing of camera-to-world matrices.
 
-    Translation: median filter (removes outlier spikes) then Gaussian smoothing.
-    Rotation: quaternion Gaussian smoothing with sign consistency.
+    Median pre-pass removes outlier spikes, then One Euro filter per channel
+    gives adaptive smoothing (heavy on slow motion, responsive on fast).
     """
-    from scipy.ndimage import median_filter, gaussian_filter1d
+    from scipy.ndimage import median_filter
     from scipy.spatial.transform import Rotation
 
     N = c2w.shape[0]
     if N < 3:
         return c2w
 
+    p = _CAM_SMOOTH_PRESETS.get(preset, _CAM_SMOOTH_PRESETS["moderate"])
+    med_k = min(p["med_kernel"], N | 1)  # must be odd, <= N
     out = c2w.copy()
 
-    # --- Smooth translation ---
+    # --- Smooth translation: median + One Euro ---
     for axis in range(3):
         t = out[:, axis, 3].copy()
-        t = median_filter(t, size=min(med_kernel, N | 1))  # must be odd
-        t = gaussian_filter1d(t, sigma=sigma)
+        t = median_filter(t, size=med_k)
+        filt = _OneEuroFilter(fps, min_cutoff=p["min_cutoff"], beta=p["beta"])
+        for i in range(N):
+            t[i] = filt(float(t[i]))
         out[:, axis, 3] = t
 
-    # --- Smooth rotation via quaternions ---
+    # --- Smooth rotation via quaternions: median + One Euro ---
     R_mats = out[:, :3, :3].copy()
     quats = Rotation.from_matrix(R_mats).as_quat()  # (N, 4) xyzw
 
@@ -116,14 +165,79 @@ def _smooth_c2w(c2w, med_kernel=5, sigma=2.0):
         if np.dot(quats[i], quats[i - 1]) < 0:
             quats[i] = -quats[i]
 
-    # Gaussian smooth each component, then re-normalize
     for c in range(4):
-        quats[:, c] = gaussian_filter1d(quats[:, c], sigma=sigma)
+        q = quats[:, c].copy()
+        q = median_filter(q, size=med_k)
+        filt = _OneEuroFilter(fps, min_cutoff=p["min_cutoff"], beta=p["beta"])
+        for i in range(N):
+            q[i] = filt(float(q[i]))
+        quats[:, c] = q
+
     norms = np.linalg.norm(quats, axis=-1, keepdims=True)
     quats = quats / np.where(norms > 1e-8, norms, np.ones_like(norms))
-
     out[:, :3, :3] = Rotation.from_quat(quats).as_matrix()
     return out
+
+
+def _umeyama_align(src, dst):
+    """Umeyama similarity alignment: find s, R, t such that dst ≈ s*R@src + t.
+
+    Args:
+        src: (N, 3) source points (SLAM camera positions)
+        dst: (N, 3) destination points (body-derived camera positions)
+    Returns:
+        s: float scale factor
+        R: (3, 3) rotation matrix
+        t: (3,) translation vector
+    """
+    n = src.shape[0]
+    mu_s = src.mean(axis=0)
+    mu_d = dst.mean(axis=0)
+    src_c = src - mu_s
+    dst_c = dst - mu_d
+    var_s = np.sum(src_c ** 2) / n
+    if var_s < 1e-12:
+        return 1.0, np.eye(3, dtype=np.float32), (mu_d - mu_s).astype(np.float32)
+    cov = (dst_c.T @ src_c) / n
+    U, D, Vt = np.linalg.svd(cov)
+    S = np.eye(3)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[2, 2] = -1
+    R = U @ S @ Vt
+    s = float(np.trace(np.diag(D) @ S) / var_s)
+    t = mu_d - s * R @ mu_s
+    return s, R.astype(np.float32), t.astype(np.float32)
+
+
+def _align_slam_to_world(slam_w2c, body_c2w, n_refs=10):
+    """Align SLAM W2C trajectory to GVHMR world frame via similarity transform.
+
+    Monocular VO (DPVO) has unknown scale. Uses Umeyama alignment on camera
+    positions to recover scale + rotation + translation, then applies the
+    similarity transform to produce C2W matrices in GVHMR's world frame.
+    """
+    N = slam_w2c.shape[0]
+
+    # Extract camera positions from both sources
+    body_pos = body_c2w[:, :3, 3]  # (N, 3) — body-derived, noisy but correct scale
+    slam_c2w_raw = np.linalg.inv(slam_w2c)  # (N, 4, 4) — C2W in SLAM's world frame
+    slam_pos = slam_c2w_raw[:, :3, 3]  # (N, 3) — camera positions, wrong scale
+
+    # Umeyama: find s, R, t mapping slam_pos → body_pos
+    s, R_align, t_align = _umeyama_align(slam_pos, body_pos)
+    logging.getLogger(__name__).info("SLAM alignment: scale=%.4f", s)
+
+    # Build aligned C2W for each frame
+    aligned = np.zeros((N, 4, 4), dtype=np.float32)
+    for i in range(N):
+        # Aligned camera position
+        aligned[i, :3, 3] = s * R_align @ slam_pos[i] + t_align
+        # Aligned rotation (scale doesn't affect rotation)
+        R_c2w_slam = slam_c2w_raw[i, :3, :3]
+        aligned[i, :3, :3] = R_align @ R_c2w_slam
+        aligned[i, 3, 3] = 1.0
+
+    return aligned
 
 
 def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
@@ -1461,21 +1575,40 @@ class AppWindow(QMainWindow):
                         track.K_crop = K_arr
 
     def _load_slam_if_needed(self):
-        """Load shared SLAM camera trajectory from output dir."""
+        """Load SLAM camera trajectory — shared first, then per-person."""
         if self._session.slam_c2w is not None:
             return
         if self._session.output_dir is None:
             return
-        slam_path = self._session.output_dir / "shared_slam.pt"
-        if not slam_path.is_file():
-            return
-        try:
-            import torch
-            slam = torch.load(str(slam_path), map_location="cpu", weights_only=False)
-            self._session.slam_c2w = np.array(slam, dtype=np.float32)
-            log.info("Loaded SLAM c2w: %s", self._session.slam_c2w.shape)
-        except Exception as e:
-            log.warning("Failed to load SLAM: %s", e)
+        # Search candidates: shared_slam.pt, then per-person preprocess paths
+        candidates = [self._session.output_dir / "shared_slam.pt"]
+        for track in self._session.person_tracks.values():
+            if track.person_dir:
+                candidates.append(
+                    Path(track.person_dir) / "demo" / "preprocess" / "slam.pt"
+                )
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                import torch
+                slam = torch.load(str(path), map_location="cpu", weights_only=False)
+                arr = np.array(slam, dtype=np.float32)
+                # Handle DPVO raw (N, 7) format: [x, y, z, qx, qy, qz, qw]
+                if arr.ndim == 2 and arr.shape[1] == 7:
+                    from scipy.spatial.transform import Rotation as _R
+                    quats_xyzw = arr[:, 3:7]
+                    # DPVO quaternion_to_matrix gives C2W; transpose → W2C
+                    R_w2c = _R.from_quat(quats_xyzw).as_matrix().transpose(0, 2, 1)
+                    T = np.tile(np.eye(4, dtype=np.float32), (len(arr), 1, 1))
+                    T[:, :3, :3] = R_w2c
+                    T[:, :3, 3] = arr[:, :3]
+                    arr = T
+                self._session.slam_c2w = arr
+                log.info("Loaded SLAM c2w from %s: %s", path.name, arr.shape)
+                return
+            except Exception as e:
+                log.warning("Failed to load SLAM from %s: %s", path, e)
 
     def _refresh_all_panels(self):
         """Refresh all panels from current session state after results are loaded.
@@ -2007,13 +2140,23 @@ class AppWindow(QMainWindow):
                 if self._session.derived_c2w is None:
                     go_incam = np.array(params["global_orient"]).astype(np.float32)
                     tr_incam = np.array(params["transl"]).astype(np.float32)
-                    # Use raw incam params — they are self-consistent with
-                    # global params.  Do NOT transform to full-frame space;
-                    # that breaks the c2w = R_world @ R_incam^T relationship.
-                    c2w = _compute_camera_c2w(
+                    c2w_body = _compute_camera_c2w(
                         go_incam, tr_incam, go_world, tr_world
                     )
-                    self._session.derived_c2w = _smooth_c2w(c2w)
+                    self._session.raw_c2w = c2w_body.copy()
+                    # Prefer SLAM trajectory when available (much smoother)
+                    self._load_slam_if_needed()
+                    if self._session.slam_c2w is not None:
+                        self._session.derived_c2w = _align_slam_to_world(
+                            self._session.slam_c2w, c2w_body
+                        )
+                        log.info("Using SLAM-aligned camera trajectory")
+                    else:
+                        # Fallback: smooth body-derived c2w with One Euro
+                        self._session.derived_c2w = _smooth_c2w(
+                            c2w_body, fps=self._session.fps
+                        )
+                        log.info("Using smoothed body-derived camera (no SLAM)")
                 # Multi-person lateral offset
                 offset_cam = self._get_person_world_offset(person_dir)
                 if offset_cam is not None:
