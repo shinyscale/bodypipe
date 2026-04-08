@@ -1213,6 +1213,9 @@ class MeshViewport(_BaseWidget):
         self._orbit_center: np.ndarray = _ORBIT_DEFAULT_CENTER.copy()
         self._orbit_auto_centered: bool = False
 
+        # Incam camera offset (manual alignment adjustment in GL camera space)
+        self._incam_offset: np.ndarray = np.zeros(3, dtype=np.float32)
+
         # Mouse tracking for orbit interaction
         self._mouse_last_pos: tuple[int, int] | None = None
 
@@ -1426,6 +1429,7 @@ class MeshViewport(_BaseWidget):
         if mode == self._camera_mode:
             return
         self._camera_mode = mode
+        self._incam_offset = np.zeros(3, dtype=np.float32)  # reset stale offset
         self._vertex_cache.clear()  # vertices depend on camera mode (incam vs world params)
         if mode == "orbit":
             self._orbit_auto_centered = False  # force re-center on mode switch
@@ -1853,7 +1857,14 @@ class MeshViewport(_BaseWidget):
         else:  # incam
             self._model_mat = np.eye(4, dtype=np.float32)
             view = self._incam_world_view(self._current_frame)
-            self._view = view if view is not None else _CV_TO_GL.copy()
+            if view is None:
+                view = _CV_TO_GL.copy()
+            # Apply manual alignment offset (pan/zoom)
+            if np.any(self._incam_offset != 0):
+                T = np.eye(4, dtype=np.float32)
+                T[:3, 3] = self._incam_offset
+                view = T @ view
+            self._view = view
         w = self.width() if self.width() > 0 else 200
         h = self.height() if self.height() > 0 else 150
         self._update_projection(w, h)
@@ -1938,8 +1949,11 @@ class MeshViewport(_BaseWidget):
             else:
                 self._drag_mode = "orbit"
 
-        # Track mouse position for drag (orbit, joint drag, or root drag)
-        if self._camera_mode == "orbit" or self._drag_mode in ("joint_drag", "root_drag"):
+        # Track mouse position for drag (orbit, joint drag, root drag, or incam pan)
+        if (self._camera_mode == "orbit"
+                or self._drag_mode in ("joint_drag", "root_drag")
+                or (self._camera_mode == "incam"
+                    and event.button() == Qt.MouseButton.MiddleButton)):
             self._mouse_last_pos = (event.position().x(), event.position().y())
         event.accept()
 
@@ -1969,6 +1983,19 @@ class MeshViewport(_BaseWidget):
             if event.buttons() & Qt.MouseButton.LeftButton:
                 self._handle_joint_drag(dx, dy)
             return
+
+        # Incam pan (middle-drag adjusts offset)
+        if self._camera_mode == "incam" and self._mouse_last_pos is not None:
+            if event.buttons() & Qt.MouseButton.MiddleButton:
+                x, y = event.position().x(), event.position().y()
+                dx = x - self._mouse_last_pos[0]
+                dy = y - self._mouse_last_pos[1]
+                self._mouse_last_pos = (x, y)
+                speed = 0.005
+                self._incam_offset[0] += float(dx) * speed
+                self._incam_offset[1] -= float(dy) * speed  # GL Y is up
+                self._update_camera()
+                return
 
         if self._camera_mode != "orbit" or self._mouse_last_pos is None:
             return
@@ -2029,7 +2056,13 @@ class MeshViewport(_BaseWidget):
         event.accept()
 
     def wheelEvent(self, event):
-        """Zoom in/out in orbit mode."""
+        """Zoom in/out in orbit or incam mode."""
+        if self._camera_mode == "incam":
+            delta = event.angleDelta().y()
+            self._incam_offset[2] += (delta / 120.0) * 0.1
+            self._update_camera()
+            event.accept()
+            return
         if self._camera_mode == "orbit":
             delta = event.angleDelta().y()
             factor = 1.0 - (delta / 120.0) * _ZOOM_FACTOR
@@ -2041,11 +2074,16 @@ class MeshViewport(_BaseWidget):
         super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        """Reset orbit camera on double-click."""
+        """Reset camera on double-click."""
         if self._camera_mode == "orbit":
             self._reset_orbit()
             self._update_camera()
             self.camera_changed.emit(self._camera_state())
+            event.accept()
+            return
+        if self._camera_mode == "incam":
+            self._incam_offset = np.zeros(3, dtype=np.float32)
+            self._update_camera()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -2640,30 +2678,53 @@ class MeshViewport(_BaseWidget):
                     J_shaped = self._body_model.get_skeleton(be_frame)  # (1, 55, 3)
                     tr_frame = tr_frame - J_shaped[:, 0]
 
-                # Extract hand poses if available
-                lh_frame = None
-                rh_frame = None
+                # Extract hand poses and patch model buffer directly
+                # (avoids SmplxLite .pyc stale bytecode issue on NTFS/WSL2)
                 lh = params.get("left_hand_pose")
                 rh = params.get("right_hand_pose")
-                if lh is not None:
-                    lh_t = _to_tensor(lh)
-                    lh_frame = _frame_slice(lh_t, frame_idx)
-                    if lh_frame is not None:
-                        lh_frame = lh_frame.reshape(1, -1)  # (1, 15, 3) → (1, 45)
-                if rh is not None:
-                    rh_t = _to_tensor(rh)
-                    rh_frame = _frame_slice(rh_t, frame_idx)
-                    if rh_frame is not None:
-                        rh_frame = rh_frame.reshape(1, -1)  # (1, 15, 3) → (1, 45)
+                _patched = False
+                _odp = self._body_model.other_default_pose  # (99,) buffer
+                if lh is not None or rh is not None:
+                    _odp_saved = _odp.data.clone()
+                    _patched = True
+                    if lh is not None:
+                        lh_t = _to_tensor(lh)
+                        lh_frame = _frame_slice(lh_t, frame_idx)
+                        if lh_frame is not None:
+                            _odp.data[9:54] += lh_frame.reshape(45)
+                    if rh is not None:
+                        rh_t = _to_tensor(rh)
+                        rh_frame = _frame_slice(rh_t, frame_idx)
+                        if rh_frame is not None:
+                            _odp.data[54:99] += rh_frame.reshape(45)
+
+                # Apply HaMeR wrist rotation to body_pose if available
+                lwo = params.get("left_wrist_orient")
+                rwo = params.get("right_wrist_orient")
+                if lwo is not None or rwo is not None:
+                    bp_frame = bp_frame.clone()
+                    if lwo is not None:
+                        lwo_t = _to_tensor(lwo)
+                        lwo_frame = _frame_slice(lwo_t, frame_idx)
+                        if lwo_frame is not None:
+                            # body_pose is (1, 63) — joint 19 = L_Wrist
+                            bp_frame[0, 57:60] = lwo_frame.reshape(3)
+                    if rwo is not None:
+                        rwo_t = _to_tensor(rwo)
+                        rwo_frame = _frame_slice(rwo_t, frame_idx)
+                        if rwo_frame is not None:
+                            # body_pose is (1, 63) — joint 20 = R_Wrist
+                            bp_frame[0, 60:63] = rwo_frame.reshape(3)
 
                 verts = self._body_model(
                     body_pose=bp_frame,
                     betas=be_frame,
                     global_orient=go_frame,
                     transl=tr_frame,
-                    left_hand_pose=lh_frame,
-                    right_hand_pose=rh_frame,
                 )  # (1, V, 3)
+
+                if _patched:
+                    _odp.data.copy_(_odp_saved)
 
                 vertices = verts[0].cpu().numpy().astype(np.float32)
                 vertices = self._incam_transform_points(vertices, person_id)

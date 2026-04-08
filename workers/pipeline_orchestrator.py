@@ -73,6 +73,9 @@ def save_merged_pt(params: dict, output_path: Path) -> Path:
         save_dict["betas"] = torch.tensor(params["betas"], dtype=torch.float32)
     if "bbox" in params:
         save_dict["bbox"] = torch.tensor(params["bbox"], dtype=torch.float32)
+    for wrist_key in ["left_wrist_orient", "right_wrist_orient"]:
+        if wrist_key in params:
+            save_dict[wrist_key] = torch.tensor(params[wrist_key], dtype=torch.float32)
     for key in [
         "transl_cam", "transl_world",
         "global_orient_cam", "global_orient_world",
@@ -365,12 +368,14 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 vitpose_path=vitpose_pt,
             )
             if hamer_result is not None:
-                # Merge HaMeR hand poses into world and camera params
+                # Merge HaMeR hand poses + wrist orient into world and camera params
                 for params in (world_params, camera_params):
-                    if params is not None and "left_hand_pose" in hamer_result:
-                        params["left_hand_pose"] = hamer_result["left_hand_pose"]
-                    if params is not None and "right_hand_pose" in hamer_result:
-                        params["right_hand_pose"] = hamer_result["right_hand_pose"]
+                    if params is None:
+                        continue
+                    for key in ["left_hand_pose", "right_hand_pose",
+                                "left_wrist_orient", "right_wrist_orient"]:
+                        if key in hamer_result:
+                            params[key] = hamer_result[key]
                 self.log_line.emit("HaMeR hands merged successfully.")
             else:
                 self.log_line.emit("WARNING: HaMeR returned no results, keeping SMPLest-X hands.")
@@ -962,6 +967,7 @@ class MultiPersonWorker(QThread):
                     model=shared_model,
                     model_cfg=shared_model_cfg,
                     viz_output_path=str(viz_path),
+                    hand_size_frac=0.12,
                 )
             except Exception as exc:
                 self.log_line.emit(
@@ -992,6 +998,11 @@ class MultiPersonWorker(QThread):
                     merged["right_hand_pose"].reshape(n, -1),
                     dtype=torch.float32,
                 )
+                for wrist_key in ["left_wrist_orient", "right_wrist_orient"]:
+                    if wrist_key in merged:
+                        data[wrist_key] = torch.tensor(
+                            merged[wrist_key], dtype=torch.float32
+                        )
                 torch.save(data, str(pt_path))
                 self.log_line.emit(
                     f"[HaMeR] Person {i}: confidence-merged hands → {pt_path.name}"
