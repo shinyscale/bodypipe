@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -276,11 +277,40 @@ def _forward_kinematics_soma(params: dict, frame_idx: int) -> np.ndarray:
     return positions
 
 
+def _rotvec_to_matrix_batch(rotvecs: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) axis-angle vectors to (N, 3, 3) rotation matrices.
+
+    Uses Rodrigues' formula directly in numpy — avoids N separate
+    scipy.Rotation calls which dominate FK cost in the per-joint loop.
+    """
+    rotvecs = np.asarray(rotvecs, dtype=np.float64)
+    angles = np.linalg.norm(rotvecs, axis=1, keepdims=True)  # (N, 1)
+    # Avoid division by zero for near-identity rotations
+    safe = np.where(angles > 1e-8, angles, np.ones_like(angles))
+    k = rotvecs / safe  # (N, 3) unit axes
+    K = np.zeros((len(k), 3, 3), dtype=np.float64)
+    K[:, 0, 1] = -k[:, 2]
+    K[:, 0, 2] = k[:, 1]
+    K[:, 1, 0] = k[:, 2]
+    K[:, 1, 2] = -k[:, 0]
+    K[:, 2, 0] = -k[:, 1]
+    K[:, 2, 1] = k[:, 0]
+    sin_a = np.sin(angles)[..., np.newaxis]   # (N, 1, 1)
+    cos_a = np.cos(angles)[..., np.newaxis]   # (N, 1, 1)
+    I = np.eye(3, dtype=np.float64)[np.newaxis]  # (1, 3, 3)
+    R = I + sin_a * K + (1 - cos_a) * (K @ K)
+    # Identity for near-zero angles
+    near_zero = (angles.ravel() < 1e-8)
+    R[near_zero] = np.eye(3, dtype=np.float64)
+    return R
+
+
 def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     """Compute 3D joint positions in camera space for one frame.
 
     Uses DEFAULT_OFFSETS (model-derived rest-pose, not shape-dependent).
-    Mirrors ``visualize_skeleton.py:forward_kinematics``.
+    Vectorized: converts all joint rotations in one batch call, then
+    walks the kinematic tree with accumulated rotation matrices.
 
     Parameters
     ----------
@@ -295,8 +325,6 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     # SOMA path: unified poses tensor (N, J, 3)
     if "poses" in params and "body_pose" not in params:
         return _forward_kinematics_soma(params, frame_idx)
-
-    from scipy.spatial.transform import Rotation
 
     n_joints = len(JOINT_NAMES)
     positions = np.zeros((n_joints, 3))
@@ -323,50 +351,50 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
 
     # Root
     go_frame = go[frame_idx] if go.ndim >= 2 else go
-    accumulated_R[0] = Rotation.from_rotvec(go_frame.ravel()[:3]).as_matrix()
     positions[0] = tr[frame_idx] if tr is not None and tr.ndim >= 2 else (tr if tr is not None else np.zeros(3))
 
     # Reshape body_pose to (N, 21, 3) if flat
     if bp.ndim == 2 and bp.shape[-1] != 3:
         bp = bp.reshape(bp.shape[0], -1, 3)
 
+    # Gather all joint axis-angle vectors into (n_joints, 3)
+    all_aa = np.zeros((n_joints, 3), dtype=np.float64)
+    all_aa[0] = go_frame.ravel()[:3]
+
+    for j in range(1, 22):
+        if bp.ndim >= 3 and frame_idx < bp.shape[0]:
+            all_aa[j] = bp[frame_idx, j - 1]
+        elif bp.ndim == 2:
+            all_aa[j] = bp[j - 1]
+
+    if lh is not None:
+        if lh.ndim == 3 and frame_idx < lh.shape[0]:
+            lh_frame = lh[frame_idx]
+        elif lh.ndim == 2:
+            lh_r = lh.reshape(-1, 15, 3) if lh.shape[-1] != 3 else lh
+            lh_frame = lh_r[frame_idx] if lh_r.ndim == 3 else np.zeros((15, 3))
+        else:
+            lh_frame = np.zeros((15, 3))
+        all_aa[22:37] = np.asarray(lh_frame).reshape(15, 3)
+
+    if rh is not None:
+        if rh.ndim == 3 and frame_idx < rh.shape[0]:
+            rh_frame = rh[frame_idx]
+        elif rh.ndim == 2:
+            rh_r = rh.reshape(-1, 15, 3) if rh.shape[-1] != 3 else rh
+            rh_frame = rh_r[frame_idx] if rh_r.ndim == 3 else np.zeros((15, 3))
+        else:
+            rh_frame = np.zeros((15, 3))
+        all_aa[37:52] = np.asarray(rh_frame).reshape(15, 3)
+
+    # Batch convert all axis-angle to rotation matrices (single vectorized call)
+    all_R = _rotvec_to_matrix_batch(all_aa)  # (52, 3, 3)
+
+    # Walk kinematic tree
+    accumulated_R[0] = all_R[0]
     for j in range(1, n_joints):
         parent = JOINT_PARENTS[j]
-
-        if 1 <= j <= 21:
-            if bp.ndim >= 3 and frame_idx < bp.shape[0]:
-                rot_aa = bp[frame_idx, j - 1]
-            elif bp.ndim == 2:
-                rot_aa = bp[j - 1]
-            else:
-                rot_aa = np.zeros(3)
-        elif 22 <= j <= 36:
-            if lh is not None:
-                if lh.ndim == 3 and frame_idx < lh.shape[0]:
-                    rot_aa = lh[frame_idx, j - 22]
-                elif lh.ndim == 2:
-                    lh_r = lh.reshape(-1, 15, 3) if lh.shape[-1] != 3 else lh
-                    rot_aa = lh_r[frame_idx, j - 22] if lh_r.ndim == 3 else np.zeros(3)
-                else:
-                    rot_aa = np.zeros(3)
-            else:
-                rot_aa = np.zeros(3)
-        elif 37 <= j <= 51:
-            if rh is not None:
-                if rh.ndim == 3 and frame_idx < rh.shape[0]:
-                    rot_aa = rh[frame_idx, j - 37]
-                elif rh.ndim == 2:
-                    rh_r = rh.reshape(-1, 15, 3) if rh.shape[-1] != 3 else rh
-                    rot_aa = rh_r[frame_idx, j - 37] if rh_r.ndim == 3 else np.zeros(3)
-                else:
-                    rot_aa = np.zeros(3)
-            else:
-                rot_aa = np.zeros(3)
-        else:
-            rot_aa = np.zeros(3)
-
-        R_local = Rotation.from_rotvec(np.asarray(rot_aa).ravel()[:3]).as_matrix()
-        accumulated_R[j] = accumulated_R[parent] @ R_local
+        accumulated_R[j] = accumulated_R[parent] @ all_R[j]
         positions[j] = positions[parent] + accumulated_R[parent] @ offsets[j]
 
     return positions
@@ -790,7 +818,11 @@ _LIGHT_COLOR = np.array([0.8, 0.8, 0.8], dtype=np.float32)
 _AMBIENT = np.array([0.35, 0.35, 0.35], dtype=np.float32)
 
 # Maximum vertex cache size (per person+frame).
-_CACHE_MAX = 200
+# ~240KB per entry (10K verts * 3 * 4 bytes * 2 arrays), so 2000 entries ≈ 480MB.
+_CACHE_MAX = 2000
+
+# How many frames to prefetch ahead of playback.
+_PREFETCH_AHEAD = 120
 
 # Orbit camera defaults and sensitivity.
 _ORBIT_SENSITIVITY = 0.3       # degrees per pixel drag
@@ -1209,6 +1241,10 @@ class MeshViewport(_BaseWidget):
         self._vertex_cache: dict[
             tuple[int, int], tuple[np.ndarray, np.ndarray]
         ] = {}
+        # Background prefetch thread for filling cache ahead of playback
+        self._prefetch_thread: threading.Thread | None = None
+        self._prefetch_stop = threading.Event()
+        self._cache_lock = threading.Lock()
 
         # GL state
         self._gl_ready: bool = False
@@ -1396,10 +1432,16 @@ class MeshViewport(_BaseWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def _invalidate_cache(self):
+        """Stop prefetch and clear vertex cache. Thread-safe."""
+        self._stop_prefetch()
+        with self._cache_lock:
+            self._invalidate_cache()
+
     def set_session(self, session: Session):
         """Bind session data source."""
         self._session = session
-        self._vertex_cache.clear()
+        self._invalidate_cache()
         self._recompute_letterbox()
 
     def set_person(self, person_id: int):
@@ -1472,7 +1514,7 @@ class MeshViewport(_BaseWidget):
             return
         self._camera_mode = mode
         self._incam_offset = np.zeros(3, dtype=np.float32)  # reset stale offset
-        self._vertex_cache.clear()  # vertices depend on camera mode (incam vs world params)
+        self._invalidate_cache()  # vertices depend on camera mode (incam vs world params)
         if mode == "orbit":
             self._orbit_auto_centered = False  # force re-center on mode switch
         self._refresh_mesh()  # recompute joints/vertices in new mode's coordinate space
@@ -1556,11 +1598,10 @@ class MeshViewport(_BaseWidget):
         Parameters
         ----------
         frame : (H, W, 3) uint8 RGB array, or None to clear.
+                The array is used by reference — caller must not mutate it
+                after this call until the next set_video_frame.
         """
-        if frame is not None:
-            self._video_frame = frame.copy()
-        else:
-            self._video_frame = None
+        self._video_frame = frame
         if _HAS_GL:
             self.update()
 
@@ -1596,7 +1637,8 @@ class MeshViewport(_BaseWidget):
 
         When *active* is True the current render mode is saved and the
         viewport switches to _playback_render_mode.  When *active* becomes
-        False the previous mode is restored.
+        False the previous mode is restored.  Also starts/stops the
+        background vertex prefetcher.
         """
         if active:
             if self._pre_scrub_mode is None:
@@ -1604,7 +1646,11 @@ class MeshViewport(_BaseWidget):
                 if self._render_mode != self._playback_render_mode:
                     self._render_mode = self._playback_render_mode
                     self._refresh_mesh()
+            # Start prefetching ahead of playback position
+            if self._render_mode != RenderMode.WIREFRAME:
+                self._start_prefetch()
         else:
+            self._stop_prefetch()
             if self._pre_scrub_mode is not None:
                 restore = self._pre_scrub_mode
                 self._pre_scrub_mode = None
@@ -1622,6 +1668,74 @@ class MeshViewport(_BaseWidget):
             self._render_mode = mode
             self._refresh_mesh()
 
+    # ------------------------------------------------------------------
+    # Background vertex prefetch (fills cache ahead of playback)
+    # ------------------------------------------------------------------
+
+    def _start_prefetch(self):
+        """Launch a daemon thread to pre-compute vertices ahead of playback."""
+        self._stop_prefetch()  # stop any existing thread
+        if self._session is None or self._person_id < 0:
+            return
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None:
+            return
+        params = track.smplx_params
+        if params is None:
+            return
+        # Determine total frame count from params
+        go = params.get("global_orient")
+        if go is None:
+            return
+        go_arr = np.asarray(go) if not isinstance(go, np.ndarray) else go
+        n_frames = go_arr.shape[0] if go_arr.ndim >= 2 else 1
+
+        self._prefetch_stop.clear()
+        self._prefetch_thread = threading.Thread(
+            target=self._prefetch_worker,
+            args=(self._person_id, self._current_frame, n_frames),
+            daemon=True,
+            name="vertex-prefetch",
+        )
+        self._prefetch_thread.start()
+
+    def _stop_prefetch(self):
+        """Signal the prefetch thread to stop and wait for it."""
+        self._prefetch_stop.set()
+        t = self._prefetch_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=0.5)
+        self._prefetch_thread = None
+
+    def _prefetch_worker(self, person_id: int, start_frame: int, n_frames: int):
+        """Background thread: compute vertices for frames ahead of playback.
+
+        Runs the same _compute_vertices logic but stores results in the
+        shared cache.  Stops when _prefetch_stop is set or all frames are done.
+        """
+        for offset in range(_PREFETCH_AHEAD):
+            if self._prefetch_stop.is_set():
+                return
+            frame = start_frame + offset
+            if frame >= n_frames:
+                frame = frame % n_frames  # wrap for looping playback
+            cache_key = (person_id, frame)
+            with self._cache_lock:
+                if cache_key in self._vertex_cache:
+                    continue
+            # Compute on this thread (no GL calls — just torch + numpy)
+            try:
+                result = self._compute_vertices(person_id, frame)
+                if result is not None:
+                    with self._cache_lock:
+                        if len(self._vertex_cache) >= _CACHE_MAX:
+                            oldest = next(iter(self._vertex_cache))
+                            del self._vertex_cache[oldest]
+                        self._vertex_cache[cache_key] = result
+            except Exception as exc:
+                logger.debug("prefetch frame %d failed: %s", frame, exc)
+                continue
+
     def set_pose_override(self, override: dict | None):
         """Set temporary per-frame pose override for real-time preview.
 
@@ -1638,7 +1752,8 @@ class MeshViewport(_BaseWidget):
         # Invalidate cache for affected frame to force recomputation
         if override is not None and self._person_id >= 0:
             frame_idx = override.get("frame_idx", self._current_frame)
-            self._vertex_cache.pop((self._person_id, frame_idx), None)
+            with self._cache_lock:
+                self._vertex_cache.pop((self._person_id, frame_idx), None)
         self._refresh_mesh()
 
     def refresh(self):
@@ -1647,7 +1762,7 @@ class MeshViewport(_BaseWidget):
         Use when underlying params have changed but the frame index hasn't,
         which would cause ``on_frame_changed`` to early-return.
         """
-        self._vertex_cache.clear()
+        self._invalidate_cache()
         self._refresh_mesh()
 
     def invalidate_cache(self, person_id: int | None = None, frame_idx: int | None = None):
@@ -1657,9 +1772,10 @@ class MeshViewport(_BaseWidget):
         Otherwise clears the entire cache.
         """
         if person_id is not None and frame_idx is not None:
-            self._vertex_cache.pop((person_id, frame_idx), None)
+            with self._cache_lock:
+                self._vertex_cache.pop((person_id, frame_idx), None)
         else:
-            self._vertex_cache.clear()
+            self._invalidate_cache()
 
     def _apply_override_to_params(self, params: dict, frame_idx: int) -> dict:
         """Create a modified copy of params with pose override applied.
@@ -1712,7 +1828,7 @@ class MeshViewport(_BaseWidget):
         if self._interpolation_enabled == enabled:
             return
         self._interpolation_enabled = enabled
-        self._vertex_cache.clear()
+        self._invalidate_cache()
         self._refresh_mesh()
 
     @property
@@ -1975,8 +2091,11 @@ class MeshViewport(_BaseWidget):
         """Joint picking on left-click, orbit drag on left-drag in orbit mode."""
         if event.button() == Qt.MouseButton.LeftButton:
             # Convert to viewport coords; ignore clicks on black bars
-            vp = self._widget_to_viewport(event.position().x(), event.position().y())
+            wx, wy = event.position().x(), event.position().y()
+            vp = self._widget_to_viewport(wx, wy)
             if vp is None:
+                logger.warning("click rejected: widget=(%.0f,%.0f) letterbox=%r",
+                             wx, wy, self._letterbox)
                 event.accept()
                 return
             # Try joint picking first
@@ -2180,7 +2299,7 @@ class MeshViewport(_BaseWidget):
         except ImportError:
             return
 
-        # Camera right/up vectors from view matrix
+        # Camera right/up vectors from view matrix (world space)
         cam_right = self._view[0, :3].copy().astype(np.float64)
         cam_up = self._view[1, :3].copy().astype(np.float64)
         r_len = np.linalg.norm(cam_right)
@@ -2189,6 +2308,17 @@ class MeshViewport(_BaseWidget):
             cam_right /= r_len
         if u_len > 1e-8:
             cam_up /= u_len
+
+        # Transform camera vectors from world space to model/parameter space.
+        # When _data_is_global=False, _model_mat is _CV_TO_GL which flips Y/Z;
+        # without this transform the drag rotation axis is inverted, causing
+        # the skeleton to flip upside down on first drag.
+        model_R = self._model_mat[:3, :3].astype(np.float64)
+        det = np.linalg.det(model_R)
+        if abs(det) > 1e-8:
+            model_R_inv = np.linalg.inv(model_R)
+            cam_right = model_R_inv @ cam_right
+            cam_up = model_R_inv @ cam_up
 
         # Horizontal drag → rotation around camera-up axis
         # Vertical drag → rotation around camera-right axis
@@ -2409,8 +2539,11 @@ class MeshViewport(_BaseWidget):
         colored points into an offscreen FBO and reads back the pixel.
         Falls back to screen-space distance if FBO picking fails or is
         disabled.
+
+        screen_x/screen_y are in viewport-space (relative to letterbox origin).
         """
         if self._joint_positions is None:
+            logger.warning("pick_joint: no joint_positions")
             return None
 
         if self._picking_mode == "fbo" and _HAS_GL and self._gl_ready:
@@ -2425,7 +2558,19 @@ class MeshViewport(_BaseWidget):
         h = lh if lh > 0 else 150
         mvp = self._projection @ self._view @ self._model_mat
         screen = project_joints_to_screen(self._joint_positions, mvp, w, h)
-        return find_nearest_joint(screen_x, screen_y, screen)
+        result = find_nearest_joint(screen_x, screen_y, screen)
+        if result is None:
+            # Diagnostic: log nearest distance to help debug picking failures
+            body = screen[:min(len(screen), 22)]
+            dists = np.sqrt((body[:, 0] - screen_x) ** 2 + (body[:, 1] - screen_y) ** 2)
+            min_dist = float(np.min(dists)) if len(dists) > 0 else -1
+            logger.warning(
+                "pick_joint miss: click=(%.0f,%.0f) letterbox=(%d,%d,%d,%d) "
+                "nearest_dist=%.1f threshold=%.0f n_joints=%d",
+                screen_x, screen_y, lx, ly, lw, lh,
+                min_dist, _JOINT_PICK_THRESHOLD, len(self._joint_positions),
+            )
+        return result
 
     def _ensure_pick_fbo(self, width: int, height: int) -> bool:
         """Create or resize the offscreen FBO for color-coded joint picking.
@@ -2513,6 +2658,10 @@ class MeshViewport(_BaseWidget):
             return None
 
         # Bind FBO and clear (FBO uses its own viewport at origin)
+        # Reset color mask — paintGL's QPainter path leaves alpha writes
+        # disabled, which would prevent the FBO clear and joint rendering
+        # from writing correct RGBA values for ID-color picking.
+        gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._pick_fbo_id)
         gl.glViewport(0, 0, w, h)
         gl.glClearColor(0.0, 0.0, 0.0, 0.0)
@@ -2570,7 +2719,15 @@ class MeshViewport(_BaseWidget):
             b_val = int(pixel[2]) if not isinstance(pixel[2], int) else pixel[2]
             result = decode_joint_id(r_val, g_val, b_val)
             if result is not None and result < _N_BODY_JOINTS:
+                logger.warning("fbo_pick: hit joint %d at px=(%d,%d) rgba=(%d,%d,%d,%d)",
+                             result, px, py, r_val, g_val, b_val,
+                             int(pixel[3]) if len(pixel) > 3 else 0)
                 return result
+            logger.warning("fbo_pick: miss at px=(%d,%d) rgba=(%d,%d,%d,%d) fbo=%dx%d",
+                         px, py, r_val, g_val, b_val,
+                         int(pixel[3]) if len(pixel) > 3 else 0, w, h)
+        else:
+            logger.warning("fbo_pick: glReadPixels returned %r", pixel)
         return None
 
     # ------------------------------------------------------------------
@@ -2653,8 +2810,10 @@ class MeshViewport(_BaseWidget):
                             and prev_c.frame_index < frame_idx < next_c.frame_index):
                         interp_active = True
 
-        if not override_active and not interp_active and cache_key in self._vertex_cache:
-            return self._vertex_cache[cache_key]
+        if not override_active and not interp_active:
+            with self._cache_lock:
+                if cache_key in self._vertex_cache:
+                    return self._vertex_cache[cache_key]
 
         if not self._load_model():
             return None
@@ -2744,6 +2903,8 @@ class MeshViewport(_BaseWidget):
                 # (avoids SmplxLite .pyc stale bytecode issue on NTFS/WSL2)
                 lh = params.get("left_hand_pose")
                 rh = params.get("right_hand_pose")
+                # DIAGNOSTIC: uncomment to test L/R swap
+                # lh, rh = rh, lh
                 _patched = False
                 _odp = self._body_model.other_default_pose  # (99,) buffer
                 if lh is not None or rh is not None:
@@ -2759,24 +2920,6 @@ class MeshViewport(_BaseWidget):
                         rh_frame = _frame_slice(rh_t, frame_idx)
                         if rh_frame is not None:
                             _odp.data[54:99] += rh_frame.reshape(45)
-
-                # Apply HaMeR wrist rotation to body_pose if available
-                lwo = params.get("left_wrist_orient")
-                rwo = params.get("right_wrist_orient")
-                if lwo is not None or rwo is not None:
-                    bp_frame = bp_frame.clone()
-                    if lwo is not None:
-                        lwo_t = _to_tensor(lwo)
-                        lwo_frame = _frame_slice(lwo_t, frame_idx)
-                        if lwo_frame is not None:
-                            # body_pose is (1, 63) — joint 19 = L_Wrist
-                            bp_frame[0, 57:60] = lwo_frame.reshape(3)
-                    if rwo is not None:
-                        rwo_t = _to_tensor(rwo)
-                        rwo_frame = _frame_slice(rwo_t, frame_idx)
-                        if rwo_frame is not None:
-                            # body_pose is (1, 63) — joint 20 = R_Wrist
-                            bp_frame[0, 60:63] = rwo_frame.reshape(3)
 
                 verts = self._body_model(
                     body_pose=bp_frame,
@@ -2796,10 +2939,11 @@ class MeshViewport(_BaseWidget):
 
                 # Only cache non-overridden and non-interpolated results
                 if not override_active and not interp_active:
-                    if len(self._vertex_cache) >= _CACHE_MAX:
-                        oldest = next(iter(self._vertex_cache))
-                        del self._vertex_cache[oldest]
-                    self._vertex_cache[cache_key] = result
+                    with self._cache_lock:
+                        if len(self._vertex_cache) >= _CACHE_MAX:
+                            oldest = next(iter(self._vertex_cache))
+                            del self._vertex_cache[oldest]
+                        self._vertex_cache[cache_key] = result
 
                 return result
         except Exception as e:
@@ -2820,7 +2964,7 @@ class MeshViewport(_BaseWidget):
             self._gl_ready = False
             self._n_indices = 0
             self._n_vertices = 0
-            self._vertex_cache.clear()
+            self._invalidate_cache()
 
             gl.glEnable(gl.GL_DEPTH_TEST)
             gl.glEnable(gl.GL_CULL_FACE)
@@ -2889,16 +3033,20 @@ class MeshViewport(_BaseWidget):
         Weston compositor.  This path does all GL rendering directly and
         skips 2D text overlays (joint labels, debug info).
         """
-        # Clear full widget to black (bars)
-        gl.glViewport(0, 0, self.width(), self.height())
+        # Clear full widget to black (bars), then letterbox to theme color.
+        # glClear ignores glViewport — use glScissor to restrict the second clear.
+        ww, wh = self.width(), self.height()
+        gl.glViewport(0, 0, ww, wh)
         gl.glClearColor(0.0, 0.0, 0.0, 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
-        # Set viewport to letterbox and clear with theme color
         lx, ly, lw, lh = self._letterbox
-        gl_y = self.height() - ly - lh
+        gl_y = wh - ly - lh
         gl.glViewport(lx, gl_y, lw, lh)
+        gl.glEnable(gl.GL_SCISSOR_TEST)
+        gl.glScissor(lx, gl_y, lw, lh)
         gl.glClearColor(0.1, 0.1, 0.12, 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        gl.glDisable(gl.GL_SCISSOR_TEST)
 
         # Grid floor
         if self._show_grid:
@@ -3004,11 +3152,15 @@ class MeshViewport(_BaseWidget):
         # then disable alpha writes so GL draw calls can't make it transparent.
         # Without this, the Wayland compositor on WSL2 treats GL-rendered
         # pixels as transparent → click-through to windows behind.
+        # Use scissor to restrict clear to letterbox area (preserve black bars).
         gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
+        gl.glEnable(gl.GL_SCISSOR_TEST)
+        gl.glScissor(lx, gl_y, lw, lh)
         if _has_bg:
             gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
         else:
             gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        gl.glDisable(gl.GL_SCISSOR_TEST)
         gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_FALSE)
 
         # Grid floor (drawn first so mesh occludes it)
@@ -3733,10 +3885,17 @@ class MeshViewport(_BaseWidget):
             self._grid_center_z = float(pts[0, 2])
 
         # ---- Multi-person joints ----
-        self._all_joint_positions.clear()
-        self._all_active_skels.clear()
+        # During scrubbing/playback, skip re-computing FK for non-selected
+        # persons — keep last known positions for smooth playback.
+        if self._pre_scrub_mode is None:
+            # Not scrubbing: full update
+            self._all_joint_positions.clear()
+            self._all_active_skels.clear()
         if self._show_all_persons and self._session is not None:
             for pid, track in self._session.person_tracks.items():
+                # During scrubbing, skip if we already have this person's joints
+                if self._pre_scrub_mode is not None and pid in self._all_joint_positions:
+                    continue
                 skel = _SOMA_SKEL if track.body_model_type == "soma" else _SKEL
                 params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
                 if params is None:
