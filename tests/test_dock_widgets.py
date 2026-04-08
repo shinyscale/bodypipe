@@ -18,8 +18,7 @@ from models.session import Session
 from views.dock_widgets import (
     VideoDock,
     MeshViewportDock,
-    IdentityDock,
-    PoseCorrectorDock,
+    PersonPanelDock,
     TrackOverviewDock,
     PipelineSettingsDock,
 )
@@ -79,58 +78,40 @@ class TestMeshViewportDock:
 
 
 # ===========================================================================
-# IdentityDock
+# PersonPanelDock
 # ===========================================================================
 
 
-class TestIdentityDock:
-    def test_creates_with_correct_title(self, qapp):
+class TestPersonPanelDock:
+    def _make_dock(self):
         from views.identity_inspector import IdentityInspector
+        from views.pose_corrector_panel import PoseCorrectorPanel
+        from views.person_selector_bar import PersonSelectorBar
 
-        dock = IdentityDock(IdentityInspector(Session()))
-        assert dock.windowTitle() == "Identity Inspector"
+        session = Session()
+        bar = PersonSelectorBar()
+        bar.set_session(session)
+        inspector = IdentityInspector(session)
+        pc = PoseCorrectorPanel(session=session, gvhmr_root=Path("/tmp/GVHMR"))
+        return PersonPanelDock(bar, inspector, pc), bar, inspector, pc
+
+    def test_creates_with_correct_title(self, qapp):
+        dock, *_ = self._make_dock()
+        assert dock.windowTitle() == "Person"
 
     def test_object_name(self, qapp):
-        from views.identity_inspector import IdentityInspector
+        dock, *_ = self._make_dock()
+        assert dock.objectName() == "PersonPanelDock"
 
-        dock = IdentityDock(IdentityInspector(Session()))
-        assert dock.objectName() == "IdentityDock"
-
-    def test_property_returns_inner_widget(self, qapp):
-        from views.identity_inspector import IdentityInspector
-
-        inspector = IdentityInspector(Session())
-        dock = IdentityDock(inspector)
+    def test_properties_return_inner_widgets(self, qapp):
+        dock, bar, inspector, pc = self._make_dock()
+        assert dock.person_bar is bar
         assert dock.identity_inspector is inspector
-
-
-# ===========================================================================
-# PoseCorrectorDock
-# ===========================================================================
-
-
-class TestPoseCorrectorDock:
-    def test_creates_with_correct_title(self, qapp):
-        from views.pose_corrector_panel import PoseCorrectorPanel
-
-        pc = PoseCorrectorPanel(session=Session(), gvhmr_root=Path("/tmp/GVHMR"))
-        dock = PoseCorrectorDock(pc)
-        assert dock.windowTitle() == "Pose Corrector"
-
-    def test_object_name(self, qapp):
-        from views.pose_corrector_panel import PoseCorrectorPanel
-
-        dock = PoseCorrectorDock(
-            PoseCorrectorPanel(session=Session(), gvhmr_root=Path("/tmp/GVHMR"))
-        )
-        assert dock.objectName() == "PoseCorrectorDock"
-
-    def test_property_returns_inner_widget(self, qapp):
-        from views.pose_corrector_panel import PoseCorrectorPanel
-
-        pc = PoseCorrectorPanel(session=Session(), gvhmr_root=Path("/tmp/GVHMR"))
-        dock = PoseCorrectorDock(pc)
         assert dock.pose_corrector is pc
+
+    def test_tabs_has_two_tabs(self, qapp):
+        dock, *_ = self._make_dock()
+        assert dock.tabs.count() == 2
 
 
 # ===========================================================================

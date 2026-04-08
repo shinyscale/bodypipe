@@ -508,11 +508,10 @@ class TestStatusBarWiring:
         assert "24.0" in app_window._fps_label.text()
 
     def test_mode_switch_shows_multi_docks(self, app_window):
-        """Switching to multi mode shows identity/pose/track docks."""
+        """Switching to multi mode shows person panel and track docks."""
         app_window._pipeline_dock.set_mode("multi")
 
-        assert not app_window._identity_dock.isHidden()
-        assert not app_window._pose_corrector_dock.isHidden()
+        assert not app_window._person_panel_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
 
     def test_mode_switch_hides_multi_docks(self, app_window):
@@ -520,8 +519,7 @@ class TestStatusBarWiring:
         app_window._pipeline_dock.set_mode("multi")
         app_window._pipeline_dock.set_mode("single")
 
-        assert app_window._identity_dock.isHidden()
-        assert app_window._pose_corrector_dock.isHidden()
+        assert app_window._person_panel_dock.isHidden()
         assert app_window._track_overview_dock.isHidden()
 
     def test_mode_change_emits_tab_changed(self, app_window):
@@ -779,34 +777,31 @@ class TestWorkspacePresets:
         assert len(app_window._default_state) > 0
 
     def test_apply_review_preset(self, app_window):
-        """Review preset shows video, identity, track; hides mesh, pose."""
+        """Review preset shows video, person panel, track; hides mesh."""
         app_window._apply_preset("Review")
 
         assert not app_window._video_dock.isHidden()
-        assert not app_window._identity_dock.isHidden()
+        assert not app_window._person_panel_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
         assert app_window._mesh_dock.isHidden()
-        assert app_window._pose_corrector_dock.isHidden()
 
     def test_apply_correction_preset(self, app_window):
-        """Correction preset shows video, mesh, pose corrector, and identity."""
+        """Correction preset shows video, mesh, person panel, and track overview."""
         app_window._apply_preset("Correction")
 
         assert not app_window._video_dock.isHidden()
         assert not app_window._mesh_dock.isHidden()
-        assert not app_window._pose_corrector_dock.isHidden()
+        assert not app_window._person_panel_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
-        assert not app_window._identity_dock.isHidden()
 
     def test_apply_tracking_preset(self, app_window):
-        """Tracking preset shows video, identity, track; hides mesh, pose."""
+        """Tracking preset shows video, person panel, track; hides mesh."""
         app_window._apply_preset("Tracking")
 
         assert not app_window._video_dock.isHidden()
-        assert not app_window._identity_dock.isHidden()
+        assert not app_window._person_panel_dock.isHidden()
         assert not app_window._track_overview_dock.isHidden()
         assert app_window._mesh_dock.isHidden()
-        assert app_window._pose_corrector_dock.isHidden()
 
     def test_apply_pipeline_preset(self, app_window):
         """Pipeline preset shows video + pipeline + log; hides inspector docks."""
@@ -816,8 +811,7 @@ class TestWorkspacePresets:
         assert not app_window._pipeline_dock.isHidden()
         assert not app_window._log_dock.isHidden()
         assert app_window._mesh_dock.isHidden()
-        assert app_window._identity_dock.isHidden()
-        assert app_window._pose_corrector_dock.isHidden()
+        assert app_window._person_panel_dock.isHidden()
         assert app_window._track_overview_dock.isHidden()
 
     def test_pipeline_preset_hides_log_toggle_synced(self, app_window):
@@ -1511,8 +1505,8 @@ class TestCorrectModeKeys:
 
         app_window.set_interaction_mode(InteractionMode.CORRECT)
 
-        with patch.object(app_window._pose_corrector_dock, "setVisible") as mock_vis, \
-             patch.object(app_window._pose_corrector_dock, "raise_") as mock_raise:
+        with patch.object(app_window._person_panel_dock, "setVisible") as mock_vis, \
+             patch.object(app_window._person_panel_dock, "raise_") as mock_raise:
             event = QKeyEvent(QEvent.KeyPress, Qt.Key_G, Qt.NoModifier)
             app_window.keyPressEvent(event)
         mock_vis.assert_called_once_with(True)

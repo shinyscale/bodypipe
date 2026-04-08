@@ -242,11 +242,6 @@ class TestPoseCorrectorPanelConstruction:
         panel = PoseCorrectorPanel(session=session)
         assert isinstance(panel.mesh_viewport, MeshViewport)
 
-    def test_has_person_combo(self, qapp):
-        session = _make_session_with_params()
-        panel = PoseCorrectorPanel(session=session)
-        assert panel._person_combo is not None
-
     def test_has_joint_combo(self, qapp):
         session = _make_session_with_params()
         panel = PoseCorrectorPanel(session=session)
@@ -755,30 +750,7 @@ class TestResetAll:
 
 
 class TestPersonSelector:
-    """Person dropdown: population from session, person change."""
-
-    def test_refresh_populates_persons(self, qapp):
-        """Refresh should populate dropdown from session person_tracks."""
-        session = _make_session_with_params(n_persons=3)
-        panel = PoseCorrectorPanel(session=session)
-        panel.refresh()
-        assert panel._person_combo.count() == 3
-
-    def test_inactive_tracks_excluded(self, qapp):
-        """Inactive tracks should not appear in the dropdown."""
-        session = _make_session_with_params(n_persons=3)
-        session.inactive_tracks.add(1)
-        panel = PoseCorrectorPanel(session=session)
-        panel.refresh()
-        assert panel._person_combo.count() == 2
-
-    def test_set_person_syncs_dropdown(self, qapp):
-        """External set_person should sync the dropdown."""
-        session = _make_session_with_params(n_persons=3)
-        panel = PoseCorrectorPanel(session=session)
-        panel.refresh()
-        panel.set_person(1)
-        assert panel._person_combo.itemData(panel._person_combo.currentIndex()) == 1
+    """Person selection: propagation to viewport."""
 
     def test_set_person_updates_viewport(self, qapp):
         """set_person should propagate to the viewport."""
@@ -3214,12 +3186,6 @@ class TestTabbedPropertyPanel:
         panel = PoseCorrectorPanel(session=session)
         names = [panel._controls_tabs.tabText(i) for i in range(4)]
         assert names == ["Pose", "Corrections", "Export", "Space"]
-
-    def test_pose_tab_has_person_combo(self, qapp):
-        """Person combo should exist and be accessible."""
-        session = _make_session_with_params()
-        panel = PoseCorrectorPanel(session=session)
-        assert panel._person_combo is not None
 
     def test_pose_tab_has_euler_sliders(self, qapp):
         """Euler sliders should exist in the Pose tab."""

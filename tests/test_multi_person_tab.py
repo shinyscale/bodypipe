@@ -476,8 +476,7 @@ class TestAppWindowMultiMode:
         from app_window import AppWindow
         window = AppWindow()
         window._pipeline_dock.set_mode("multi")
-        assert not window._identity_dock.isHidden()
-        assert not window._pose_corrector_dock.isHidden()
+        assert not window._person_panel_dock.isHidden()
         assert not window._track_overview_dock.isHidden()
 
     def test_track_overview_in_dock(self, qapp):

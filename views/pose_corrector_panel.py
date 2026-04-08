@@ -910,13 +910,6 @@ class PoseCorrectorPanel(QWidget):
         color_row.addStretch()
         layout.addLayout(color_row)
 
-        # Person selector — always visible above tabs
-        person_row = QHBoxLayout()
-        person_row.addWidget(QLabel("Person:"))
-        self._person_combo = QComboBox()
-        person_row.addWidget(self._person_combo, stretch=1)
-        layout.addLayout(person_row)
-
         # Tabbed controls (no splitter needed — viewport is external)
         self._controls_tabs = QTabWidget()
         self._controls_tabs.setDocumentMode(True)
@@ -1612,7 +1605,6 @@ class PoseCorrectorPanel(QWidget):
 
         # Dropdowns
         self._joint_combo.currentIndexChanged.connect(self._on_joint_dropdown_changed)
-        self._person_combo.currentIndexChanged.connect(self._on_person_dropdown_changed)
 
         # Camera/color mode and labels toggle
         self._color_combo.currentIndexChanged.connect(self._on_color_mode_changed)
@@ -1698,25 +1690,11 @@ class PoseCorrectorPanel(QWidget):
         self._refresh_corrections_table()
 
     def set_person(self, person_id: int):
-        """Select person externally (e.g., from identity inspector)."""
+        """Select person externally (e.g., from PersonSelectorBar)."""
         if person_id == self._current_person:
             return
         self._current_person = person_id
         self._viewport.set_person(person_id)
-        # Sync dropdown — repopulate if requested person isn't in the combo
-        found = False
-        for i in range(self._person_combo.count()):
-            if self._person_combo.itemData(i) == person_id:
-                found = True
-                break
-        if not found:
-            self._update_person_dropdown()
-        self._person_combo.blockSignals(True)
-        for i in range(self._person_combo.count()):
-            if self._person_combo.itemData(i) == person_id:
-                self._person_combo.setCurrentIndex(i)
-                break
-        self._person_combo.blockSignals(False)
         self._update_sliders()
         self._refresh_corrections_table()
         self._refresh_space_table()
@@ -1742,8 +1720,7 @@ class PoseCorrectorPanel(QWidget):
         self._sync_pin_button_text()
 
     def refresh(self):
-        """Refresh person list from session."""
-        self._update_person_dropdown()
+        """Refresh from session state."""
         self._update_space_ref_dropdown()
         self._refresh_corrections_table()
         self._refresh_space_table()
@@ -1780,20 +1757,6 @@ class PoseCorrectorPanel(QWidget):
         self._update_sliders()
         self._update_joint_info()
         self.joint_selected.emit(joint_idx)
-
-    def _on_person_dropdown_changed(self, idx: int):
-        """Handle person selection from dropdown."""
-        if idx < 0:
-            return
-        person_id = self._person_combo.itemData(idx)
-        if person_id is None:
-            return
-        self._current_person = person_id
-        self._viewport.set_person(person_id)
-        self._viewport.set_pose_override(None)
-        self._update_sliders()
-        self._refresh_corrections_table()
-        self._refresh_space_table()
 
     def _use_world_orient(self) -> bool:
         """True when the viewport renders world-space orientation (orbit mode)."""
@@ -3384,16 +3347,6 @@ class PoseCorrectorPanel(QWidget):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _update_person_dropdown(self):
-        """Populate person dropdown from session."""
-        self._person_combo.blockSignals(True)
-        self._person_combo.clear()
-        if self._session:
-            for pid in sorted(self._session.person_tracks.keys()):
-                if pid not in self._session.inactive_tracks:
-                    self._person_combo.addItem(f"Person {pid}", userData=pid)
-        self._person_combo.blockSignals(False)
-        self._update_space_ref_dropdown()
 
     def _update_sliders(self):
         """Update euler sliders to reflect current joint's rotation."""

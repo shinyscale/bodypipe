@@ -182,7 +182,7 @@ class InteractionMode(enum.Enum):
 from models.pipeline_config import PipelineConfig
 from models.session import Session
 from views.video_player import VideoPlayer
-from views.mesh_viewport import MeshViewport
+from views.mesh_viewport import MeshViewport, RenderMode
 from views.identity_inspector import IdentityInspector
 from views.track_overview import TrackOverview
 from views.pipeline_settings import (
@@ -194,12 +194,12 @@ from views.session_library import SessionLibrary
 from views.dock_widgets import (
     VideoDock,
     MeshViewportDock,
-    IdentityDock,
-    PoseCorrectorDock,
+    PersonPanelDock,
     TrackOverviewDock,
     PipelineSettingsDock,
     SessionLibraryDock,
 )
+from views.person_selector_bar import PersonSelectorBar
 from views.bbox_overlay import render_bbox_overlay, render_edit_preview
 from views.keyboard_shortcuts_dialog import KeyboardShortcutsDialog
 from workers.reprocess_worker import ReprocessWorker
@@ -413,16 +413,16 @@ class AppWindow(QMainWindow):
     interaction_mode_changed = Signal(str)  # emitted with InteractionMode.value
 
     MAX_RECENT = 5
-    _DOCK_VERSION = 3  # increment when dock layout structure changes
+    _DOCK_VERSION = 4  # increment when dock layout structure changes
 
     _MULTI_ONLY_DOCKS = (
-        "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
+        "_person_panel_dock", "_track_overview_dock",
     )
 
     # All content docks (excludes _log_dock which is created separately)
     _ALL_CONTENT_DOCKS = (
         "_pipeline_dock", "_video_dock", "_mesh_dock",
-        "_identity_dock", "_pose_corrector_dock", "_track_overview_dock",
+        "_person_panel_dock", "_track_overview_dock",
         "_session_library_dock",
     )
 
@@ -430,17 +430,17 @@ class AppWindow(QMainWindow):
     _WORKSPACE_PRESETS = {
         "Review": (
             "Video + Inspector + Timeline",
-            {"_pipeline_dock", "_video_dock", "_identity_dock",
+            {"_pipeline_dock", "_video_dock", "_person_panel_dock",
              "_track_overview_dock"},
         ),
         "Correction": (
             "Video + 3D + Pose Corrector + Inspector",
             {"_pipeline_dock", "_video_dock", "_mesh_dock",
-             "_pose_corrector_dock", "_track_overview_dock", "_identity_dock"},
+             "_person_panel_dock", "_track_overview_dock"},
         ),
         "Tracking": (
             "Video + Inspector + Track Overview",
-            {"_pipeline_dock", "_video_dock", "_identity_dock",
+            {"_pipeline_dock", "_video_dock", "_person_panel_dock",
              "_track_overview_dock"},
         ),
         "Pipeline": (
@@ -526,13 +526,20 @@ class AppWindow(QMainWindow):
         dock._frustum_cb.toggled.connect(dock._fov_label.setVisible)
         dock._frustum_cb.toggled.connect(dock._fov_spin.setVisible)
         dock._fov_spin.valueChanged.connect(self._mesh_viewport.set_frustum_fov)
-        self._identity_dock = IdentityDock(self._identity_inspector, self)
-        self._pose_corrector_dock = PoseCorrectorDock(
+        # Playback quality combo → mesh viewport
+        dock._playback_quality.currentIndexChanged.connect(self._on_playback_quality_changed)
+        # Person panel: selector bar + Identity/Pose Corrector tabs
+        self._person_bar = PersonSelectorBar()
+        self._person_bar.set_session(self._session)
+        from views.pose_corrector_panel import PoseCorrectorPanel
+        self._pose_corrector = PoseCorrectorPanel(
             session=self._session, gvhmr_root=self._gvhmr_root,
             viewport=self._mesh_viewport, parent=self,
         )
-        self._pose_corrector = self._pose_corrector_dock.pose_corrector
         self._pose_corrector.set_track_overview(self._track_overview)
+        self._person_panel_dock = PersonPanelDock(
+            self._person_bar, self._identity_inspector, self._pose_corrector, self,
+        )
         self._track_overview_dock = TrackOverviewDock(self._track_overview, self)
         self._pipeline_dock = PipelineSettingsDock(
             self._single_settings, self._perf_settings, self._multi_settings, self,
@@ -551,11 +558,9 @@ class AppWindow(QMainWindow):
         self.tabifyDockWidget(self._pipeline_dock, self._session_library_dock)
         self._pipeline_dock.raise_()
 
-        # Right: Video, then Identity split to its right (full-height column)
+        # Right: Video, then Person panel split to its right (full-height column)
         self.addDockWidget(Qt.RightDockWidgetArea, self._video_dock)
-        self.splitDockWidget(self._video_dock, self._identity_dock, Qt.Horizontal)
-        self.tabifyDockWidget(self._identity_dock, self._pose_corrector_dock)
-        self._identity_dock.raise_()
+        self.splitDockWidget(self._video_dock, self._person_panel_dock, Qt.Horizontal)
 
         # Video/3D stacked: split Video vertically so Mesh goes below Video
         # (Identity stays full-height in the right column)
@@ -672,7 +677,7 @@ class AppWindow(QMainWindow):
         self._view_menu.addSeparator()
         for dock in (
             self._pipeline_dock, self._video_dock, self._mesh_dock,
-            self._identity_dock, self._pose_corrector_dock,
+            self._person_panel_dock,
             self._track_overview_dock, self._session_library_dock,
         ):
             self._view_menu.addAction(dock.toggleViewAction())
@@ -937,13 +942,14 @@ class AppWindow(QMainWindow):
         self._video_player.bbox_dragged.connect(self._identity_inspector.on_bbox_drag)
         self._track_overview.person_clicked.connect(self._on_track_clicked)
         self._identity_inspector.frame_requested.connect(self._video_player.seek)
+        self._person_bar.person_changed.connect(self._on_person_changed)
+        self._person_bar.show_all_toggled.connect(self._identity_inspector.set_show_all_tracks)
         self._identity_inspector.person_changed.connect(self._on_identity_person_changed)
         self._identity_inspector.bbox_overlay_changed.connect(self._on_bbox_overlay_changed)
         self._identity_inspector.keyframe_changed.connect(self._on_keyframe_changed)
         self._identity_inspector.track_modified.connect(self._on_tracks_modified)
         self._identity_inspector.reprocess_requested.connect(self._on_reprocess_requested)
         self._pose_corrector.frame_requested.connect(self._video_player.seek)
-        self._pose_corrector.person_requested.connect(self._on_identity_person_changed)
 
         # Auto-raise PoseCorrector dock when a joint is clicked in 3D viewport
         self._mesh_viewport.joint_clicked.connect(self._on_joint_clicked_auto_raise)
@@ -1104,9 +1110,10 @@ class AppWindow(QMainWindow):
     def _key_correct(self, key, mod) -> bool:
         """Correct mode: G open euler, R reset joint, Escape deselect."""
         if key == Qt.Key_G:
-            # Focus the pose corrector dock and raise it
-            self._pose_corrector_dock.setVisible(True)
-            self._pose_corrector_dock.raise_()
+            # Focus the person panel dock and raise Pose Corrector tab
+            self._person_panel_dock.setVisible(True)
+            self._person_panel_dock.raise_()
+            self._person_panel_dock.tabs.setCurrentIndex(1)
             return True
         if key == Qt.Key_R:
             # Reset the currently selected joint rotation
@@ -1132,8 +1139,9 @@ class AppWindow(QMainWindow):
                 self._cycle_person(1)
             return True
         if key == Qt.Key_E:
-            self._identity_dock.setVisible(True)
-            self._identity_dock.raise_()
+            self._person_panel_dock.setVisible(True)
+            self._person_panel_dock.raise_()
+            self._person_panel_dock.tabs.setCurrentIndex(0)
             self._identity_inspector._on_edit_bbox()
             return True
         return False
@@ -1170,15 +1178,18 @@ class AppWindow(QMainWindow):
         else:
             idx = 0
         new_pid = pids[idx]
-        self._session.selected_person = new_pid
-        self._identity_inspector.set_person(new_pid)
-        self._pose_corrector.set_person(new_pid)
-        self._mesh_viewport.set_person(new_pid)
-        self.set_status(f"Selected Person {new_pid}")
+        # Route through person bar — triggers _on_person_changed
+        self._person_bar.set_person(new_pid)
+        self._on_person_changed(new_pid)
 
     def _on_toggle_hud(self, visible: bool):
         """Toggle the HUD overlay on the mesh viewport."""
         self._mesh_viewport.set_hud_visible(visible)
+
+    def _on_playback_quality_changed(self, index: int):
+        """Handle playback quality combo change."""
+        mode_map = {0: RenderMode.WIREFRAME, 1: RenderMode.FAST, 2: RenderMode.FULL}
+        self._mesh_viewport.set_playback_render_mode(mode_map.get(index, RenderMode.FAST))
 
     # ------------------------------------------------------------------
     # Mode switching
@@ -1494,7 +1505,8 @@ class AppWindow(QMainWindow):
         # Populate track overview and markers
         self._populate_tracks()
 
-        # Refresh identity inspector
+        # Refresh person bar and identity inspector
+        self._person_bar.refresh()
         self._identity_inspector.refresh()
 
         # Auto-select first person if none selected
@@ -1503,6 +1515,7 @@ class AppWindow(QMainWindow):
             self._session.selected_person = first_pid
 
         pid = self._session.selected_person
+        self._person_bar.set_person(pid)
         self._identity_inspector.set_person(pid)
         self._mesh_viewport.set_person(pid)
         self._pose_corrector.set_person(pid)
@@ -1540,19 +1553,24 @@ class AppWindow(QMainWindow):
 
     def _on_track_clicked(self, person_id: int, frame_idx: int):
         """Select person and seek to frame from track overview."""
+        self._person_bar.set_person(person_id)
+        self._on_person_changed(person_id)
+        self._video_player.seek(frame_idx)
+        self.set_status(f"Selected Person {person_id} at frame {frame_idx}")
+
+    def _on_person_changed(self, person_id: int):
+        """Handle person change from PersonSelectorBar."""
         self._session.selected_person = person_id
         self._identity_inspector.set_person(person_id)
         self._pose_corrector.set_person(person_id)
         self._mesh_viewport.set_person(person_id)
-        self._video_player.seek(frame_idx)
-        self.set_status(f"Selected Person {person_id} at frame {frame_idx}")
+        self._show_frame(self._session.current_frame)
+        self.set_status(f"Selected Person {person_id}")
 
     def _on_identity_person_changed(self, person_id: int):
-        """Handle person change from identity inspector."""
-        self._session.selected_person = person_id
-        self._pose_corrector.set_person(person_id)
-        self._mesh_viewport.set_person(person_id)
-        self._show_frame(self._session.current_frame)
+        """Handle person change from identity inspector (issue navigation etc.)."""
+        self._person_bar.set_person(person_id)
+        self._on_person_changed(person_id)
 
     def _on_bbox_overlay_changed(self, data: object):
         """Handle overlay changes (show-all-tracks toggle, edit preview)."""
@@ -1570,14 +1588,16 @@ class AppWindow(QMainWindow):
     def _on_tracks_modified(self):
         """Handle track modifications (swap, split, merge)."""
         self._populate_tracks()
+        self._person_bar.refresh()
         self._identity_inspector.refresh()
         self._show_frame(self._session.current_frame)
 
     def _on_joint_clicked_auto_raise(self, joint_idx: int):
-        """Auto-raise PoseCorrector dock when a joint is clicked in 3D viewport."""
+        """Auto-raise PoseCorrector tab when a joint is clicked in 3D viewport."""
         if joint_idx >= 0 and self._pipeline_dock.current_mode == "multi":
-            self._pose_corrector_dock.setVisible(True)
-            self._pose_corrector_dock.raise_()
+            self._person_panel_dock.setVisible(True)
+            self._person_panel_dock.raise_()
+            self._person_panel_dock.tabs.setCurrentIndex(1)
 
     # ------------------------------------------------------------------
     # Pipeline output handling
@@ -1694,8 +1714,10 @@ class AppWindow(QMainWindow):
 
         # Update all panels with new data
         self._populate_tracks()
+        self._person_bar.refresh()
         self._identity_inspector.refresh()
         pid = self._session.selected_person
+        self._person_bar.set_person(pid)
         self._mesh_viewport.set_person(-1)  # force re-select
         self._mesh_viewport.set_person(pid)
         self._show_frame(self._session.current_frame)
@@ -2088,6 +2110,7 @@ class AppWindow(QMainWindow):
                 tracks[pid] = np.ones(max(1, self._session.num_frames)) * 0.8
         self._track_overview.set_tracks(tracks)
         self._populate_track_markers()
+        self._person_bar.refresh()
         self._pose_corrector.refresh()
 
     def _populate_track_markers(self):

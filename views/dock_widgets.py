@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ from PySide6.QtCore import Signal
 if TYPE_CHECKING:
     from views.identity_inspector import IdentityInspector
     from views.mesh_viewport import MeshViewport
+    from views.person_selector_bar import PersonSelectorBar
     from views.session_library import SessionLibrary
     from views.track_overview import TrackOverview
     from views.pipeline_settings import (
@@ -87,6 +89,14 @@ class MeshViewportDock(QDockWidget):
 
         toolbar.addStretch()
 
+        self._playback_label = QLabel("Playback:")
+        toolbar.addWidget(self._playback_label)
+        self._playback_quality = QComboBox()
+        self._playback_quality.addItems(["Skeleton", "Fast mesh", "Full mesh"])
+        self._playback_quality.setCurrentIndex(1)  # default to FAST
+        self._playback_quality.setToolTip("Render quality during playback/scrubbing")
+        toolbar.addWidget(self._playback_quality)
+
         self._fov_label = QLabel("FOV:")
         self._fov_label.setVisible(False)
         toolbar.addWidget(self._fov_label)
@@ -107,41 +117,56 @@ class MeshViewportDock(QDockWidget):
         return self._mesh_viewport
 
 
-class IdentityDock(QDockWidget):
-    """Dock wrapping an IdentityInspector widget."""
+class PersonPanelDock(QDockWidget):
+    """Dock with PersonSelectorBar above a tabbed Identity Inspector + Pose Corrector.
 
-    def __init__(self, identity_inspector: IdentityInspector, parent: QWidget | None = None):
-        super().__init__("Identity Inspector", parent)
-        self.setObjectName("IdentityDock")
+    Replaces the old IdentityDock and PoseCorrectorDock so that the person
+    selector bar is always visible regardless of which tab is active.
+    """
+
+    def __init__(
+        self,
+        person_bar: PersonSelectorBar,
+        identity_inspector: IdentityInspector,
+        pose_corrector: PoseCorrectorPanel,
+        parent: QWidget | None = None,
+    ):
+        super().__init__("Person", parent)
+        self.setObjectName("PersonPanelDock")
+        self._person_bar = person_bar
         self._identity_inspector = identity_inspector
-        self.setWidget(identity_inspector)
+        self._pose_corrector = pose_corrector
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        layout.addWidget(person_bar)
+
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(identity_inspector, "Identity")
+        self._tabs.addTab(pose_corrector, "Pose Corrector")
+        layout.addWidget(self._tabs, 1)
+
+        self.setWidget(container)
+
+    @property
+    def person_bar(self) -> PersonSelectorBar:
+        return self._person_bar
 
     @property
     def identity_inspector(self) -> IdentityInspector:
         return self._identity_inspector
 
-
-class PoseCorrectorDock(QDockWidget):
-    """Dock wrapping a PoseCorrectorPanel widget."""
-
-    def __init__(
-        self,
-        session,
-        gvhmr_root=None,
-        viewport=None,
-        parent: QWidget | None = None,
-    ):
-        super().__init__("Pose Corrector", parent)
-        self.setObjectName("PoseCorrectorDock")
-        from views.pose_corrector_panel import PoseCorrectorPanel
-        self._pose_corrector = PoseCorrectorPanel(
-            session=session, gvhmr_root=gvhmr_root, viewport=viewport, parent=self,
-        )
-        self.setWidget(self._pose_corrector)
-
     @property
     def pose_corrector(self) -> PoseCorrectorPanel:
         return self._pose_corrector
+
+    @property
+    def tabs(self) -> QTabWidget:
+        return self._tabs
 
 
 class TrackOverviewDock(QDockWidget):

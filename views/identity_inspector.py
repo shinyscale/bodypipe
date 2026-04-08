@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QPushButton,
-    QCheckBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -36,7 +35,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
 
 from models.session import Session, PersonTrack, UndoEntry
-from theme import COLORS
+from theme import COLORS, PERSON_COLORS
 from views.confidence_timeline import ConfidenceTimeline
 
 log = logging.getLogger(__name__)
@@ -55,12 +54,6 @@ CONFIDENCE_LABELS = {
     "motion": "Motion",
     "overall": "Overall",
 }
-
-# Colors for per-person identification (shared with multi_person_tab)
-PERSON_COLORS = [
-    "#e94560", "#4ecca3", "#ffd93d", "#6c5ce7",
-    "#00b894", "#fd79a8", "#0984e3", "#fdcb6e",
-]
 
 
 @dataclass
@@ -224,7 +217,6 @@ class IdentityInspector(QWidget):
     """Interactive per-person identity verification panel.
 
     Provides:
-    - Person selector (QComboBox) to switch between tracked persons
     - Confidence timeline (ConfidenceTimeline widget) with keyframe markers
     - Confidence breakdown (6 labeled metrics per frame)
     - Keyframe table (QTableWidget) with CRUD operations
@@ -256,6 +248,9 @@ class IdentityInspector(QWidget):
         self._review_issues: list[ReviewIssue] = []
         self._review_issue_idx: int = 0
 
+        # Show-all-tracks state (checkbox now lives in PersonSelectorBar)
+        self._show_all: bool = False
+
         self._setup_ui()
         self._connect_signals()
 
@@ -272,21 +267,6 @@ class IdentityInspector(QWidget):
         header = QLabel("Identity Inspector")
         header.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(header)
-
-        # ---- Person Selector ----
-        person_group = QGroupBox("Person")
-        person_layout = QVBoxLayout(person_group)
-
-        selector_row = QHBoxLayout()
-        self._person_combo = QComboBox()
-        self._person_combo.setMinimumWidth(120)
-        selector_row.addWidget(self._person_combo, 1)
-
-        self._show_all_tracks = QCheckBox("Show all tracks")
-        selector_row.addWidget(self._show_all_tracks)
-
-        person_layout.addLayout(selector_row)
-        layout.addWidget(person_group)
 
         # ---- Confidence Timeline ----
         self._timeline = ConfidenceTimeline()
@@ -541,14 +521,12 @@ class IdentityInspector(QWidget):
         layout.addStretch()
 
     def _connect_signals(self):
-        self._person_combo.currentIndexChanged.connect(self._on_person_combo_changed)
         self._timeline.frame_clicked.connect(self._on_timeline_clicked)
         self._verify_btn.clicked.connect(self._on_verify)
         self._add_kf_btn.clicked.connect(self._on_add_keyframe)
         self._remove_kf_btn.clicked.connect(self._on_remove_keyframe)
         self._prev_kf_btn.clicked.connect(self._on_prev_keyframe)
         self._next_kf_btn.clicked.connect(self._on_next_keyframe)
-        self._show_all_tracks.toggled.connect(self._on_show_all_toggled)
         self._keyframe_table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self._edit_bbox_btn.clicked.connect(self._on_edit_bbox)
         self._cancel_edit_btn.clicked.connect(self._on_cancel_edit)
@@ -580,13 +558,6 @@ class IdentityInspector(QWidget):
         if self._bbox_edit_state is not None:
             self._cancel_bbox_edit()
 
-        # Update combo box without re-triggering signal
-        idx = self._person_combo.findData(person_id)
-        if idx >= 0:
-            self._person_combo.blockSignals(True)
-            self._person_combo.setCurrentIndex(idx)
-            self._person_combo.blockSignals(False)
-
         self._refresh_for_person()
 
     def set_frame(self, frame_idx: int):
@@ -597,7 +568,6 @@ class IdentityInspector(QWidget):
 
     def refresh(self):
         """Rebuild all UI from session state (e.g., after pipeline finishes)."""
-        self._update_person_selector()
         self._update_merge_combo()
         if self._current_person_id >= 0:
             self._refresh_for_person()
@@ -813,28 +783,7 @@ class IdentityInspector(QWidget):
     # Internal updates
     # ------------------------------------------------------------------
 
-    def _update_person_selector(self):
-        """Rebuild person combo box from session.person_tracks."""
-        self._person_combo.blockSignals(True)
-        self._person_combo.clear()
 
-        for pid in sorted(self._session.person_tracks.keys()):
-            if pid not in self._session.inactive_tracks:
-                self._person_combo.addItem(f"Person {pid}", pid)
-
-        # Re-select current person if still valid
-        if self._current_person_id >= 0:
-            idx = self._person_combo.findData(self._current_person_id)
-            if idx >= 0:
-                self._person_combo.setCurrentIndex(idx)
-            elif self._person_combo.count() > 0:
-                self._person_combo.setCurrentIndex(0)
-                self._current_person_id = self._person_combo.currentData() or -1
-        elif self._person_combo.count() > 0:
-            self._person_combo.setCurrentIndex(0)
-            self._current_person_id = self._person_combo.currentData() or -1
-
-        self._person_combo.blockSignals(False)
 
     def _refresh_for_person(self):
         """Update all displays for the current person."""
@@ -863,7 +812,7 @@ class IdentityInspector(QWidget):
         }
 
         # Merge keyframes from all persons when "show all tracks" is active
-        if self._show_all_tracks.isChecked():
+        if self._show_all:
             for pid, t in self._session.person_tracks.items():
                 if pid == self._current_person_id:
                     continue
@@ -1027,18 +976,6 @@ class IdentityInspector(QWidget):
     # Event handlers
     # ------------------------------------------------------------------
 
-    def _on_person_combo_changed(self, index: int):
-        """Handle person combo box selection change."""
-        if index < 0:
-            return
-        person_id = self._person_combo.currentData()
-        if person_id is None:
-            return
-        self._current_person_id = person_id
-        self._session.selected_person = person_id
-        self._refresh_for_person()
-        self.person_changed.emit(person_id)
-
     @staticmethod
     def _snapshot_track(track: PersonTrack) -> dict:
         """Capture mutable track data for undo/redo snapshots."""
@@ -1192,7 +1129,7 @@ class IdentityInspector(QWidget):
         if track is None:
             return []
         frames = {kf["frame"] for kf in track.keyframes}
-        if self._show_all_tracks.isChecked():
+        if self._show_all:
             for pid, t in self._session.person_tracks.items():
                 if pid == self._current_person_id:
                     continue
@@ -1250,8 +1187,9 @@ class IdentityInspector(QWidget):
         self._update_keyframe_table()
         self.keyframe_changed.emit(self._current_person_id, frame)
 
-    def _on_show_all_toggled(self, checked: bool):
-        """Handle show all tracks checkbox toggle."""
+    def set_show_all_tracks(self, checked: bool):
+        """Update show-all-tracks state (called from PersonSelectorBar)."""
+        self._show_all = checked
         self.bbox_overlay_changed.emit({"show_all": checked})
         self._update_timeline()
 
