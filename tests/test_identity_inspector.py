@@ -91,16 +91,6 @@ class TestIdentityInspectorConstruction:
         panel = IdentityInspector(session)
         assert panel is not None
 
-    def test_has_person_combo(self, qapp):
-        session = Session()
-        panel = IdentityInspector(session)
-        assert panel._person_combo is not None
-
-    def test_has_show_all_tracks_checkbox(self, qapp):
-        session = Session()
-        panel = IdentityInspector(session)
-        assert panel._show_all_tracks is not None
-
     def test_has_confidence_timeline(self, qapp):
         session = Session()
         panel = IdentityInspector(session)
@@ -159,95 +149,11 @@ class TestIdentityInspectorConstruction:
         assert hasattr(panel, "keyframe_changed")
 
     def test_empty_session_no_crash(self, qapp):
-        """Empty session should not crash — combo empty, table empty, labels show dashes."""
+        """Empty session should not crash — table empty, labels show dashes."""
         session = Session()
         panel = IdentityInspector(session)
         panel.refresh()
-        assert panel._person_combo.count() == 0
         assert panel._keyframe_table.rowCount() == 0
-
-
-# ---------------------------------------------------------------------------
-# Person selector
-# ---------------------------------------------------------------------------
-
-
-class TestPersonSelector:
-    """Verify person combo box population and selection behavior."""
-
-    def test_empty_when_no_tracks(self, qapp):
-        session = Session()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        assert panel._person_combo.count() == 0
-
-    def test_populates_with_person_tracks(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        assert panel._person_combo.count() == 2
-        assert panel._person_combo.itemData(0) == 0
-        assert panel._person_combo.itemData(1) == 1
-
-    def test_excludes_inactive_tracks(self, qapp):
-        session = _session_with_tracks()
-        session.inactive_tracks.add(1)
-        panel = IdentityInspector(session)
-        panel.refresh()
-        assert panel._person_combo.count() == 1
-        assert panel._person_combo.itemData(0) == 0
-
-    def test_set_person_updates_combo(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        panel.set_person(1)
-        assert panel._person_combo.currentData() == 1
-
-    def test_set_person_idempotent(self, qapp):
-        """Setting same person twice should not re-trigger refresh."""
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        panel.set_person(0)
-        # No crash, no duplicate signals
-        panel.set_person(0)
-
-    def test_combo_change_emits_person_changed(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-
-        received = []
-        panel.person_changed.connect(received.append)
-
-        # Simulate selecting person 1
-        panel._person_combo.setCurrentIndex(1)
-
-        assert received == [1]
-
-    def test_combo_change_updates_session(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        panel._person_combo.setCurrentIndex(1)
-        assert session.selected_person == 1
-
-    def test_refresh_preserves_selection(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        panel.set_person(1)
-        # Refresh again — should keep person 1 selected
-        panel.refresh()
-        assert panel._person_combo.currentData() == 1
-
-    def test_combo_labels(self, qapp):
-        session = _session_with_tracks()
-        panel = IdentityInspector(session)
-        panel.refresh()
-        assert panel._person_combo.itemText(0) == "Person 0"
-        assert panel._person_combo.itemText(1) == "Person 1"
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +593,7 @@ class TestShowAllTracks:
 
         received = []
         panel.bbox_overlay_changed.connect(received.append)
-        panel._show_all_tracks.setChecked(True)
+        panel.set_show_all_tracks(True)
 
         assert len(received) == 1
         assert received[0] == {"show_all": True}

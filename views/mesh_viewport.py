@@ -605,6 +605,24 @@ def scale_K_to_viewport(
     return K_s
 
 
+def compute_letterbox(
+    widget_w: int, widget_h: int, img_w: int, img_h: int,
+) -> tuple[int, int, int, int]:
+    """Compute letterboxed sub-rect preserving img aspect ratio within widget.
+
+    Returns (x_offset, y_offset, render_width, render_height).
+    Falls back to full widget if img dimensions are zero.
+    """
+    if img_w <= 0 or img_h <= 0:
+        return (0, 0, widget_w, widget_h)
+    s = min(widget_w / img_w, widget_h / img_h)
+    rw = int(img_w * s)
+    rh = int(img_h * s)
+    x = (widget_w - rw) // 2
+    y = (widget_h - rh) // 2
+    return (x, y, rw, rh)
+
+
 def compute_orbit_view(
     yaw_deg: float,
     pitch_deg: float,
@@ -1268,6 +1286,8 @@ class MeshViewport(_BaseWidget):
         self._render_mode: RenderMode = RenderMode.FULL
         # Saved mode before auto-switch during scrubbing (None = not scrubbing)
         self._pre_scrub_mode: RenderMode | None = None
+        # Playback render mode — what to switch to during scrubbing/playback
+        self._playback_render_mode: RenderMode = RenderMode.FAST
 
         # Position anchor markers (purple crosshairs on ground plane)
         self._pos_anchor_markers: list[np.ndarray] = []  # list of (3,) world positions
@@ -1278,6 +1298,9 @@ class MeshViewport(_BaseWidget):
 
         # Status message for fallback rendering
         self._status_msg: str = ""
+
+        # Letterbox rect: (x_offset, y_offset, render_w, render_h)
+        self._letterbox: tuple[int, int, int, int] = (0, 0, 1, 1)
 
         self.setMinimumSize(QSize(200, 150))
 
@@ -1306,16 +1329,34 @@ class MeshViewport(_BaseWidget):
         layout.addWidget(self._fallback_label)
 
     def resizeEvent(self, event):
-        """Reposition HUD overlay on resize."""
+        """Reposition HUD overlay and recompute letterbox on resize."""
         super().resizeEvent(event)
+        self._recompute_letterbox()
         self._position_hud()
 
+    def _recompute_letterbox(self):
+        """Recompute the letterbox rect from widget size and video aspect ratio."""
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        if self._session and self._session.img_width > 0 and self._session.img_height > 0:
+            self._letterbox = compute_letterbox(w, h, self._session.img_width, self._session.img_height)
+        else:
+            self._letterbox = (0, 0, w, h)
+
+    def _widget_to_viewport(self, wx: float, wy: float) -> tuple[float, float] | None:
+        """Convert widget-space mouse coords to viewport-space. None if outside letterbox."""
+        lx, ly, lw, lh = self._letterbox
+        vx, vy = wx - lx, wy - ly
+        if vx < 0 or vy < 0 or vx >= lw or vy >= lh:
+            return None
+        return (vx, vy)
+
     def _position_hud(self):
-        """Place HUD in bottom-right corner with margin."""
+        """Place HUD in bottom-right corner of letterbox with margin."""
         margin = 10
         hud_w = self._hud.width()
         hud_h = self._hud.height()
-        self._hud.move(self.width() - hud_w - margin, self.height() - hud_h - margin)
+        lx, ly, lw, lh = self._letterbox
+        self._hud.move(lx + lw - hud_w - margin, ly + lh - hud_h - margin)
 
     # ------------------------------------------------------------------
     # HUD overlay API (Phase 10)
@@ -1359,6 +1400,7 @@ class MeshViewport(_BaseWidget):
         """Bind session data source."""
         self._session = session
         self._vertex_cache.clear()
+        self._recompute_letterbox()
 
     def set_person(self, person_id: int):
         """Select which person's mesh to display."""
@@ -1550,17 +1592,17 @@ class MeshViewport(_BaseWidget):
         self._refresh_mesh()
 
     def set_scrubbing(self, active: bool):
-        """Auto-switch to wireframe during active scrubbing/playback.
+        """Auto-switch render mode during active scrubbing/playback.
 
         When *active* is True the current render mode is saved and the
-        viewport switches to wireframe.  When *active* becomes False the
-        previous mode is restored.
+        viewport switches to _playback_render_mode.  When *active* becomes
+        False the previous mode is restored.
         """
         if active:
             if self._pre_scrub_mode is None:
                 self._pre_scrub_mode = self._render_mode
-                if self._render_mode != RenderMode.WIREFRAME:
-                    self._render_mode = RenderMode.WIREFRAME
+                if self._render_mode != self._playback_render_mode:
+                    self._render_mode = self._playback_render_mode
                     self._refresh_mesh()
         else:
             if self._pre_scrub_mode is not None:
@@ -1569,6 +1611,16 @@ class MeshViewport(_BaseWidget):
                 if restore != self._render_mode:
                     self._render_mode = restore
                     self._refresh_mesh()
+
+    def set_playback_render_mode(self, mode: RenderMode):
+        """Set the render mode used during playback/scrubbing.
+
+        If currently scrubbing, applies the new mode immediately.
+        """
+        self._playback_render_mode = mode
+        if self._pre_scrub_mode is not None and self._render_mode != mode:
+            self._render_mode = mode
+            self._refresh_mesh()
 
     def set_pose_override(self, override: dict | None):
         """Set temporary per-frame pose override for real-time preview.
@@ -1865,8 +1917,9 @@ class MeshViewport(_BaseWidget):
                 T[:3, 3] = self._incam_offset
                 view = T @ view
             self._view = view
-        w = self.width() if self.width() > 0 else 200
-        h = self.height() if self.height() > 0 else 150
+        lx, ly, lw, lh = self._letterbox
+        w = lw if lw > 0 else 200
+        h = lh if lh > 0 else 150
         self._update_projection(w, h)
         if _HAS_GL:
             self.update()
@@ -1921,8 +1974,13 @@ class MeshViewport(_BaseWidget):
     def mousePressEvent(self, event):
         """Joint picking on left-click, orbit drag on left-drag in orbit mode."""
         if event.button() == Qt.MouseButton.LeftButton:
+            # Convert to viewport coords; ignore clicks on black bars
+            vp = self._widget_to_viewport(event.position().x(), event.position().y())
+            if vp is None:
+                event.accept()
+                return
             # Try joint picking first
-            hit = self._pick_joint(event.position().x(), event.position().y())
+            hit = self._pick_joint(vp[0], vp[1])
             if hit is not None:
                 self._selected_joint = hit
                 self.joint_clicked.emit(hit)
@@ -2361,9 +2419,10 @@ class MeshViewport(_BaseWidget):
                 return result
             # Fall through to screen-space if FBO returned no hit
 
-        # Screen-space distance fallback
-        w = self.width() if self.width() > 0 else 200
-        h = self.height() if self.height() > 0 else 150
+        # Screen-space distance fallback (viewport-space coords)
+        lx, ly, lw, lh = self._letterbox
+        w = lw if lw > 0 else 200
+        h = lh if lh > 0 else 150
         mvp = self._projection @ self._view @ self._model_mat
         screen = project_joints_to_screen(self._joint_positions, mvp, w, h)
         return find_nearest_joint(screen_x, screen_y, screen)
@@ -2441,8 +2500,9 @@ class MeshViewport(_BaseWidget):
         if joints is None:
             return None
 
-        w = self.width()
-        h = self.height()
+        _lx, _ly, lw, lh = self._letterbox
+        w = lw if lw > 0 else self.width()
+        h = lh if lh > 0 else self.height()
         if w <= 0 or h <= 0:
             return None
 
@@ -2452,7 +2512,7 @@ class MeshViewport(_BaseWidget):
             self.doneCurrent()
             return None
 
-        # Bind FBO and clear
+        # Bind FBO and clear (FBO uses its own viewport at origin)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._pick_fbo_id)
         gl.glViewport(0, 0, w, h)
         gl.glClearColor(0.0, 0.0, 0.0, 0.0)
@@ -2494,9 +2554,11 @@ class MeshViewport(_BaseWidget):
 
         pixel = gl.glReadPixels(px, py, 1, 1, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
 
-        # Restore default framebuffer + state
+        # Restore default framebuffer + letterbox viewport
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
-        gl.glViewport(0, 0, w, h)
+        lx, ly, lw_lb, lh_lb = self._letterbox
+        gl_y = self.height() - ly - lh_lb
+        gl.glViewport(lx, gl_y, lw_lb, lh_lb)
         gl.glEnable(gl.GL_CULL_FACE)
 
         self.doneCurrent()
@@ -2814,8 +2876,11 @@ class MeshViewport(_BaseWidget):
     def resizeGL(self, w: int, h: int):
         if not _HAS_GL or not self._gl_ready:
             return
-        gl.glViewport(0, 0, w, h)
-        self._update_projection(w, h)
+        self._recompute_letterbox()
+        lx, ly, lw, lh = self._letterbox
+        gl_y = h - ly - lh  # flip Y for GL bottom-left origin
+        gl.glViewport(lx, gl_y, lw, lh)
+        self._update_projection(lw, lh)
 
     def _paintGL_pure(self):
         """Pure-GL paint path for WSL2/Wayland (no QPainter).
@@ -2824,6 +2889,15 @@ class MeshViewport(_BaseWidget):
         Weston compositor.  This path does all GL rendering directly and
         skips 2D text overlays (joint labels, debug info).
         """
+        # Clear full widget to black (bars)
+        gl.glViewport(0, 0, self.width(), self.height())
+        gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        # Set viewport to letterbox and clear with theme color
+        lx, ly, lw, lh = self._letterbox
+        gl_y = self.height() - ly - lh
+        gl.glViewport(lx, gl_y, lw, lh)
+        gl.glClearColor(0.1, 0.1, 0.12, 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
         # Grid floor
@@ -2873,13 +2947,16 @@ class MeshViewport(_BaseWidget):
             if self._joint_positions is not None:
                 self._draw_skeleton()
 
-        # Force alpha to 1.0 so Wayland compositor doesn't treat viewport
-        # as transparent (click-through).
+        # Force alpha to 1.0 over full widget (including bars) so Wayland
+        # compositor doesn't treat viewport as transparent (click-through).
+        gl.glViewport(0, 0, self.width(), self.height())
         gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_TRUE)
         gl.glClearColor(0, 0, 0, 1)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
         gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
         gl.glClearColor(0.1, 0.1, 0.12, 1.0)
+        # Restore letterbox viewport
+        gl.glViewport(lx, gl_y, lw, lh)
 
     def paintGL(self):
         if not _HAS_GL:
@@ -2905,6 +2982,9 @@ class MeshViewport(_BaseWidget):
             self._camera_mode == "incam"
             and self._video_frame is not None
         )
+        lx, ly, lw, lh = self._letterbox
+        # Black bars + letterboxed video background
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
         if _has_bg:
             fh, fw = self._video_frame.shape[:2]
             bpl = fw * 3  # bytes per line for RGB888
@@ -2912,16 +2992,13 @@ class MeshViewport(_BaseWidget):
                 self._video_frame.data, fw, fh, bpl,
                 QImage.Format.Format_RGB888,
             )
-            vp_w, vp_h = self.width(), self.height()
-            s = min(vp_w / fw, vp_h / fh)
-            scaled_w = int(fw * s)
-            scaled_h = int(fh * s)
-            x_off = (vp_w - scaled_w) // 2
-            y_off = (vp_h - scaled_h) // 2
-            painter.fillRect(self.rect(), QColor(0, 0, 0))
-            painter.drawImage(QRect(x_off, y_off, scaled_w, scaled_h), qimg)
+            painter.drawImage(QRect(lx, ly, lw, lh), qimg)
 
         painter.beginNativePainting()
+
+        # Set GL viewport to letterbox rect
+        gl_y = self.height() - ly - lh
+        gl.glViewport(lx, gl_y, lw, lh)
 
         # Clear with alpha=1.0 to ensure the surface is fully opaque,
         # then disable alpha writes so GL draw calls can't make it transparent.
@@ -3005,7 +3082,7 @@ class MeshViewport(_BaseWidget):
             jp = self._joint_positions
             centroid = jp.mean(axis=0)
             spread = float(np.max(np.linalg.norm(jp - centroid, axis=1)))
-            painter.drawText(10, 20, (
+            painter.drawText(lx + 10, ly + 20, (
                 f"{len(jp)} joints  |  centroid: [{centroid[0]:.2f}, {centroid[1]:.2f}, {centroid[2]:.2f}]"
                 f"  |  spread: {spread:.2f}m  |  skel: {self._active_skel.name}"
             ))
@@ -3029,9 +3106,9 @@ class MeshViewport(_BaseWidget):
                     lines.append(f"soma_params: {'yes' if track.soma_params else 'None'}")
             lines.append(f"Camera: {self._camera_mode}  |  GL: {'ready' if self._gl_ready else 'NOT READY'}")
             lines.append("Press V to toggle orbit/incam camera")
-            y = self.height() // 2 - len(lines) * 10
+            y = ly + lh // 2 - len(lines) * 10
             for line in lines:
-                painter.drawText(10, y, line)
+                painter.drawText(lx + 10, y, line)
                 y += 20
 
         painter.end()
@@ -3043,12 +3120,15 @@ class MeshViewport(_BaseWidget):
         # the entire framebuffer alpha channel to 1.0 (fully opaque).
         if _IS_WSL and _HAS_GL:
             self.makeCurrent()
+            # Full widget for alpha fix (including bars)
+            gl.glViewport(0, 0, self.width(), self.height())
             gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_TRUE)
             gl.glClearColor(0, 0, 0, 1)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)
             gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
-            # Restore clear color for next frame
+            # Restore clear color and letterbox viewport for next frame
             gl.glClearColor(0.1, 0.1, 0.12, 1.0)
+            gl.glViewport(lx, self.height() - ly - lh, lw, lh)
 
     # ------------------------------------------------------------------
     # Skeleton GL rendering
@@ -3470,8 +3550,9 @@ class MeshViewport(_BaseWidget):
         if joints is None:
             return
 
-        w = self.width() if self.width() > 0 else 200
-        h = self.height() if self.height() > 0 else 150
+        lb_x, lb_y, lb_w, lb_h = self._letterbox
+        w = lb_w if lb_w > 0 else 200
+        h = lb_h if lb_h > 0 else 150
         mvp = self._projection @ self._view @ self._model_mat
         screen = project_joints_to_screen(joints, mvp, w, h)
 
@@ -3490,6 +3571,10 @@ class MeshViewport(_BaseWidget):
         fm = QFontMetrics(font)
 
         for _idx, name, sx, sy, is_sel in labels:
+            # Offset from viewport-space to widget-space for QPainter
+            sx += lb_x
+            sy += lb_y
+
             text_w = fm.horizontalAdvance(name)
             text_h = fm.height()
 
@@ -3497,9 +3582,9 @@ class MeshViewport(_BaseWidget):
             lx = int(sx + _LABEL_OFFSET_X)
             ly = int(sy + _LABEL_OFFSET_Y)
 
-            # Clamp label box within viewport
-            lx = max(_LABEL_MARGIN, min(lx, w - text_w - 2 * _LABEL_PADDING_X - _LABEL_MARGIN))
-            ly = max(_LABEL_MARGIN + text_h, min(ly, h - _LABEL_MARGIN))
+            # Clamp label box within letterbox area
+            lx = max(lb_x + _LABEL_MARGIN, min(lx, lb_x + w - text_w - 2 * _LABEL_PADDING_X - _LABEL_MARGIN))
+            ly = max(lb_y + _LABEL_MARGIN + text_h, min(ly, lb_y + h - _LABEL_MARGIN))
 
             # Background rect
             bg_color = _LABEL_SELECTED_BG if is_sel else _LABEL_BG_COLOR

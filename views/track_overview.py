@@ -44,13 +44,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 
-from theme import COLORS
-
-# Colors for up to 8 tracked persons — consistent palette across the app
-PERSON_COLORS = [
-    "#e94560", "#4ecca3", "#ffd93d", "#6c5ce7",
-    "#00b894", "#fd79a8", "#0984e3", "#fdcb6e",
-]
+from theme import COLORS, PERSON_COLORS
 
 LANE_HEIGHT = 24
 LANE_SPACING = 4
