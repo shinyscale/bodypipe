@@ -1291,17 +1291,47 @@ class MultiPersonWorker(QThread):
                 # Update the .pt file with refined body params
                 data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
                 n = refined["num_frames"]
-                baseline_go = data.get(
-                    "global_orient_world_baseline",
-                    data.get("global_orient_world", data.get("global_orient")),
+                # Capture pre-refinement body params as the "baseline" so the
+                # viewport toggle can distinguish World physics from World
+                # baseline.  The fallback chain has to end in
+                # ``smpl_params_global`` because a fresh-from-GVHMR
+                # hmr4d_results.pt does NOT yet have top-level body_pose /
+                # body_pose_world keys — those are created by the refinement
+                # overwrite below.  Without the smpl_params_global fallback,
+                # the first refinement run on any clip would leave the
+                # ``*_world_baseline`` triad missing and the UI toggle would
+                # silently collapse to "World physics" on both sides.
+                # (Explicit ``is not None`` checks — Python's ``or`` calls
+                # ``bool()`` which raises on multi-element tensors.)
+                _spg = data.get("smpl_params_global")
+                if not isinstance(_spg, dict):
+                    _spg = {}
+
+                def _first_present(*keys_and_dicts):
+                    for entry in keys_and_dicts:
+                        src, key = entry
+                        v = src.get(key)
+                        if v is not None:
+                            return v
+                    return None
+
+                baseline_go = _first_present(
+                    (data, "global_orient_world_baseline"),
+                    (data, "global_orient_world"),
+                    (data, "global_orient"),
+                    (_spg, "global_orient"),
                 )
-                baseline_bp = data.get(
-                    "body_pose_world_baseline",
-                    data.get("body_pose_world", data.get("body_pose")),
+                baseline_bp = _first_present(
+                    (data, "body_pose_world_baseline"),
+                    (data, "body_pose_world"),
+                    (data, "body_pose"),
+                    (_spg, "body_pose"),
                 )
-                baseline_tr = data.get(
-                    "transl_world_baseline",
-                    data.get("transl_world", data.get("transl")),
+                baseline_tr = _first_present(
+                    (data, "transl_world_baseline"),
+                    (data, "transl_world"),
+                    (data, "transl"),
+                    (_spg, "transl"),
                 )
                 data["global_orient"] = torch.tensor(
                     refined["global_orient"].reshape(n, -1), dtype=torch.float32

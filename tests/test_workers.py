@@ -954,6 +954,130 @@ class TestPhysicsViewportSnapshot:
         assert result is world_params
         assert refined_ok is False
 
+    def test_run_physics_multi_writes_baseline_for_fresh_gvhmr_pt(self, qapp, tmp_path):
+        """Regression: a fresh-from-GVHMR hmr4d_results.pt only has nested
+        ``smpl_params_global`` — no top-level ``body_pose`` / ``body_pose_world``
+        keys yet.  The baseline capture chain must fall through to
+        ``smpl_params_global`` so the first refinement run still writes the
+        ``*_world_baseline`` triad.  Without this, the very first physics
+        run on any clip would silently leave the UI toggle with no baseline
+        to compare against, and HopeYouDo_11/person_1 (2026-04-10) did
+        exactly that.
+        """
+        import sys
+        import torch
+        from unittest.mock import patch, MagicMock
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+
+        # Mimic a pristine GVHMR write: ONLY smpl_params_global (no top-level
+        # body_pose / body_pose_world / transl etc).  This is the exact
+        # state that triggered the bug.
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.full((2, 3), 0.5, dtype=torch.float32),
+                    "body_pose": torch.full((2, 63), 0.25, dtype=torch.float32),
+                    "transl": torch.full((2, 3), 0.1, dtype=torch.float32),
+                    "betas": torch.zeros((2, 10), dtype=torch.float32),
+                },
+                "smpl_params_incam": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                },
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        refined = {
+            "num_frames": 2,
+            "global_orient": np.full((2, 3), 9.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 8.0, dtype=np.float32),
+            "transl": np.full((2, 3), 7.0, dtype=np.float32),
+        }
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(success=True, output_path=tmp_path / "phc", log="")
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined)
+            ),
+            "workers.physics.evaluate": MagicMock(
+                evaluate_refinement=MagicMock()
+            ),
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value={"num_frames": 2})
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "person_0.bvh")
+            ),
+        }
+
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, physics_modules):
+            worker._run_physics_multi(result)
+
+        # hmr4d_results.pt must now carry the baseline triad captured from
+        # smpl_params_global (0.5 / 0.25 / 0.1), NOT the refined values
+        # (9 / 8 / 7).
+        persisted = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        assert "global_orient_world_baseline" in persisted, (
+            "baseline global_orient must be captured for fresh GVHMR input"
+        )
+        assert "body_pose_world_baseline" in persisted, (
+            "baseline body_pose must be captured for fresh GVHMR input"
+        )
+        assert "transl_world_baseline" in persisted, (
+            "baseline transl must be captured for fresh GVHMR input"
+        )
+        np.testing.assert_allclose(
+            persisted["global_orient_world_baseline"].numpy(),
+            np.full((2, 3), 0.5, dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            persisted["body_pose_world_baseline"].numpy(),
+            np.full((2, 63), 0.25, dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            persisted["transl_world_baseline"].numpy(),
+            np.full((2, 3), 0.1, dtype=np.float32),
+        )
+
+        # And the refined physics triad must still be distinct from the
+        # baseline so the toggle actually does something.
+        assert not np.allclose(
+            persisted["body_pose_world_physics"].numpy(),
+            persisted["body_pose_world_baseline"].numpy(),
+        ), "physics and baseline body_pose must differ after refinement"
+
+        # Snapshot must carry the baseline through too.
+        snap = torch.load(
+            str(person_dir / "phc_refined_hybrid_smplx.pt"),
+            map_location="cpu", weights_only=False,
+        )
+        assert "body_pose_world_baseline" in snap
+        np.testing.assert_allclose(
+            snap["body_pose_world_baseline"].numpy(),
+            np.full((2, 63), 0.25, dtype=np.float32),
+        )
+
     def test_run_physics_multi_refreshes_world_physics_keys(self, qapp, tmp_path):
         import sys
         import torch
