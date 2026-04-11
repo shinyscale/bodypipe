@@ -7,13 +7,23 @@ weight metrics.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 import numpy as np
 
 from models.skeleton import SMPLX_SKELETON
 
 logger = logging.getLogger(__name__)
+
+# Default verdict thresholds. Documented in tools/verify_physics.py.
+DEFAULT_THRESHOLDS = {
+    "spectral_correlation_min": 0.9,
+    "root_drift_horizontal_max": 0.5,  # meters
+    "ldlj_improvement_min": 0.0,
+    "require_frame_count_match": True,
+}
 
 # Body joint indices (SMPL-X ordering, first 22 joints)
 _PELVIS = 0
@@ -45,9 +55,44 @@ def evaluate_refinement(
     dict
         Metric names to values.
     """
-    n_raw = raw_params["num_frames"]
-    n_ref = refined_params["num_frames"]
+    n_raw = int(raw_params["num_frames"])
+    n_ref = int(refined_params["num_frames"])
     n = min(n_raw, n_ref)
+
+    metrics: dict = {
+        "frame_count_raw": n_raw,
+        "frame_count_refined": n_ref,
+        "frame_count_preserved": bool(n_raw == n_ref),
+        "fps": float(fps),
+    }
+
+    # NaN check on the refined arrays the viewport actually consumes.
+    try:
+        nan_count = 0
+        for key in ("global_orient", "body_pose", "transl"):
+            arr = np.asarray(refined_params.get(key))
+            if arr.dtype.kind == "f":
+                nan_count += int(np.isnan(arr).sum())
+        metrics["nan_count_refined"] = nan_count
+        metrics["has_nan"] = nan_count > 0
+    except Exception as exc:
+        logger.warning("NaN check failed: %s", exc)
+        metrics["has_nan"] = False
+
+    # Root translation drift (raw vs refined). Y is vertical in GVHMR Y-up
+    # world space; horizontal = X+Z. Catches the "policy walked away" case.
+    try:
+        raw_t = np.asarray(raw_params["transl"], dtype=np.float64)[:n]
+        ref_t = np.asarray(refined_params["transl"], dtype=np.float64)[:n]
+        diff = ref_t - raw_t
+        horiz = np.linalg.norm(diff[:, [0, 2]], axis=-1)
+        vert = np.abs(diff[:, 1])
+        metrics["root_drift_horizontal_mean"] = float(horiz.mean())
+        metrics["root_drift_horizontal_max"] = float(horiz.max())
+        metrics["root_drift_vertical_mean"] = float(vert.mean())
+        metrics["root_drift_vertical_max"] = float(vert.max())
+    except Exception as exc:
+        logger.warning("Root drift computation failed: %s", exc)
 
     # Compute FK positions for a sample of frames (every 3rd frame)
     sample_indices = list(range(0, n, 3))
@@ -62,8 +107,6 @@ def evaluate_refinement(
     )  # (S, 22, 3)
 
     sample_fps = fps / 3.0  # Effective FPS for sampled frames
-
-    metrics: dict = {}
 
     # LDLJ on wrist positions
     try:
@@ -388,6 +431,93 @@ def _forward_kinematics_body(params: dict, frame_idx: int) -> np.ndarray:
         positions[j] = positions[parent] + world_rotations[parent] @ offset_arr[j]
 
     return positions
+
+
+def compute_verdict(
+    metrics: dict,
+    thresholds: dict | None = None,
+) -> tuple[str, str]:
+    """Classify a metrics dict as ok / warn / fail.
+
+    Returns ``(status, reason)`` where ``status`` is one of ``"ok"``,
+    ``"warn"``, ``"fail"`` and ``reason`` is a short human-readable string
+    explaining any non-ok status (empty when ``"ok"``).
+    """
+    th = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    fails: list[str] = []
+    warns: list[str] = []
+
+    if metrics.get("has_nan"):
+        n = metrics.get("nan_count_refined", "?")
+        fails.append(f"refined output has {n} NaN values")
+
+    if th["require_frame_count_match"] and not metrics.get(
+        "frame_count_preserved", True
+    ):
+        warns.append(
+            "frame count changed "
+            f"({metrics.get('frame_count_raw')}→{metrics.get('frame_count_refined')})"
+        )
+
+    drift = metrics.get("root_drift_horizontal_mean")
+    if drift is not None and drift > th["root_drift_horizontal_max"]:
+        warns.append(f"root drifted {drift:.2f}m horizontally (mean)")
+
+    ldlj_imp = metrics.get("ldlj_wrist_improvement")
+    if ldlj_imp is not None and ldlj_imp < th["ldlj_improvement_min"]:
+        warns.append(f"LDLJ improvement {ldlj_imp:.2f} (physics added jerk)")
+
+    spectral = metrics.get("spectral") or {}
+    corr = spectral.get("correlation")
+    if corr is not None and corr < th["spectral_correlation_min"]:
+        warns.append(f"spectral correlation {corr:.2f} below threshold")
+
+    if fails:
+        return "fail", "; ".join(fails + warns)
+    if warns:
+        return "warn", "; ".join(warns)
+    return "ok", ""
+
+
+def _to_jsonable(obj):
+    """Recursively convert numpy scalars/arrays into JSON-friendly Python types."""
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+
+def write_metrics_json(
+    metrics: dict,
+    output_path: Path,
+    thresholds: dict | None = None,
+) -> Path:
+    """Persist a metrics dict (with verdict) to ``output_path`` as JSON.
+
+    Adds ``status`` and ``reason`` fields based on ``compute_verdict``.
+    Returns the written path.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    status, reason = compute_verdict(metrics, thresholds)
+    payload = _to_jsonable(metrics)
+    payload["status"] = status
+    payload["reason"] = reason
+    payload["thresholds"] = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+
+    with open(output_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    return output_path
 
 
 def _axis_angle_to_matrix(rotvec: np.ndarray) -> np.ndarray:
