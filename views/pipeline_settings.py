@@ -628,12 +628,16 @@ class PerfPipelineSettings(SinglePipelineSettings):
         physics_group = QGroupBox("Physics Refinement")
         physics_layout = QVBoxLayout(physics_group)
 
-        self._use_physics = QCheckBox("Enable physics refinement (PHC)")
+        self._use_physics = QCheckBox("Enable physics refinement (PHC) — unavailable")
         self._use_physics.setChecked(False)
+        self._use_physics.setEnabled(False)
         self._use_physics.setToolTip(
-            "Refine body motion through physics simulation (PHC).\n"
-            "Adds weight, inertia, and ground contact to kinematic mocap.\n"
-            "Requires PHC installed separately (see spec)."
+            "PHC physics refinement is currently unavailable on this hardware.\n"
+            "Isaac Sim 5.1 / Omniverse Kit cannot initialise PhysX on WSL2 + Blackwell "
+            "(sm_120): the GPU solver crashes at init and the software fallback deadlocks "
+            "in SimulationContext.reset(). The integration code remains in place and can "
+            "be re-enabled in pipeline_config.py / pipeline_settings.py when a viable "
+            "backend is available."
         )
         physics_layout.addWidget(self._use_physics)
 
@@ -846,7 +850,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             self._progress_label.setText(f"Stage 1/{len(stages)}: Body")
         self._use_hands.setEnabled(not running)
         self._use_face.setEnabled(not running)
-        self._use_physics.setEnabled(not running)
+        # self._use_physics intentionally left disabled — see __init__ tooltip.
         self._use_vitpose_face.setEnabled(not running)
         self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
         self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
@@ -1109,12 +1113,16 @@ class MultiPipelineSettings(QWidget):
         self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
         self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
 
-        self._use_physics = QCheckBox("Enable physics refinement (PHC)")
+        self._use_physics = QCheckBox("Enable physics refinement (PHC) — unavailable")
         self._use_physics.setChecked(False)
+        self._use_physics.setEnabled(False)
         self._use_physics.setToolTip(
-            "Refine body motion through physics simulation (PHC) per person.\n"
-            "Adds weight, inertia, and ground contact to kinematic mocap.\n"
-            "Requires PHC installed separately (see spec)."
+            "PHC physics refinement is currently unavailable on this hardware.\n"
+            "Isaac Sim 5.1 / Omniverse Kit cannot initialise PhysX on WSL2 + Blackwell "
+            "(sm_120): the GPU solver crashes at init and the software fallback deadlocks "
+            "in SimulationContext.reset(). The integration code remains in place and can "
+            "be re-enabled in pipeline_config.py / pipeline_settings.py when a viable "
+            "backend is available."
         )
         mp_layout.addWidget(self._use_physics)
 
@@ -1317,7 +1325,7 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setEnabled(not running)
         self._use_inpainting.setEnabled(not running)
         self._use_hands.setEnabled(not running)
-        self._use_physics.setEnabled(not running)
+        # self._use_physics intentionally left disabled — see __init__ tooltip.
         self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
         self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:

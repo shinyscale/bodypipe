@@ -65,7 +65,12 @@ class PipelineConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> PipelineConfig:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        obj = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        # PHC physics refinement is currently non-viable on this hardware (Isaac Sim
+        # fails on WSL2 + Blackwell sm_120, MuJoCo fallback produces unusable motion).
+        # Force the flag off on load so a previously persisted True does not revive it.
+        obj.use_physics_refine = False
+        return obj
 
     def save(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
