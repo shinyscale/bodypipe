@@ -81,6 +81,9 @@ def save_merged_pt(params: dict, output_path: Path) -> Path:
         "transl_cam", "transl_world",
         "global_orient_cam", "global_orient_world",
         "body_pose_cam", "body_pose_world",
+        "transl_world_baseline", "transl_world_physics",
+        "global_orient_world_baseline", "global_orient_world_physics",
+        "body_pose_world_baseline", "body_pose_world_physics",
         "K_fullimg",
     ]:
         if key in params:
@@ -211,7 +214,13 @@ class FullPipelineWorker(SubprocessWorkerBase):
             # Stage 4: Physics refinement
             self._emit_stage(4)
             if self._config.use_physics_refine and world_params is not None:
-                world_params = self._run_physics_refine(world_params)
+                world_params, physics_refined_ok = self._run_physics_refine(world_params)
+                # Only write the refined viewport snapshot when PHC actually
+                # ran — otherwise _run_physics_refine silently returns the
+                # original baseline params and we would mislabel the snapshot
+                # as `source=phc_refined` over unrefined data.
+                if physics_refined_ok:
+                    self._save_viewport_params_snapshot(results, world_params, camera_params)
             elif self._config.use_physics_refine:
                 self.log_line.emit("Physics refinement enabled but no params available, skipping.")
             else:
@@ -390,20 +399,28 @@ class FullPipelineWorker(SubprocessWorkerBase):
     # Stage 4: Physics refinement
     # ------------------------------------------------------------------
 
-    def _run_physics_refine(self, world_params: dict) -> dict:
+    def _run_physics_refine(self, world_params: dict) -> tuple[dict, bool]:
         """Run PHC physics refinement on world-space params.
 
         Runs synchronously (not as nested QThread) since we're already on a
-        worker thread. Returns refined params, or original params on failure.
+        worker thread. Returns ``(params, refined_ok)`` where ``refined_ok``
+        is ``True`` only when PHC actually produced refined data.  On any
+        failure the original ``world_params`` is returned with
+        ``refined_ok=False`` so downstream stages still have valid data, but
+        the caller can tell whether to label a viewport snapshot as refined.
         """
         try:
             from workers.physics.gvhmr_to_amass import params_to_amass_npz
             from workers.physics.phc_runner import run_phc_local
             from workers.physics.phc_to_smpl import phc_output_to_params
-            from workers.physics.evaluate import evaluate_refinement
+            from workers.physics.evaluate import (
+                compute_verdict,
+                evaluate_refinement,
+                write_metrics_json,
+            )
         except ImportError as exc:
             self.log_line.emit(f"WARNING: Physics modules not available: {exc}")
-            return world_params
+            return world_params, False
 
         progress_cb = self._stage_progress_callback(4)
 
@@ -425,7 +442,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
                     f"WARNING: PHC failed, using original params. "
                     f"Log: {result.log[-300:]}"
                 )
-                return world_params
+                return world_params, False
 
             progress_cb(0.8, "Converting PHC output...")
             refined = phc_output_to_params(result.output_path, world_params)
@@ -437,9 +454,18 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 for key, val in metrics.items():
                     if isinstance(val, dict):
                         for sk, sv in val.items():
-                            self.log_line.emit(f"  Physics {key}.{sk}: {sv:.4f}")
+                            if isinstance(sv, (int, float)):
+                                self.log_line.emit(f"  Physics {key}.{sk}: {sv:.4f}")
                     elif isinstance(val, float):
                         self.log_line.emit(f"  Physics {key}: {val:.4f}")
+                metrics_path = phc_dir / "metrics.json"
+                write_metrics_json(metrics, metrics_path)
+                status, reason = compute_verdict(metrics)
+                verdict_msg = f"Physics verdict: {status.upper()}"
+                if reason:
+                    verdict_msg += f" — {reason}"
+                self.log_line.emit(verdict_msg)
+                self.log_line.emit(f"Physics metrics saved -> {metrics_path}")
             except Exception as exc:
                 self.log_line.emit(f"WARNING: Physics metrics failed: {exc}")
 
@@ -447,11 +473,74 @@ class FullPipelineWorker(SubprocessWorkerBase):
             self.log_line.emit(
                 f"Physics refinement: {refined['num_frames']} frames refined"
             )
-            return refined
+            return refined, True
 
         except Exception as exc:
             self.log_line.emit(f"WARNING: Physics refinement failed: {exc}")
-            return world_params
+            return world_params, False
+
+    def _save_viewport_params_snapshot(
+        self,
+        results: dict,
+        world_params: dict,
+        camera_params: dict | None,
+    ) -> None:
+        """Persist a viewport-readable SMPL-X snapshot after refinement.
+
+        Why: the desktop viewport reloads GVHMR results from disk. When physics
+        refinement only updates in-memory ``world_params``, exports reflect the
+        refined motion but a later UI reload falls back to stale body data.
+        """
+        try:
+            snapshot = dict(world_params)
+            snapshot["source"] = "phc_refined"
+            if camera_params is not None:
+                for src_key, dst_key in [
+                    ("global_orient", "global_orient_cam"),
+                    ("body_pose", "body_pose_cam"),
+                    ("transl", "transl_cam"),
+                ]:
+                    if dst_key not in snapshot and src_key in camera_params:
+                        snapshot[dst_key] = camera_params[src_key]
+                if "K_fullimg" not in snapshot and "K_fullimg" in camera_params:
+                    snapshot["K_fullimg"] = camera_params["K_fullimg"]
+                for key in [
+                    "left_hand_pose",
+                    "right_hand_pose",
+                    "left_wrist_orient",
+                    "right_wrist_orient",
+                ]:
+                    if key not in snapshot and key in camera_params:
+                        snapshot[key] = camera_params[key]
+                for src_key, dst_key in [
+                    ("global_orient_world", "global_orient_world_baseline"),
+                    ("body_pose_world", "body_pose_world_baseline"),
+                    ("transl_world", "transl_world_baseline"),
+                ]:
+                    if dst_key not in snapshot and src_key in camera_params:
+                        snapshot[dst_key] = camera_params[src_key]
+
+            snapshot.setdefault("global_orient_world", snapshot["global_orient"])
+            snapshot.setdefault("body_pose_world", snapshot["body_pose"])
+            snapshot.setdefault("transl_world", snapshot["transl"])
+            snapshot.setdefault("global_orient_world_physics", snapshot["global_orient_world"])
+            snapshot.setdefault("body_pose_world_physics", snapshot["body_pose_world"])
+            snapshot.setdefault("transl_world_physics", snapshot["transl_world"])
+            snapshot.setdefault("global_orient_world_baseline", snapshot["global_orient_world"])
+            snapshot.setdefault("body_pose_world_baseline", snapshot["body_pose_world"])
+            snapshot.setdefault("transl_world_baseline", snapshot["transl_world"])
+
+            out_path = results.get("merged_pt")
+            if out_path:
+                out_path = Path(out_path)
+            else:
+                stem = self._video_path.stem
+                out_path = self._output_dir / f"{stem}_hybrid_smplx.pt"
+            save_merged_pt(snapshot, out_path)
+            results["merged_pt"] = str(out_path)
+            self.log_line.emit(f"Saved viewport params snapshot: {out_path}")
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: Failed to save viewport params snapshot: {exc}")
 
     # ------------------------------------------------------------------
     # Stage 5: Face pipeline
@@ -829,6 +918,12 @@ class MultiPersonWorker(QThread):
         self._gvhmr_root = gvhmr_root
         self._output_dir = output_dir
         self._cancelled = False
+        # The multi-person pipeline assumes 30fps throughout (PHC input NPZ
+        # is tagged fps=30, evaluate_refinement and BVH conversion take fps
+        # as a parameter).  Keep this as a plain attribute so physics
+        # refinement and the metrics verdict block can reference it without
+        # crashing on AttributeError.
+        self._fps: float = 30.0
 
     def run(self):
         try:
@@ -1094,7 +1189,11 @@ class MultiPersonWorker(QThread):
             from workers.physics.gvhmr_to_amass import params_to_amass_npz
             from workers.physics.phc_runner import run_phc_local
             from workers.physics.phc_to_smpl import phc_output_to_params
-            from workers.physics.evaluate import evaluate_refinement
+            from workers.physics.evaluate import (
+                compute_verdict,
+                evaluate_refinement,
+                write_metrics_json,
+            )
             from smplx_to_bvh import extract_gvhmr_params
         except ImportError as exc:
             self.log_line.emit(f"WARNING: Physics modules not available: {exc}")
@@ -1117,11 +1216,39 @@ class MultiPersonWorker(QThread):
             base_frac = 0.85 + (i / total) * 0.07
             self.progress.emit(base_frac, f"Physics: person {i + 1}/{total}")
 
-            # Find params file
-            hybrid_pts = sorted(person_dir.glob("*_hybrid_smplx.pt"))
+            # Find params file.  Physics refinement must always start from
+            # the authoritative GVHMR output (hmr4d_results.pt), never from a
+            # *_hybrid_smplx.pt.  Two reasons:
+            #
+            # 1. Circular hazard: _save_person_physics_hybrid_snapshot writes
+            #    ``phc_refined_hybrid_smplx.pt`` into ``person_dir`` after a
+            #    successful refinement.  That file matches the hybrid glob
+            #    but is a flat viewport snapshot — it does NOT carry
+            #    ``smpl_params_global``, so extract_gvhmr_params (which does
+            #    bracket access ``data["smpl_params_global"]``) would raise
+            #    KeyError on every subsequent refinement attempt.
+            #
+            # 2. Even a valid HaMeR-merged ``*_hybrid_smplx.pt`` would be the
+            #    wrong input: physics should refine the *original* GVHMR
+            #    trajectory, not re-refine already-refined output.
+            #
+            # The refined hmr4d_results.pt preserves the pristine
+            # ``smpl_params_global`` across refinement runs (the overwrite at
+            # the bottom of this block only touches flat top-level keys), so
+            # extract_gvhmr_params always sees clean input.
             gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
-            pt_path = (hybrid_pts[-1] if hybrid_pts
-                       else gvhmr_pts[0] if gvhmr_pts else None)
+            if gvhmr_pts:
+                pt_path = gvhmr_pts[0]
+            else:
+                # Fallback: legacy directories that only have a merged
+                # hybrid (pre-multi-person layout).  Skip phc_refined
+                # viewport snapshots explicitly — those cannot be parsed as
+                # a GVHMR-format input.
+                hybrid_pts = sorted(
+                    p for p in person_dir.glob("*_hybrid_smplx.pt")
+                    if p.name != "phc_refined_hybrid_smplx.pt"
+                )
+                pt_path = hybrid_pts[-1] if hybrid_pts else None
             if pt_path is None:
                 self.log_line.emit(f"[Physics] Person {i}: no params .pt, skipping.")
                 continue
@@ -1146,9 +1273,36 @@ class MultiPersonWorker(QThread):
 
                 refined = phc_output_to_params(phc_result.output_path, params)
 
+                # Evaluate + persist metrics + log verdict
+                try:
+                    metrics = evaluate_refinement(params, refined, fps=self._fps)
+                    metrics_path = phc_dir / "metrics.json"
+                    write_metrics_json(metrics, metrics_path)
+                    status, reason = compute_verdict(metrics)
+                    msg = f"[Physics] Person {i}: verdict {status.upper()}"
+                    if reason:
+                        msg += f" — {reason}"
+                    self.log_line.emit(msg)
+                except Exception as exc:
+                    self.log_line.emit(
+                        f"[Physics] Person {i}: metrics failed — {exc}"
+                    )
+
                 # Update the .pt file with refined body params
                 data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
                 n = refined["num_frames"]
+                baseline_go = data.get(
+                    "global_orient_world_baseline",
+                    data.get("global_orient_world", data.get("global_orient")),
+                )
+                baseline_bp = data.get(
+                    "body_pose_world_baseline",
+                    data.get("body_pose_world", data.get("body_pose")),
+                )
+                baseline_tr = data.get(
+                    "transl_world_baseline",
+                    data.get("transl_world", data.get("transl")),
+                )
                 data["global_orient"] = torch.tensor(
                     refined["global_orient"].reshape(n, -1), dtype=torch.float32
                 )
@@ -1158,10 +1312,40 @@ class MultiPersonWorker(QThread):
                 data["transl"] = torch.tensor(
                     refined["transl"].reshape(n, -1), dtype=torch.float32
                 )
+                data["global_orient_world"] = data["global_orient"]
+                data["body_pose_world"] = data["body_pose"]
+                data["transl_world"] = data["transl"]
+                data["global_orient_world_physics"] = data["global_orient"]
+                data["body_pose_world_physics"] = data["body_pose"]
+                data["transl_world_physics"] = data["transl"]
+                if baseline_go is not None:
+                    data["global_orient_world_baseline"] = baseline_go
+                if baseline_bp is not None:
+                    data["body_pose_world_baseline"] = baseline_bp
+                if baseline_tr is not None:
+                    data["transl_world_baseline"] = baseline_tr
+                data["source"] = "phc_refined"
                 torch.save(data, str(pt_path))
+                # Snapshot write is best-effort: the refined .pt is already
+                # persisted above, so a snapshot failure must not mask the
+                # refinement success or skip the BVH re-export below.
+                snapshot_path: Path | None = None
+                try:
+                    snapshot_path = self._save_person_physics_hybrid_snapshot(
+                        person_dir,
+                        data,
+                    )
+                except Exception as snap_exc:
+                    self.log_line.emit(
+                        f"[Physics] Person {i}: snapshot write failed — {snap_exc}"
+                    )
                 self.log_line.emit(
                     f"[Physics] Person {i}: refined {n} frames -> {pt_path.name}"
                 )
+                if snapshot_path is not None:
+                    self.log_line.emit(
+                        f"[Physics] Person {i}: wrote viewport snapshot -> {snapshot_path.name}"
+                    )
 
                 # Re-export BVH
                 try:
@@ -1182,6 +1366,51 @@ class MultiPersonWorker(QThread):
 
             done_frac = 0.85 + ((i + 1) / total) * 0.07
             self.progress.emit(done_frac, f"Physics: person {i + 1}/{total} complete")
+
+    def _save_person_physics_hybrid_snapshot(self, person_dir: Path, data: dict) -> Path | None:
+        import torch
+
+        snapshot: dict = {}
+        for key in [
+            "global_orient",
+            "body_pose",
+            "transl",
+            "global_orient_world",
+            "body_pose_world",
+            "transl_world",
+            "global_orient_world_baseline",
+            "body_pose_world_baseline",
+            "transl_world_baseline",
+            "global_orient_world_physics",
+            "body_pose_world_physics",
+            "transl_world_physics",
+            "left_hand_pose",
+            "right_hand_pose",
+            "left_wrist_orient",
+            "right_wrist_orient",
+            "betas",
+            "K_fullimg",
+            "source",
+        ]:
+            if key in data:
+                snapshot[key] = data[key]
+
+        incam = data.get("smpl_params_incam")
+        if isinstance(incam, dict):
+            for src_key, dst_key in [
+                ("global_orient", "global_orient_cam"),
+                ("body_pose", "body_pose_cam"),
+                ("transl", "transl_cam"),
+            ]:
+                if dst_key not in snapshot and src_key in incam:
+                    snapshot[dst_key] = incam[src_key]
+
+        if not snapshot:
+            return None
+
+        output_path = person_dir / "phc_refined_hybrid_smplx.pt"
+        torch.save(snapshot, str(output_path))
+        return output_path
 
     def _convert_bvh_to_fbx_batch(self, result) -> list[str]:
         """Convert per-person BVH files to FBX after split pipeline completes.

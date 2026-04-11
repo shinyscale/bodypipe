@@ -4,6 +4,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -764,6 +765,580 @@ class TestSaveMergedPt:
         assert loaded["coordinate_space"] == "world"
         assert loaded["source"] == "hybrid"
         assert "K_fullimg" in loaded
+
+    def test_preserves_wrist_orient(self, tmp_path):
+        import numpy as np
+        import torch
+
+        params = {
+            "num_frames": 3,
+            "global_orient": np.zeros((3, 3)),
+            "body_pose": np.zeros((3, 21, 3)),
+            "left_hand_pose": np.zeros((3, 15, 3)),
+            "right_hand_pose": np.zeros((3, 15, 3)),
+            "left_wrist_orient": np.ones((3, 3)),
+            "right_wrist_orient": np.full((3, 3), 2.0),
+            "transl": np.zeros((3, 3)),
+        }
+        out = tmp_path / "merged.pt"
+        save_merged_pt(params, out)
+
+        loaded = torch.load(str(out), map_location="cpu", weights_only=False)
+        assert "left_wrist_orient" in loaded
+        assert "right_wrist_orient" in loaded
+
+
+class TestPhysicsViewportSnapshot:
+    def test_save_viewport_params_snapshot_writes_hybrid_pt(self, qapp, tmp_path):
+        import torch
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+
+        world_params = {
+            "num_frames": 2,
+            "global_orient": np.ones((2, 3), dtype=np.float32),
+            "body_pose": np.ones((2, 21, 3), dtype=np.float32),
+            "transl": np.ones((2, 3), dtype=np.float32),
+            "left_hand_pose": np.zeros((2, 15, 3), dtype=np.float32),
+            "right_hand_pose": np.zeros((2, 15, 3), dtype=np.float32),
+            "left_wrist_orient": np.zeros((2, 3), dtype=np.float32),
+            "right_wrist_orient": np.zeros((2, 3), dtype=np.float32),
+        }
+        camera_params = {
+            "global_orient": np.full((2, 3), 7.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 8.0, dtype=np.float32),
+            "transl": np.full((2, 3), 9.0, dtype=np.float32),
+            "K_fullimg": np.tile(np.eye(3, dtype=np.float32), (2, 1, 1)),
+        }
+        results = {}
+
+        worker._save_viewport_params_snapshot(results, world_params, camera_params)
+
+        out_path = Path(results["merged_pt"])
+        assert out_path.is_file()
+        loaded = torch.load(str(out_path), map_location="cpu", weights_only=False)
+        assert loaded["global_orient_cam"].shape == (2, 3)
+        assert loaded["body_pose_cam"].shape == (2, 63)
+        assert loaded["transl_cam"].shape == (2, 3)
+        assert loaded["global_orient_world"].shape == (2, 3)
+        assert loaded["body_pose_world"].shape == (2, 63)
+        assert loaded["transl_world"].shape == (2, 3)
+        assert loaded["global_orient_world_baseline"].shape == (2, 3)
+        assert loaded["body_pose_world_baseline"].shape == (2, 63)
+        assert loaded["transl_world_baseline"].shape == (2, 3)
+        assert loaded["global_orient_world_physics"].shape == (2, 3)
+        assert loaded["body_pose_world_physics"].shape == (2, 63)
+        assert loaded["transl_world_physics"].shape == (2, 3)
+        assert loaded["source"] == "phc_refined"
+
+    def test_run_physics_refine_writes_metrics_json(self, qapp, tmp_path):
+        """_run_physics_refine must persist metrics.json with a status field
+        so verify_physics and the future UI summary can read it without
+        rerunning the simulation."""
+        import sys
+        from unittest.mock import patch, MagicMock
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        n = 4
+        world_params = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": np.zeros((n, 3), dtype=np.float32),
+        }
+        refined_params = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": np.full((n, 3), 0.01, dtype=np.float32),
+        }
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(
+                        success=True,
+                        output_path=tmp_path / "phc_refined.npz",
+                        log="",
+                    )
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined_params)
+            ),
+        }
+        # workers.physics.evaluate must NOT be mocked — we want the real
+        # write_metrics_json + compute_verdict path to execute.
+        with patch.dict(sys.modules, physics_modules):
+            result, refined_ok = worker._run_physics_refine(world_params)
+
+        assert result is refined_params
+        assert refined_ok is True
+        metrics_path = worker._output_dir / "physics" / "metrics.json"
+        assert metrics_path.is_file(), (
+            f"metrics.json not written at {metrics_path}"
+        )
+        import json as _json
+        payload = _json.loads(metrics_path.read_text())
+        assert "status" in payload
+        assert payload["status"] in {"ok", "warn", "fail"}
+        assert "frame_count_raw" in payload
+        assert payload["frame_count_raw"] == n
+        assert payload["frame_count_refined"] == n
+        assert payload["frame_count_preserved"] is True
+        assert "thresholds" in payload
+
+    def test_run_physics_refine_reports_failure_on_phc_error(self, qapp, tmp_path):
+        """When PHC returns ``success=False`` or raises, ``_run_physics_refine``
+        must return ``(original_params, False)`` so the caller knows not to
+        mislabel the viewport snapshot as ``source=phc_refined`` over
+        unrefined data."""
+        import sys
+        from unittest.mock import patch, MagicMock
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        n = 2
+        world_params = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": np.zeros((n, 3), dtype=np.float32),
+        }
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(
+                        success=False,
+                        output_path=None,
+                        log="PHC died",
+                    )
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(),
+        }
+        with patch.dict(sys.modules, physics_modules):
+            result, refined_ok = worker._run_physics_refine(world_params)
+
+        # On failure the original params pass through unchanged so downstream
+        # stages still have valid data, but the ok flag is False so the caller
+        # gates the viewport snapshot write.
+        assert result is world_params
+        assert refined_ok is False
+
+    def test_run_physics_multi_refreshes_world_physics_keys(self, qapp, tmp_path):
+        import sys
+        import torch
+        from unittest.mock import patch, MagicMock
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir(parents=True)
+        pt_path = person_dir / "clip_hybrid_smplx.pt"
+        torch.save(
+            {
+                "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                "transl": torch.zeros((2, 3), dtype=torch.float32),
+                "global_orient_world": torch.zeros((2, 3), dtype=torch.float32),
+                "body_pose_world": torch.zeros((2, 63), dtype=torch.float32),
+                "transl_world": torch.zeros((2, 3), dtype=torch.float32),
+                "global_orient_world_baseline": torch.full((2, 3), 7.0, dtype=torch.float32),
+                "body_pose_world_baseline": torch.full((2, 63), 8.0, dtype=torch.float32),
+                "transl_world_baseline": torch.full((2, 3), 9.0, dtype=torch.float32),
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        refined = {
+            "num_frames": 2,
+            "global_orient": np.full((2, 3), 1.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 2.0, dtype=np.float32),
+            "transl": np.full((2, 3), 3.0, dtype=np.float32),
+        }
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(success=True, output_path=tmp_path / "phc", log="")
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined)
+            ),
+            "workers.physics.evaluate": MagicMock(
+                evaluate_refinement=MagicMock()
+            ),
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value={"num_frames": 2})
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "person_0.bvh")
+            ),
+        }
+
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, physics_modules):
+            worker._run_physics_multi(result)
+
+        loaded = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        np.testing.assert_allclose(
+            loaded["global_orient_world_physics"].numpy(),
+            refined["global_orient"],
+        )
+        np.testing.assert_allclose(
+            loaded["body_pose_world_physics"].numpy(),
+            refined["body_pose"].reshape(2, 63),
+        )
+        np.testing.assert_allclose(
+            loaded["transl_world_physics"].numpy(),
+            refined["transl"],
+        )
+        np.testing.assert_allclose(
+            loaded["global_orient_world_baseline"].numpy(),
+            np.full((2, 3), 7.0, dtype=np.float32),
+        )
+
+    def test_run_physics_multi_writes_hybrid_snapshot_for_hmr4d(self, qapp, tmp_path):
+        import sys
+        import torch
+        from unittest.mock import patch, MagicMock
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+        torch.save(
+            {
+                "smpl_params_incam": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                },
+                "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                "transl": torch.zeros((2, 3), dtype=torch.float32),
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        refined = {
+            "num_frames": 2,
+            "global_orient": np.full((2, 3), 1.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 2.0, dtype=np.float32),
+            "transl": np.full((2, 3), 3.0, dtype=np.float32),
+        }
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(success=True, output_path=tmp_path / "phc", log="")
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined)
+            ),
+            "workers.physics.evaluate": MagicMock(
+                evaluate_refinement=MagicMock()
+            ),
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value={"num_frames": 2})
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "person_0.bvh")
+            ),
+        }
+
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, physics_modules):
+            worker._run_physics_multi(result)
+
+        snapshot_path = person_dir / "phc_refined_hybrid_smplx.pt"
+        assert snapshot_path.is_file()
+        snapshot = torch.load(str(snapshot_path), map_location="cpu", weights_only=False)
+        assert snapshot["source"] == "phc_refined"
+        assert "global_orient_world_physics" in snapshot
+        assert "global_orient_cam" in snapshot
+
+    def test_run_physics_multi_prefers_hmr4d_over_prior_snapshot(self, qapp, tmp_path):
+        """Regression: a prior ``phc_refined_hybrid_smplx.pt`` in person_dir
+        must NOT be selected as the physics input — the snapshot is a flat
+        viewport artifact without ``smpl_params_global``, and
+        extract_gvhmr_params does bracket access on that key.  Before this
+        fix, the second refinement run on any clip failed with
+        ``KeyError: 'smpl_params_global'`` because the hybrid glob preferred
+        the prior snapshot over the authoritative hmr4d_results.pt.
+        """
+        import sys
+        import torch
+        from unittest.mock import patch, MagicMock
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                    "betas": torch.zeros((2, 10), dtype=torch.float32),
+                },
+                "smpl_params_incam": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                },
+                "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                "transl": torch.zeros((2, 3), dtype=torch.float32),
+            },
+            pt_path,
+        )
+
+        # Pre-existing viewport snapshot from a prior successful refinement.
+        # Missing smpl_params_global on purpose — that is exactly the file
+        # that triggered the regression on HopeYouDo_10 on 2026-04-10.
+        prior_snapshot_path = person_dir / "phc_refined_hybrid_smplx.pt"
+        torch.save(
+            {
+                "source": "phc_refined",
+                "global_orient": torch.full((2, 3), 99.0, dtype=torch.float32),
+                "body_pose": torch.full((2, 63), 99.0, dtype=torch.float32),
+                "transl": torch.full((2, 3), 99.0, dtype=torch.float32),
+                "global_orient_world_physics": torch.full((2, 3), 99.0, dtype=torch.float32),
+                "body_pose_world_physics": torch.full((2, 63), 99.0, dtype=torch.float32),
+                "transl_world_physics": torch.full((2, 3), 99.0, dtype=torch.float32),
+            },
+            prior_snapshot_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        refined = {
+            "num_frames": 2,
+            "global_orient": np.full((2, 3), 1.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 2.0, dtype=np.float32),
+            "transl": np.full((2, 3), 3.0, dtype=np.float32),
+        }
+
+        # Capture the path extract_gvhmr_params was called with so we can
+        # assert the physics input was the hmr4d file, NOT the snapshot.
+        extract_calls: list[str] = []
+
+        def _fake_extract(path):
+            extract_calls.append(str(path))
+            return {"num_frames": 2}
+
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(success=True, output_path=tmp_path / "phc", log="")
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined)
+            ),
+            "workers.physics.evaluate": MagicMock(
+                evaluate_refinement=MagicMock()
+            ),
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=_fake_extract
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "person_0.bvh")
+            ),
+        }
+
+        captured_log: list[str] = []
+        worker.log_line.connect(captured_log.append)
+
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, physics_modules):
+            worker._run_physics_multi(result)
+
+        # The per-person failure banner must NOT fire — physics should run
+        # cleanly from hmr4d_results.pt even though a prior snapshot exists.
+        assert not any(
+            "[Physics] Person 0: failed" in line for line in captured_log
+        ), f"physics should not fail when a prior snapshot is present; got {captured_log!r}"
+
+        # extract_gvhmr_params must have been called exactly once, and its
+        # argument must be the hmr4d_results.pt path — NOT the hybrid snapshot.
+        assert len(extract_calls) == 1, f"expected one extract call; got {extract_calls!r}"
+        assert extract_calls[0] == str(pt_path), (
+            f"physics must feed hmr4d_results.pt, not the prior snapshot; "
+            f"got {extract_calls[0]!r}"
+        )
+
+        # The snapshot must have been overwritten with fresh refined values
+        # (99.0 placeholders from the prior snapshot should be gone).
+        snapshot = torch.load(
+            str(prior_snapshot_path), map_location="cpu", weights_only=False
+        )
+        assert snapshot["source"] == "phc_refined"
+        gw_physics = snapshot["global_orient_world_physics"]
+        # Fresh refinement wrote 1.0 into global_orient; the snapshot copies
+        # that through into global_orient_world_physics via the multi-person
+        # .pt overwrite at pipeline_orchestrator.py, so 99.0 must be gone.
+        assert not torch.allclose(
+            gw_physics, torch.full_like(gw_physics, 99.0)
+        ), "prior snapshot placeholder values must be overwritten by fresh refinement"
+
+    def test_run_physics_multi_snapshot_failure_does_not_abort_person(self, qapp, tmp_path):
+        """A failing viewport-snapshot write must not be reported as a
+        refinement failure. The refined hmr4d_results.pt is already persisted
+        before the snapshot is attempted, and the per-person loop still has
+        to drop into the BVH re-export block below.
+        """
+        import sys
+        import torch
+        from unittest.mock import patch, MagicMock
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+        torch.save(
+            {
+                "smpl_params_incam": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                },
+                "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                "transl": torch.zeros((2, 3), dtype=torch.float32),
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_physics_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        refined = {
+            "num_frames": 2,
+            "global_orient": np.full((2, 3), 1.0, dtype=np.float32),
+            "body_pose": np.full((2, 21, 3), 2.0, dtype=np.float32),
+            "transl": np.full((2, 3), 3.0, dtype=np.float32),
+        }
+
+        bvh_mock = MagicMock(return_value=person_dir / "person_0.bvh")
+        physics_modules = {
+            "workers.physics.gvhmr_to_amass": MagicMock(
+                params_to_amass_npz=MagicMock()
+            ),
+            "workers.physics.phc_runner": MagicMock(
+                run_phc_local=MagicMock(
+                    return_value=MagicMock(success=True, output_path=tmp_path / "phc", log="")
+                )
+            ),
+            "workers.physics.phc_to_smpl": MagicMock(
+                phc_output_to_params=MagicMock(return_value=refined)
+            ),
+            "workers.physics.evaluate": MagicMock(
+                evaluate_refinement=MagicMock()
+            ),
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value={"num_frames": 2})
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=bvh_mock
+            ),
+        }
+
+        captured_log: list[str] = []
+        worker.log_line.connect(captured_log.append)
+
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, physics_modules):
+            with patch.object(
+                worker,
+                "_save_person_physics_hybrid_snapshot",
+                side_effect=OSError("disk full"),
+            ):
+                worker._run_physics_multi(result)
+
+        # The refined .pt was written before the snapshot attempt, so it
+        # must still be on disk even though the snapshot helper raised.
+        persisted = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        assert persisted["source"] == "phc_refined"
+        np.testing.assert_allclose(
+            persisted["global_orient"].numpy(),
+            np.full((2, 3), 1.0, dtype=np.float32),
+        )
+
+        # The per-person failure banner must NOT fire — the refinement
+        # succeeded, only the secondary snapshot write failed.
+        assert not any(
+            "[Physics] Person 0: failed" in line for line in captured_log
+        ), f"person failure should not be logged on snapshot-only error; got {captured_log!r}"
+        assert any(
+            "snapshot write failed" in line for line in captured_log
+        ), f"snapshot-write failure must be surfaced; got {captured_log!r}"
+
+        # And BVH re-export must still be invoked despite the snapshot failure.
+        assert bvh_mock.called, "BVH re-export must run even when snapshot failed"
 
 
 # ---------------------------------------------------------------------------
