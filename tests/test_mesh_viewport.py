@@ -27,6 +27,8 @@ from views.mesh_viewport import (
     compute_normals,
     k_to_projection,
     estimate_K,
+    compute_letterbox,
+    scale_K_to_viewport,
     compute_orbit_view,
     perspective_fov,
     forward_kinematics,
@@ -246,6 +248,23 @@ class TestEstimateK:
         assert K.dtype == np.float32
 
 
+class TestViewportCameraHelpers:
+    def test_scale_k_to_viewport_centers_letterboxed_image(self):
+        K = np.array(
+            [[100.0, 0.0, 50.0], [0.0, 100.0, 25.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        scaled = scale_K_to_viewport(K, img_w=100, img_h=50, vp_w=300, vp_h=200)
+
+        assert scaled[0, 0] == pytest.approx(300.0)
+        assert scaled[1, 1] == pytest.approx(300.0)
+        assert scaled[0, 2] == pytest.approx(150.0)
+        assert scaled[1, 2] == pytest.approx(100.0)
+
+    def test_compute_letterbox_preserves_aspect(self):
+        assert compute_letterbox(300, 200, 100, 50) == (0, 25, 300, 150)
+
+
 class TestCvToGl:
     """_CV_TO_GL view matrix flips Y and Z."""
 
@@ -305,6 +324,11 @@ class TestMeshViewportWidget:
         w.set_person(2)
         assert w._person_id == 2
 
+    def test_set_motion_source(self, qapp):
+        w = MeshViewport()
+        w.set_motion_source("world_physics")
+        assert w._motion_source == "world_physics"
+
     def test_set_person_same_noop(self, qapp):
         """Setting the same person ID should not trigger recompute."""
         w = MeshViewport()
@@ -313,6 +337,13 @@ class TestMeshViewportWidget:
         # same ID it should be a no-op (early return)
         w.set_person(2)
         assert w._person_id == 2
+
+    def test_set_person_clears_cache(self, qapp):
+        w = MeshViewport()
+        w._person_id = 1
+        w._vertex_cache[(1, 0)] = (np.zeros((3, 3)), np.zeros((3, 3)))
+        w.set_person(2)
+        assert len(w._vertex_cache) == 0
 
     def test_on_frame_changed(self, qapp):
         w = MeshViewport()
@@ -346,6 +377,172 @@ class TestMeshViewportWidget:
         assert w._normals is None
         assert w._body_model is None
         assert w._model_loaded is False
+
+    def test_active_motion_source_prefers_physics_in_auto(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)},
+                "world_baseline": {"global_orient": np.ones((1, 3), dtype=np.float32)},
+                "world_physics": {"global_orient": np.full((1, 3), 2.0, dtype=np.float32)},
+            },
+        )
+        w.set_session(session)
+        w.set_camera_mode("orbit")
+        w.set_person(0)
+        assert w.active_motion_source() == "world_physics"
+
+    def test_active_motion_source_honors_requested_world_source(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)},
+                "world_baseline": {"global_orient": np.ones((1, 3), dtype=np.float32)},
+                "world_physics": {"global_orient": np.full((1, 3), 2.0, dtype=np.float32)},
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        w.set_motion_source("world_baseline")
+        assert w.active_motion_source() == "world_baseline"
+
+    def test_active_motion_source_incam_stays_world_without_camera_alignment(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)},
+                "world_baseline": {"global_orient": np.ones((1, 3), dtype=np.float32)},
+                "world_physics": {"global_orient": np.full((1, 3), 2.0, dtype=np.float32)},
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        assert w.active_motion_source() == "world_physics"
+
+    def test_current_source_status_detail_text_includes_wrist_source(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {
+                    "global_orient": np.zeros((1, 3), dtype=np.float32),
+                    "wrist_debug_source": "clip_hybrid_smplx.pt",
+                },
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        text = w.current_source_status_detail_text()
+        assert "Requested: Auto" in text
+        assert "Resolved: Camera baseline" in text
+        assert "World: camera fallback" in text
+        assert "Wrist: clip_hybrid_smplx.pt" in text
+
+    def test_current_source_status_text_without_session_is_explicit(self, qapp):
+        w = MeshViewport()
+        text = w.current_source_status_text()
+        assert text == "Motion: waiting for session"
+
+    def test_current_source_status_text_reports_missing_incam_alignment(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)},
+                "world_baseline": {"global_orient": np.ones((1, 3), dtype=np.float32)},
+            },
+        )
+        w.set_session(session)
+        w.set_person(0)
+        text = w.current_source_status_text()
+        assert "Motion: World baseline" in text
+        assert "in-camera view missing alignment" in text
+
+    def test_current_source_status_text_reports_missing_world_physics(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"global_orient": np.zeros((1, 3), dtype=np.float32)},
+            motion_sources={
+                "camera_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)},
+                "world_baseline": {
+                    "global_orient": np.ones((1, 3), dtype=np.float32),
+                    "transl_world": np.zeros((1, 3), dtype=np.float32),
+                    "global_orient_world": np.ones((1, 3), dtype=np.float32),
+                },
+            },
+        )
+        w.set_session(session)
+        w.set_camera_mode("orbit")
+        w.set_person(0)
+        text = w.current_source_status_text()
+        assert "Motion: World baseline" in text
+        assert "world physics missing" in text
+
+    def test_current_source_status_text_reports_refined_hmr4d_physics(self, qapp, session):
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"source": "phc_refined"},
+            motion_sources={
+                "world_physics": {
+                    "global_orient": np.ones((1, 3), dtype=np.float32),
+                    "transl": np.zeros((1, 3), dtype=np.float32),
+                    "global_orient_world": np.ones((1, 3), dtype=np.float32),
+                    "transl_world": np.zeros((1, 3), dtype=np.float32),
+                    "motion_contract": "refined_hmr4d",
+                    "motion_artifact": "hmr4d_results.pt",
+                },
+            },
+        )
+        w.set_session(session)
+        w.set_camera_mode("orbit")
+        w.set_person(0)
+        text = w.current_source_status_text()
+        detail = w.current_source_status_detail_text()
+        assert "Motion: World physics" in text
+        assert "refined hmr4d" in text
+        assert "Artifact: hmr4d_results.pt" in detail
+
+    def test_current_source_status_text_reports_physics_refined_hybrid(self, qapp, session):
+        """Happy path: hybrid snapshot carries world_physics with the generic
+        ``world_physics`` contract. The status bar must still surface a
+        ``physics refined`` tag so users can tell PHC ran (previously the
+        legacy ``refined_hmr4d`` tag was the only indicator and only fired on
+        the fallback path)."""
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={"source": "phc_refined"},
+            motion_sources={
+                "world_physics": {
+                    "global_orient": np.ones((1, 3), dtype=np.float32),
+                    "transl": np.zeros((1, 3), dtype=np.float32),
+                    "global_orient_world": np.ones((1, 3), dtype=np.float32),
+                    "transl_world": np.zeros((1, 3), dtype=np.float32),
+                    "motion_contract": "world_physics",
+                    "motion_artifact": "phc_refined_hybrid_smplx.pt",
+                },
+            },
+        )
+        w.set_session(session)
+        w.set_camera_mode("orbit")
+        w.set_person(0)
+        text = w.current_source_status_text()
+        detail = w.current_source_status_detail_text()
+        assert "Motion: World physics" in text
+        assert "physics refined" in text
+        # The legacy "refined hmr4d" tag must NOT appear on the happy path.
+        assert "refined hmr4d" not in text
+        assert "Artifact: phc_refined_hybrid_smplx.pt" in detail
 
     def test_initial_view_matrix(self, qapp):
         """View matrix should be the CV→GL flip."""
@@ -394,6 +591,7 @@ class TestMeshViewportVertexComputation:
         w = MeshViewport()
         result = w._compute_vertices(0, 0)
         assert result is None
+        assert w.current_mesh_status_text() == "Mesh: no session"
 
     def test_compute_vertices_no_track(self, qapp, session):
         """Should return None when person track doesn't exist."""
@@ -401,9 +599,34 @@ class TestMeshViewportVertexComputation:
         w.set_session(session)
         w._model_loaded = True  # skip model loading
         w._body_model = self._make_mock_model()
+        w._body_model_kind = "smplx_lite"
         w._faces = w._body_model.faces
         result = w._compute_vertices(99, 0)
         assert result is None
+        assert w.current_mesh_status_text() == "Mesh: no selected person"
+
+    def test_set_mesh_status_emits_signal_immediately(self, qapp):
+        w = MeshViewport()
+        received = []
+        w.mesh_status_changed.connect(received.append)
+
+        w._set_mesh_status("Mesh: model load failed")
+
+        assert received[-1] == "Mesh: model load failed"
+        assert w.current_mesh_status_text() == "Mesh: model load failed"
+
+    def test_current_mesh_status_text_reports_missing_indices(self, qapp):
+        w = MeshViewport()
+        w._mesh_status = "Mesh: cached"
+        w._gl_ready = True
+        w._vertices = np.zeros((3, 3), dtype=np.float32)
+        w._n_vertices = 3
+        w._n_indices = 0
+
+        text = w.current_mesh_status_text()
+
+        assert "Mesh: cached" in text
+        assert "triangles skipped (no indices)" in text
 
     def test_compute_vertices_no_params(self, qapp, session):
         """Should return None when smplx_params is None."""
@@ -412,9 +635,11 @@ class TestMeshViewportVertexComputation:
         w.set_session(session)
         w._model_loaded = True
         w._body_model = self._make_mock_model()
+        w._body_model_kind = "smplx_lite"
         w._faces = w._body_model.faces
         result = w._compute_vertices(0, 0)
         assert result is None
+        assert w.current_mesh_status_text() == "Mesh: no params for active source"
 
     def test_compute_vertices_success(self, qapp, session):
         """Should return (vertices, normals) when params are available."""
@@ -438,6 +663,7 @@ class TestMeshViewportVertexComputation:
         w.set_session(session)
         w._model_loaded = True
         w._body_model = mock_model
+        w._body_model_kind = "smplx_lite"
         w._faces = mock_model.faces
 
         result = w._compute_vertices(0, 0)
@@ -447,6 +673,7 @@ class TestMeshViewportVertexComputation:
         assert norms.shape == (n_verts, 3)
         assert verts.dtype == np.float32
         assert norms.dtype == np.float32
+        assert w.current_mesh_status_text().startswith("Mesh: ok")
 
     def test_vertex_cache(self, qapp, session):
         """Repeated calls for the same frame should hit cache."""
@@ -469,11 +696,45 @@ class TestMeshViewportVertexComputation:
         w.set_session(session)
         w._model_loaded = True
         w._body_model = mock_model
+        w._body_model_kind = "smplx_lite"
         w._faces = mock_model.faces
 
         r1 = w._compute_vertices(0, 0)
         r2 = w._compute_vertices(0, 0)
         assert r1 is r2  # same object from cache
+
+    def test_smplx_lite_receives_hand_pose_minus_cached_mean(self, qapp, session):
+        pytest.importorskip("torch")
+
+        import torch
+
+        mock_model = self._make_mock_model()
+        mean = np.full((15, 3), 0.25, dtype=np.float32)
+        offset = np.full((1, 15, 3), 0.1, dtype=np.float32)
+        absolute = offset + mean[np.newaxis, :, :]
+
+        w = MeshViewport()
+        session.person_tracks[0] = PersonTrack(
+            person_id=0,
+            smplx_params={
+                "global_orient": torch.zeros((1, 3)),
+                "body_pose": torch.zeros((1, 63)),
+                "betas": torch.zeros((1, 10)),
+                "transl": torch.zeros((1, 3)),
+                "left_hand_pose": absolute,
+                "_lh_mean": mean,
+            },
+        )
+        w.set_session(session)
+        w._model_loaded = True
+        w._body_model = mock_model
+        w._body_model_kind = "smplx_lite"
+        w._faces = mock_model.faces
+
+        result = w._compute_vertices(0, 0)
+        assert result is not None
+        lh_arg = mock_model.call_args.kwargs["left_hand_pose"]
+        np.testing.assert_allclose(lh_arg.cpu().numpy().reshape(15, 3), offset.reshape(15, 3))
 
     def test_vertex_cache_eviction(self, qapp, session):
         """Cache should evict entries when full."""
@@ -534,6 +795,43 @@ class TestMeshViewportVertexComputation:
 
         result = w._compute_vertices(0, 0)
         assert result is None
+
+    def test_world_params_for_person_uses_world_body_pose(self, qapp):
+        w = MeshViewport()
+        params = {
+            "global_orient": np.zeros((1, 3), dtype=np.float32),
+            "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+            "global_orient_world": np.ones((1, 3), dtype=np.float32),
+            "body_pose_world": np.full((1, 21, 3), 2.0, dtype=np.float32),
+            "transl_world": np.full((1, 3), 3.0, dtype=np.float32),
+        }
+        world_params = w._world_params_for_person(params, 0)
+        np.testing.assert_allclose(world_params["global_orient"], np.ones((1, 3), dtype=np.float32))
+        np.testing.assert_allclose(world_params["body_pose"], np.full((1, 21, 3), 2.0, dtype=np.float32))
+        np.testing.assert_allclose(world_params["transl"], np.full((1, 3), 3.0, dtype=np.float32))
+
+
+class TestForwardKinematicsWristOrient:
+    def test_wrist_orient_overrides_body_wrist_joints(self):
+        params = {
+            "global_orient": np.zeros((1, 3), dtype=np.float32),
+            "body_pose": np.zeros((1, 21, 3), dtype=np.float32),
+            "transl": np.zeros((1, 3), dtype=np.float32),
+            "left_wrist_orient": np.array([[0.0, 0.0, np.pi / 2]], dtype=np.float32),
+            "right_wrist_orient": np.array([[0.0, 0.0, -np.pi / 2]], dtype=np.float32),
+        }
+
+        base = {
+            "global_orient": params["global_orient"].copy(),
+            "body_pose": params["body_pose"].copy(),
+            "transl": params["transl"].copy(),
+        }
+        joints_base = forward_kinematics(base, 0)
+        joints_wrist = forward_kinematics(params, 0)
+
+        assert not np.allclose(joints_base[22], joints_wrist[22])
+        assert not np.allclose(joints_base[37], joints_wrist[37])
 
 
 # ======================================================================

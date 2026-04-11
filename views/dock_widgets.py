@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 from PySide6.QtCore import Signal
+from theme import COLORS
 
 if TYPE_CHECKING:
     from views.identity_inspector import IdentityInspector
@@ -76,6 +78,20 @@ class MeshViewportDock(QDockWidget):
         self._camera_combo.addItems(["In-camera", "Free orbit"])
         toolbar.addWidget(self._camera_combo)
 
+        self._motion_source_label = QLabel("Motion:")
+        toolbar.addWidget(self._motion_source_label)
+        self._motion_source_combo = QComboBox()
+        self._motion_source_combo.addItem("Auto", "auto")
+        self._motion_source_combo.addItem("Camera baseline", "camera_baseline")
+        self._motion_source_combo.addItem("World baseline", "world_baseline")
+        self._motion_source_combo.addItem("World physics", "world_physics")
+        self._motion_source_combo.setToolTip(
+            "Switch body motion source without changing the camera path"
+        )
+        toolbar.addWidget(self._motion_source_combo)
+        self._motion_source_label.setVisible(False)
+        self._motion_source_combo.setVisible(False)
+
         self._grid_cb = QCheckBox("Grid")
         self._grid_cb.setChecked(True)
         toolbar.addWidget(self._grid_cb)
@@ -109,7 +125,41 @@ class MeshViewportDock(QDockWidget):
         toolbar.addWidget(self._fov_spin)
 
         lay.addLayout(toolbar)
-        lay.addWidget(mesh_viewport)
+        self._status_strip = QWidget()
+        self._status_strip.setStyleSheet(
+            f"background-color: {COLORS['bg_input']};"
+            f"border-top: 1px solid {COLORS['border']};"
+        )
+        self._status_strip.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
+        status_layout = QHBoxLayout(self._status_strip)
+        status_layout.setContentsMargins(6, 2, 6, 2)
+        status_layout.setSpacing(8)
+
+        self._motion_status = QLabel("Motion: waiting for session")
+        self._motion_status.setStyleSheet(
+            f"color: {COLORS['text_primary']}; font-size: 10px;"
+        )
+        self._motion_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        status_layout.addWidget(self._motion_status)
+
+        self._mesh_status = QLabel("Mesh: no person selected")
+        self._mesh_status.setStyleSheet(
+            f"color: {COLORS['warning']}; font-size: 10px;"
+        )
+        self._mesh_status.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+        status_layout.addWidget(self._mesh_status)
+
+        lay.addWidget(self._status_strip)
+        lay.addWidget(mesh_viewport, 1)
         self.setWidget(container)
 
     @property

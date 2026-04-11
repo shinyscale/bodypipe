@@ -130,6 +130,9 @@ class PersonTrack:
     # Crop metadata for world-grounding (loaded from person_meta.json / hpe_results.pt)
     crop_bbox: list[int] | None = None  # [x1, y1, x2, y2] in original video coords
     K_crop: np.ndarray | None = None  # (3,3) intrinsics for the crop camera
+    # Transient SMPL-X source variants used by the viewport toggle.
+    # Keys may include camera_baseline, world_baseline, and world_physics.
+    motion_sources: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         # Ensure keyframe confidence values are JSON-serializable

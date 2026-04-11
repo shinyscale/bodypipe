@@ -345,6 +345,8 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     tr = _get_array("transl")
     lh = _get_array("left_hand_pose")
     rh = _get_array("right_hand_pose")
+    lwo = _get_array("left_wrist_orient")
+    rwo = _get_array("right_wrist_orient")
 
     if go is None or bp is None:
         return positions
@@ -356,6 +358,19 @@ def forward_kinematics(params: dict, frame_idx: int) -> np.ndarray:
     # Reshape body_pose to (N, 21, 3) if flat
     if bp.ndim == 2 and bp.shape[-1] != 3:
         bp = bp.reshape(bp.shape[0], -1, 3)
+
+    if bp.ndim >= 3:
+        bp = bp.copy()
+        if lwo is not None:
+            if lwo.ndim >= 2 and frame_idx < lwo.shape[0]:
+                bp[frame_idx, 19] = np.asarray(lwo[frame_idx]).reshape(3)
+            elif lwo.ndim == 1:
+                bp[frame_idx, 19] = np.asarray(lwo).reshape(3)
+        if rwo is not None:
+            if rwo.ndim >= 2 and frame_idx < rwo.shape[0]:
+                bp[frame_idx, 20] = np.asarray(rwo[frame_idx]).reshape(3)
+            elif rwo.ndim == 1:
+                bp[frame_idx, 20] = np.asarray(rwo).reshape(3)
 
     # Gather all joint axis-angle vectors into (n_joints, 3)
     all_aa = np.zeros((n_joints, 3), dtype=np.float64)
@@ -1104,8 +1119,10 @@ class _ViewportHUD(QWidget):
         self._mode_text = "Navigate"
         self._person_text = ""
         self._fps_text = ""
+        self._source_text = ""
+        self._mesh_text = ""
 
-        self.setFixedSize(180, 90)
+        self.setFixedSize(420, 140)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -1135,6 +1152,10 @@ class _ViewportHUD(QWidget):
             lines.append(self._person_text)
         if self._fps_text:
             lines.append(self._fps_text)
+        if self._source_text:
+            lines.append(self._source_text)
+        if self._mesh_text:
+            lines.append(self._mesh_text)
 
         for line in lines:
             p.drawText(x, y, line)
@@ -1150,6 +1171,8 @@ class _ViewportHUD(QWidget):
         mode: str | None = None,
         person: int | None = None,
         fps: float | None = None,
+        source: str | None = None,
+        mesh: str | None = None,
     ):
         """Update HUD fields and repaint. Only non-None args are changed."""
         if frame is not None and total_frames is not None:
@@ -1165,6 +1188,10 @@ class _ViewportHUD(QWidget):
             self._person_text = f"Person: {person}" if person >= 0 else ""
         if fps is not None:
             self._fps_text = f"FPS: {fps:.1f}"
+        if source is not None:
+            self._source_text = source
+        if mesh is not None:
+            self._mesh_text = mesh
         self.update()
 
     def show_with_timer(self):
@@ -1208,6 +1235,8 @@ class MeshViewport(_BaseWidget):
     root_drag_committed = Signal(int, object)  # (person_id, offset_xyz ndarray)
     camera_changed = Signal(object)
     gl_rendered = Signal()  # emitted after paintGL completes
+    source_status_changed = Signal(str)
+    mesh_status_changed = Signal(str)
 
     def __init__(self, gvhmr_root: Path | None = None, parent=None):
         super().__init__(parent)
@@ -1226,6 +1255,7 @@ class MeshViewport(_BaseWidget):
 
         # SMPL-X body model (loaded lazily)
         self._body_model: object | None = None
+        self._body_model_kind: str | None = None
         self._model_loaded: bool = False
         self._lbs_weights: np.ndarray | None = None  # (V, J) from model
 
@@ -1259,6 +1289,9 @@ class MeshViewport(_BaseWidget):
 
         # Camera mode ("incam" or "orbit")
         self._camera_mode: str = "incam"
+        self._motion_source: str = "auto"
+        self._resolved_motion_source: str = "auto"
+        self._world_sources_enabled: bool = True
 
         # Orbit camera state (used in "orbit" mode)
         self._orbit_yaw: float = _ORBIT_DEFAULT_YAW
@@ -1334,6 +1367,7 @@ class MeshViewport(_BaseWidget):
 
         # Status message for fallback rendering
         self._status_msg: str = ""
+        self._mesh_status: str = "Mesh: no person selected"
 
         # Letterbox rect: (x_offset, y_offset, render_w, render_h)
         self._letterbox: tuple[int, int, int, int] = (0, 0, 1, 1)
@@ -1419,11 +1453,14 @@ class MeshViewport(_BaseWidget):
         speed: float | None = None,
         person: int | None = None,
         fps: float | None = None,
+        source: str | None = None,
+        mesh: str | None = None,
     ):
         """Update HUD fields and briefly show if enabled."""
         self._hud.update_info(
             frame=frame, total_frames=total_frames,
             speed=speed, person=person, fps=fps,
+            source=source, mesh=mesh,
         )
         if self._hud_enabled:
             self._hud.show_with_timer()
@@ -1436,18 +1473,22 @@ class MeshViewport(_BaseWidget):
         """Stop prefetch and clear vertex cache. Thread-safe."""
         self._stop_prefetch()
         with self._cache_lock:
-            self._invalidate_cache()
+            self._vertex_cache.clear()
 
     def set_session(self, session: Session):
         """Bind session data source."""
         self._session = session
         self._invalidate_cache()
         self._recompute_letterbox()
+        self._resolved_motion_source = "auto"
+        self._emit_source_status()
+        self._emit_mesh_status()
 
     def set_person(self, person_id: int):
         """Select which person's mesh to display."""
         if person_id == self._person_id:
             return
+        self._invalidate_cache()
         self._person_id = person_id
         # Update active skeleton def and coordinate space based on track data
         if self._session is not None:
@@ -1456,14 +1497,29 @@ class MeshViewport(_BaseWidget):
                 self._active_skel = _SOMA_SKEL
             else:
                 self._active_skel = _SKEL
-            # Detect if world-space params are available for orbit mode
+            self._data_is_global = self._track_supports_world(track)
+        else:
             self._data_is_global = False
-            if track is not None:
-                params = track.soma_params or track.smplx_params
-                if params and "transl_world" in params:
-                    self._data_is_global = True
         self._update_camera()
         self._refresh_mesh()
+        self._emit_source_status()
+        self._emit_mesh_status()
+
+    def set_motion_source(self, source: str):
+        """Set the preferred body-motion source used by the viewport."""
+        if source not in ("auto", "camera_baseline", "world_baseline", "world_physics"):
+            return
+        if source == self._motion_source:
+            return
+        self._motion_source = source
+        self._invalidate_cache()
+        if self._session is not None and self._person_id >= 0:
+            track = self._session.person_tracks.get(self._person_id)
+            self._data_is_global = self._track_supports_world(track)
+        self._refresh_mesh()
+        self._update_camera()
+        self._emit_source_status()
+        self._emit_mesh_status()
 
     def on_frame_changed(self, frame_idx: int):
         """Update displayed frame."""
@@ -1473,6 +1529,8 @@ class MeshViewport(_BaseWidget):
         if self._camera_mode == "incam" and self._data_is_global:
             self._update_camera()
         self._refresh_mesh()
+        self._emit_source_status()
+        self._emit_mesh_status()
 
     @property
     def camera_mode(self) -> str:
@@ -1520,6 +1578,7 @@ class MeshViewport(_BaseWidget):
         self._refresh_mesh()  # recompute joints/vertices in new mode's coordinate space
         self._update_camera()
         self.camera_changed.emit(self._camera_state())
+        self._emit_source_status()
 
     def set_color_mode(self, mode: str):
         """Set vertex color mode ('solid', 'joint', 'confidence').
@@ -1680,7 +1739,7 @@ class MeshViewport(_BaseWidget):
         track = self._session.person_tracks.get(self._person_id)
         if track is None:
             return
-        params = track.smplx_params
+        params, _source = self._params_for_track(track)
         if params is None:
             return
         # Determine total frame count from params
@@ -1944,16 +2003,243 @@ class MeshViewport(_BaseWidget):
 
     def _use_world_params(self) -> bool:
         """Whether to use world-space orient/transl for joints and vertices."""
-        if not self._data_is_global:
+        return self._data_is_global
+
+    def _track_motion_sources(self, track) -> dict[str, dict]:
+        if track is None or track.body_model_type == "soma":
+            return {}
+        return getattr(track, "motion_sources", {}) or {}
+
+    def _params_have_world_payload(self, params: dict | None) -> bool:
+        return bool(
+            params is not None
+            and "global_orient_world" in params
+            and "transl_world" in params
+        )
+
+    def _source_uses_world_payload(self, source: str, params: dict | None) -> bool:
+        if params is None:
             return False
-        if self._camera_mode == "orbit":
+        if source in ("world_baseline", "world_physics"):
             return True
-        # incam: use world params only when derived_c2w is available
-        # (slam_c2w is in a different world frame than GVHMR body params)
-        if self._camera_mode == "incam" and self._session is not None:
-            if self._session.derived_c2w is not None:
-                return True
+        if source == "soma":
+            return self._params_have_world_payload(params)
         return False
+
+    def _canonical_world_source(
+        self,
+        track,
+        sources: dict[str, dict],
+    ) -> tuple[dict | None, str | None]:
+        world_physics = sources.get("world_physics")
+        if world_physics is not None:
+            return world_physics, "world_physics"
+
+        world_baseline = sources.get("world_baseline")
+        if world_baseline is not None:
+            return world_baseline, "world_baseline"
+
+        fallback = getattr(track, "smplx_params", None)
+        if self._params_have_world_payload(fallback):
+            return fallback, "world_baseline"
+
+        return None, None
+
+    def _track_supports_world(self, track) -> bool:
+        params, source = self._params_for_track(track)
+        return self._source_uses_world_payload(source, params)
+
+    def _world_source_state(self, track) -> tuple[bool, str]:
+        if track is None:
+            return False, "not available"
+        params, source = self._params_for_track(track)
+        if not self._source_uses_world_payload(source, params):
+            return False, "camera fallback"
+        if self._camera_mode == "orbit":
+            return True, "orbit"
+        if self._session is not None and self._session.derived_c2w is not None:
+            return True, "in-camera"
+        return True, "missing derived camera alignment"
+
+    def _motion_source_display_text(self, source: str) -> str:
+        labels = {
+            "auto": "Auto",
+            "soma": "SOMA",
+            "camera_baseline": "Camera baseline",
+            "world_baseline": "World baseline",
+            "world_physics": "World physics",
+        }
+        return labels.get(source, source.replace("_", " ").title())
+
+    def _requested_motion_source_label_text(self) -> str:
+        return self._motion_source_display_text(self._motion_source)
+
+    def _params_for_track(self, track) -> tuple[dict | None, str]:
+        """Resolve the currently active params dict for a track."""
+        if track is None:
+            self._resolved_motion_source = "auto"
+            return None, "auto"
+        if track.body_model_type == "soma":
+            self._resolved_motion_source = "soma"
+            return track.soma_params, "soma"
+
+        sources = self._track_motion_sources(track)
+        fallback = track.smplx_params
+        requested = self._motion_source
+        if requested in ("world_physics", "world_baseline"):
+            params = sources.get(requested)
+            if params is not None:
+                self._resolved_motion_source = requested
+                return params, requested
+
+        world_params, world_source = self._canonical_world_source(track, sources)
+        if world_params is not None and world_source is not None:
+            self._resolved_motion_source = world_source
+            return world_params, world_source
+
+        if requested == "camera_baseline":
+            params = sources.get("camera_baseline") or fallback
+            if params is not None:
+                self._resolved_motion_source = "camera_baseline"
+                return params, "camera_baseline"
+
+        camera_params = sources.get("camera_baseline")
+        if camera_params is not None:
+            self._resolved_motion_source = "camera_baseline"
+            return camera_params, "camera_baseline"
+
+        self._resolved_motion_source = "camera_baseline" if fallback is not None else "auto"
+        return fallback, self._resolved_motion_source
+
+    def active_motion_source(self) -> str:
+        """Return the resolved motion source for the selected track."""
+        if self._session is None or self._person_id < 0:
+            return self._resolved_motion_source
+        track = self._session.person_tracks.get(self._person_id)
+        _params, source = self._params_for_track(track)
+        return source
+
+    def _motion_source_label_text(self) -> str:
+        source = self.active_motion_source()
+        return self._motion_source_display_text(source)
+
+    def current_source_status_text(self) -> str:
+        if self._session is None:
+            return "Motion: waiting for session"
+        if self._person_id < 0:
+            return "Motion: no person selected"
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None:
+            return "Motion: no selected person"
+        params, source = self._params_for_track(track)
+        if params is None:
+            return "Motion: unavailable"
+        world_active, world_reason = self._world_source_state(track)
+        parts = [f"Motion: {self._motion_source_display_text(source)}"]
+        sources = self._track_motion_sources(track)
+        motion_contract = params.get("motion_contract") if isinstance(params, dict) else None
+        source_tag = (
+            track.smplx_params.get("source")
+            if isinstance(getattr(track, "smplx_params", None), dict)
+            else None
+        )
+        if source == "world_physics":
+            if motion_contract == "refined_hmr4d":
+                # Loaded from hmr4d_results.pt because no hybrid snapshot was
+                # available; annotate the legacy fallback path explicitly.
+                parts.append("refined hmr4d")
+            elif source_tag == "phc_refined":
+                # Happy path: loaded from a phc_refined_hybrid_smplx.pt
+                # snapshot.  Source label alone says "World physics", add a
+                # concise "physics refined" tag so users can tell at a glance
+                # that PHC ran (and not just that baseline world motion is
+                # active).
+                parts.append("physics refined")
+        if source == "world_baseline" and sources.get("world_physics") is None:
+            if source_tag == "phc_refined":
+                parts.append("physics expected but artifact missing")
+            else:
+                parts.append("world physics missing")
+        if not world_active and world_reason == "camera fallback":
+            parts.append("camera fallback")
+        elif world_active and self._camera_mode == "incam" and world_reason == "missing derived camera alignment":
+            parts.append("in-camera view missing alignment")
+        return " | ".join(parts)
+
+    def current_source_status_detail_text(self) -> str:
+        requested = self._requested_motion_source_label_text()
+        if self._session is None:
+            return f"Requested: {requested} | Resolved: none | World: no session"
+        if self._person_id < 0:
+            return f"Requested: {requested} | Resolved: none | World: no person selected"
+        track = self._session.person_tracks.get(self._person_id)
+        if track is None:
+            return f"Requested: {requested} | Resolved: none | World: no selected person"
+        params, source = self._params_for_track(track)
+        world_active, world_reason = self._world_source_state(track)
+        resolved = self._motion_source_display_text(source) if params is not None else "none"
+        world_text = (
+            "active"
+            if world_active and world_reason in ("orbit", "in-camera")
+            else world_reason
+        )
+        parts = [
+            f"Requested: {requested}",
+            f"Resolved: {resolved}",
+            f"World: {world_text}",
+        ]
+        if params is not None:
+            motion_artifact = params.get("motion_artifact")
+            if motion_artifact:
+                parts.append(f"Artifact: {motion_artifact}")
+            wrist_source = params.get("wrist_debug_source")
+            if wrist_source:
+                parts.append(f"Wrist: {wrist_source}")
+        return " | ".join(parts)
+
+    def _emit_source_status(self):
+        text = self.current_source_status_text()
+        self.source_status_changed.emit(text)
+        self._hud.update_info(source=text)
+
+    def current_mesh_status_text(self) -> str:
+        reason = self._mesh_draw_gate_reason()
+        if reason and reason not in self._mesh_status:
+            return f"{self._mesh_status} | {reason}"
+        return self._mesh_status
+
+    def current_mesh_status_detail_text(self) -> str:
+        base = self.current_mesh_status_text()
+        detail = (
+            f"mode={self._render_mode.value} "
+            f"vertices={'yes' if self._vertices is not None else 'no'} "
+            f"n_vertices={self._n_vertices} "
+            f"n_indices={self._n_indices} "
+            f"gl={'ready' if self._gl_ready else 'not-ready'}"
+        )
+        return f"{base} | {detail}"
+
+    def _mesh_draw_gate_reason(self) -> str | None:
+        if self._render_mode == RenderMode.WIREFRAME:
+            return "triangles skipped (Skeleton mode)"
+        if self._vertices is None:
+            return None
+        if not self._gl_ready:
+            return "triangles waiting for GL"
+        if self._n_indices <= 0:
+            return "triangles skipped (no indices)"
+        return None
+
+    def _set_mesh_status(self, text: str):
+        self._mesh_status = text
+        self._status_msg = text
+        if hasattr(self, "_fallback_label"):
+            self._fallback_label.setText(text)
+        self._hud.update_info(mesh=text)
+        self._emit_mesh_status()
+
+    def _emit_mesh_status(self):
+        self.mesh_status_changed.emit(self.current_mesh_status_text())
 
     def _incam_transform_points(self, pts: np.ndarray, person_id: int) -> np.ndarray:
         """Transform points from crop camera space to full-frame camera space (incam only)."""
@@ -2482,6 +2768,8 @@ class MeshViewport(_BaseWidget):
         params = dict(params)
         params["global_orient"] = params["global_orient_world"]
         params["transl"] = params["transl_world"]
+        if "body_pose_world" in params:
+            params["body_pose"] = params["body_pose_world"]
         return params
 
     def _compute_joints(self) -> np.ndarray | None:
@@ -2495,7 +2783,7 @@ class MeshViewport(_BaseWidget):
         if track is None:
             logger.debug("_compute_joints: no track for pid=%d", self._person_id)
             return None
-        params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
+        params, _source = self._params_for_track(track)
         if params is None:
             logger.debug(
                 "_compute_joints: no params for pid=%d (model=%s, soma=%s, smplx=%s)",
@@ -2740,41 +3028,98 @@ class MeshViewport(_BaseWidget):
             return self._body_model is not None
         self._model_loaded = True
 
+        model_dir = None
+        body_models_root = None
+        if self._gvhmr_root:
+            model_dir = (
+                self._gvhmr_root
+                / "inputs"
+                / "checkpoints"
+                / "body_models"
+                / "smplx"
+            )
+            body_models_root = (
+                self._gvhmr_root
+                / "inputs"
+                / "checkpoints"
+                / "body_models"
+            )
+
         try:
             import torch  # noqa: F401
             from hmr4d.utils.body_model.smplx_lite import SmplxLite
-
-            if self._gvhmr_root:
-                model_dir = (
-                    self._gvhmr_root
-                    / "inputs"
-                    / "checkpoints"
-                    / "body_models"
-                    / "smplx"
-                )
-            else:
-                model_dir = None
 
             self._body_model = SmplxLite(
                 model_path=str(model_dir) if model_dir else None
             )
             self._body_model.cpu().eval()
+            self._body_model_kind = "smplx_lite"
+            logger.info("SMPL-X model path: %s", model_dir)
+        except Exception as lite_error:
+            logger.warning("SmplxLite unavailable, trying smplx fallback: %s", lite_error, exc_info=True)
+            try:
+                import smplx
 
-            # Extract face topology (static — does not change across frames)
-            self._faces = np.asarray(self._body_model.faces, dtype=np.int32)
-            self._n_faces = len(self._faces)
+                if body_models_root is None:
+                    raise RuntimeError("GVHMR body model root is not configured")
+                self._body_model = smplx.create(
+                    str(body_models_root),
+                    model_type="smplx",
+                    gender="neutral",
+                    use_pca=False,
+                    flat_hand_mean=True,
+                    ext="npz",
+                )
+                self._body_model.cpu().eval()
+                self._body_model_kind = "smplx_pkg"
+                logger.info("SMPL-X fallback model path: %s", body_models_root)
+            except Exception as smplx_error:
+                logger.warning("Could not load SMPL-X model fallback: %s", smplx_error, exc_info=True)
+                self._set_mesh_status(f"Mesh: model load failed ({smplx_error})")
+                return False
 
-            # Extract LBS weights for joint-influence coloring
-            if hasattr(self._body_model, "lbs_weights"):
+        self._faces = np.asarray(self._body_model.faces, dtype=np.int32)
+        self._n_faces = len(self._faces)
+        if hasattr(self._body_model, "lbs_weights"):
+            try:
                 self._lbs_weights = self._body_model.lbs_weights.detach().cpu().numpy()
                 logger.info("LBS weights: %s", self._lbs_weights.shape)
+            except Exception:
+                logger.debug("Could not extract lbs_weights", exc_info=True)
+        logger.info("SMPL-X model loaded via %s: %d faces", self._body_model_kind, self._n_faces)
+        self._set_mesh_status(f"Mesh: model ready ({self._body_model_kind})")
+        return True
 
-            logger.info("SMPL-X model loaded: %d faces", self._n_faces)
-            return True
-        except Exception as e:
-            logger.warning("Could not load SMPL-X model: %s", e)
-            self._status_msg = f"Model unavailable: {e}"
-            return False
+    def _body_model_pelvis(self, betas, body_pose, global_orient):
+        import torch
+
+        if self._body_model is None:
+            return None
+        if hasattr(self._body_model, "get_skeleton"):
+            return self._body_model.get_skeleton(betas)[:, 0]
+        if self._body_model_kind == "smplx_pkg":
+            zeros_go = torch.zeros_like(global_orient)
+            zeros_bp = torch.zeros_like(body_pose)
+            out = self._body_model(
+                betas=betas,
+                global_orient=zeros_go,
+                body_pose=zeros_bp,
+                transl=torch.zeros((betas.shape[0], 3), dtype=betas.dtype),
+                left_hand_pose=torch.zeros((betas.shape[0], 45), dtype=betas.dtype),
+                right_hand_pose=torch.zeros((betas.shape[0], 45), dtype=betas.dtype),
+                return_verts=False,
+            )
+            return out.joints[:, 0]
+        return None
+
+    def _tensor_to_numpy(self, value) -> np.ndarray:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return np.asarray(value, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Vertex computation
@@ -2810,26 +3155,32 @@ class MeshViewport(_BaseWidget):
                             and prev_c.frame_index < frame_idx < next_c.frame_index):
                         interp_active = True
 
-        if not override_active and not interp_active:
-            with self._cache_lock:
-                if cache_key in self._vertex_cache:
-                    return self._vertex_cache[cache_key]
-
-        if not self._load_model():
-            return None
         if self._session is None:
+            self._set_mesh_status("Mesh: no session")
             return None
 
         track = self._session.person_tracks.get(person_id)
         if track is None:
+            self._set_mesh_status("Mesh: no selected person")
             return None
 
         if track.body_model_type == "soma":
             # SOMA: skeleton-only rendering (no mesh model available yet)
+            self._set_mesh_status("Mesh: unavailable for SOMA skeleton")
             return None
 
-        params = track.smplx_params
+        if not override_active and not interp_active:
+            with self._cache_lock:
+                if cache_key in self._vertex_cache:
+                    self._set_mesh_status("Mesh: cached")
+                    return self._vertex_cache[cache_key]
+
+        if not self._load_model():
+            return None
+
+        params, _source = self._params_for_track(track)
         if params is None:
+            self._set_mesh_status("Mesh: no params for active source")
             return None
 
         # Use world-space orient/transl so the mesh matches
@@ -2856,6 +3207,24 @@ class MeshViewport(_BaseWidget):
                 tr = params.get("transl")
 
                 if go is None or bp is None or be is None:
+                    logger.warning(
+                        "Vertex params incomplete (pid=%d, source=%s): go=%s bp=%s betas=%s",
+                        person_id,
+                        _source,
+                        go is not None,
+                        bp is not None,
+                        be is not None,
+                    )
+                    missing = []
+                    if go is None:
+                        missing.append("global_orient")
+                    if bp is None:
+                        missing.append("body_pose")
+                    if be is None:
+                        missing.append("betas")
+                    self._set_mesh_status(
+                        f"Mesh: missing {', '.join(missing)}"
+                    )
                     return None
 
                 def _to_tensor(x):
@@ -2879,6 +3248,7 @@ class MeshViewport(_BaseWidget):
                 go_frame = _frame_slice(go_t, frame_idx)
                 bp_frame = _frame_slice(bp_t, frame_idx)
                 if go_frame is None or bp_frame is None:
+                    self._set_mesh_status("Mesh: frame index outside pose data")
                     return None
 
                 # SmplxLite expects flat (*, 63), not structured (*, 21, 3)
@@ -2896,44 +3266,82 @@ class MeshViewport(_BaseWidget):
                 # the root at transl directly.  Subtract J[0] from transl so the
                 # mesh rotates around transl, matching the FK convention.
                 if tr_frame is not None:
-                    J_shaped = self._body_model.get_skeleton(be_frame)  # (1, 55, 3)
-                    tr_frame = tr_frame - J_shaped[:, 0]
+                    pelvis = self._body_model_pelvis(be_frame, bp_frame, go_frame)
+                    if pelvis is not None:
+                        tr_frame = tr_frame - pelvis
 
-                # Extract hand poses and patch model buffer directly
-                # (avoids SmplxLite .pyc stale bytecode issue on NTFS/WSL2)
+                # Hand poses are already normalized in the loader to match export behavior.
+                # Export adds the hand mean once in the loader; pass explicit hand pose
+                # tensors through the body model without introducing any extra viewport-
+                # only hand offset math.
                 lh = params.get("left_hand_pose")
                 rh = params.get("right_hand_pose")
-                # DIAGNOSTIC: uncomment to test L/R swap
-                # lh, rh = rh, lh
-                _patched = False
-                _odp = self._body_model.other_default_pose  # (99,) buffer
-                if lh is not None or rh is not None:
-                    _odp_saved = _odp.data.clone()
-                    _patched = True
-                    if lh is not None:
-                        lh_t = _to_tensor(lh)
-                        lh_frame = _frame_slice(lh_t, frame_idx)
-                        if lh_frame is not None:
-                            _odp.data[9:54] += lh_frame.reshape(45)
-                    if rh is not None:
-                        rh_t = _to_tensor(rh)
-                        rh_frame = _frame_slice(rh_t, frame_idx)
-                        if rh_frame is not None:
-                            _odp.data[54:99] += rh_frame.reshape(45)
+                lh_frame = None
+                rh_frame = None
+                if lh is not None:
+                    lh_t = _to_tensor(lh)
+                    lh_frame = _frame_slice(lh_t, frame_idx)
+                    if lh_frame is not None:
+                        lh_frame = lh_frame.reshape(lh_frame.shape[0], 45)
+                if rh is not None:
+                    rh_t = _to_tensor(rh)
+                    rh_frame = _frame_slice(rh_t, frame_idx)
+                    if rh_frame is not None:
+                        rh_frame = rh_frame.reshape(rh_frame.shape[0], 45)
+                if self._body_model_kind == "smplx_lite":
+                    lh_mean = params.get("_lh_mean")
+                    rh_mean = params.get("_rh_mean")
+                    if lh_frame is not None and lh_mean is not None:
+                        lh_mean_t = _to_tensor(lh_mean).reshape(1, 45)
+                        lh_frame = lh_frame - lh_mean_t
+                    if rh_frame is not None and rh_mean is not None:
+                        rh_mean_t = _to_tensor(rh_mean).reshape(1, 45)
+                        rh_frame = rh_frame - rh_mean_t
 
-                verts = self._body_model(
-                    body_pose=bp_frame,
-                    betas=be_frame,
-                    global_orient=go_frame,
-                    transl=tr_frame,
-                )  # (1, V, 3)
+                lwo = params.get("left_wrist_orient")
+                rwo = params.get("right_wrist_orient")
+                if lwo is not None or rwo is not None:
+                    bp_frame = bp_frame.clone()
+                    if lwo is not None:
+                        lwo_t = _to_tensor(lwo)
+                        lwo_frame = _frame_slice(lwo_t, frame_idx)
+                        if lwo_frame is not None:
+                            bp_frame[0, 57:60] = lwo_frame.reshape(3)
+                    if rwo is not None:
+                        rwo_t = _to_tensor(rwo)
+                        rwo_frame = _frame_slice(rwo_t, frame_idx)
+                        if rwo_frame is not None:
+                            bp_frame[0, 60:63] = rwo_frame.reshape(3)
 
-                if _patched:
-                    _odp.data.copy_(_odp_saved)
+                if self._body_model_kind == "smplx_pkg":
+                    output = self._body_model(
+                        betas=be_frame,
+                        global_orient=go_frame,
+                        body_pose=bp_frame,
+                        left_hand_pose=lh_frame
+                        if lh_frame is not None
+                        else torch.zeros((be_frame.shape[0], 45), dtype=be_frame.dtype),
+                        right_hand_pose=rh_frame
+                        if rh_frame is not None
+                        else torch.zeros((be_frame.shape[0], 45), dtype=be_frame.dtype),
+                        transl=tr_frame,
+                        return_verts=True,
+                    )
+                    verts = output.vertices
+                else:
+                    verts = self._body_model(
+                        body_pose=bp_frame,
+                        left_hand_pose=lh_frame,
+                        right_hand_pose=rh_frame,
+                        betas=be_frame,
+                        global_orient=go_frame,
+                        transl=tr_frame,
+                    )  # (1, V, 3)
 
-                vertices = verts[0].cpu().numpy().astype(np.float32)
+                vertices = self._tensor_to_numpy(verts[0]).astype(np.float32)
                 vertices = self._incam_transform_points(vertices, person_id)
                 normals = compute_normals(vertices, self._faces)
+                self._set_mesh_status(f"Mesh: ok ({self._body_model_kind}, {_source})")
 
                 result = (vertices, normals)
 
@@ -2950,6 +3358,7 @@ class MeshViewport(_BaseWidget):
             import traceback as _tb
             logger.warning("Vertex computation failed (pid=%d, f=%d): %s\n%s",
                            person_id, frame_idx, e, _tb.format_exc())
+            self._set_mesh_status(f"Mesh: vertex compute failed ({e})")
             return None
 
     # ------------------------------------------------------------------
@@ -2962,6 +3371,7 @@ class MeshViewport(_BaseWidget):
         try:
             # Reset draw state — old GL resources are invalid after context recreation
             self._gl_ready = False
+            self._faces_uploaded = False
             self._n_indices = 0
             self._n_vertices = 0
             self._invalidate_cache()
@@ -3066,6 +3476,7 @@ class MeshViewport(_BaseWidget):
             and self._vertices is not None
             and self._n_indices > 0
         ):
+            gl.glDisable(gl.GL_CULL_FACE)
             self._shader.bind()
             self._set_mat4("model", self._model_mat)
             self._set_mat4("view", self._view)
@@ -3083,6 +3494,7 @@ class MeshViewport(_BaseWidget):
             )
             gl.glBindVertexArray(0)
             self._shader.release()
+            gl.glEnable(gl.GL_CULL_FACE)
 
         # Skeleton overlay
         if self._show_skeleton:
@@ -3181,6 +3593,7 @@ class MeshViewport(_BaseWidget):
             and self._vertices is not None
             and self._n_indices > 0
         ):
+            gl.glDisable(gl.GL_CULL_FACE)
             self._shader.bind()
 
             # Uniforms
@@ -3203,6 +3616,7 @@ class MeshViewport(_BaseWidget):
             gl.glBindVertexArray(0)
 
             self._shader.release()
+            gl.glEnable(gl.GL_CULL_FACE)
 
         # Skeleton overlay (always drawn when visible — even in wireframe)
         if self._show_skeleton:
@@ -3256,6 +3670,10 @@ class MeshViewport(_BaseWidget):
                     lines.append(f"Person {self._person_id}  |  model: {track.body_model_type}")
                     lines.append(f"smplx_params: {'yes' if track.smplx_params else 'None'}")
                     lines.append(f"soma_params: {'yes' if track.soma_params else 'None'}")
+                    lines.append(f"Motion source: {self._motion_source_label_text()}")
+                    params, _source = self._params_for_track(track)
+                    if params is not None and params.get("wrist_debug_source"):
+                        lines.append(f"Wrist source: {params['wrist_debug_source']}")
             lines.append(f"Camera: {self._camera_mode}  |  GL: {'ready' if self._gl_ready else 'NOT READY'}")
             lines.append("Press V to toggle orbit/incam camera")
             y = ly + lh // 2 - len(lines) * 10
@@ -3849,7 +4267,14 @@ class MeshViewport(_BaseWidget):
     def _refresh_mesh(self):
         """Recompute vertices + joints for current person/frame and trigger repaint."""
         # ---- Vertices (cached) ----
-        if self._render_mode != RenderMode.WIREFRAME:
+        if self._person_id < 0:
+            self._set_mesh_status("Mesh: no person selected")
+        elif self._render_mode == RenderMode.WIREFRAME:
+            self._vertices = None
+            self._normals = None
+            self._n_indices = 0
+            self._set_mesh_status("Mesh: hidden in Skeleton mode")
+        else:
             verts_result = self._compute_vertices(self._person_id, self._current_frame)
             if verts_result is not None:
                 self._vertices, self._normals = verts_result
@@ -3885,24 +4310,22 @@ class MeshViewport(_BaseWidget):
             self._grid_center_z = float(pts[0, 2])
 
         # ---- Multi-person joints ----
-        # During scrubbing/playback, skip re-computing FK for non-selected
-        # persons — keep last known positions for smooth playback.
-        if self._pre_scrub_mode is None:
-            # Not scrubbing: full update
-            self._all_joint_positions.clear()
-            self._all_active_skels.clear()
+        # Always recompute FK for every person — it's pure numpy and cheap
+        # enough to run per frame during playback.  (A previous optimization
+        # skipped recompute during scrubbing, which froze non-selected
+        # characters on playback.)
+        self._all_joint_positions.clear()
+        self._all_active_skels.clear()
         if self._show_all_persons and self._session is not None:
             for pid, track in self._session.person_tracks.items():
-                # During scrubbing, skip if we already have this person's joints
-                if self._pre_scrub_mode is not None and pid in self._all_joint_positions:
-                    continue
                 skel = _SOMA_SKEL if track.body_model_type == "soma" else _SKEL
-                params = track.soma_params if track.body_model_type == "soma" else track.smplx_params
+                params, _source = self._params_for_track(track)
                 if params is None:
                     continue
+                use_world = self._source_uses_world_payload(_source, params)
                 if ("global_orient_world" in params
                         and "transl_world" in params
-                        and self._use_world_params()):
+                        and use_world):
                     params = self._world_params_for_person(params, pid)
                 try:
                     joints = forward_kinematics(params, self._current_frame)
@@ -3925,6 +4348,8 @@ class MeshViewport(_BaseWidget):
 
         if _HAS_GL:
             self.update()
+        self._emit_source_status()
+        self._emit_mesh_status()
 
     def _upload_buffers(self):
         """Upload vertices, normals, colors, and faces to GPU."""
@@ -3975,7 +4400,7 @@ class MeshViewport(_BaseWidget):
         gl.glEnableVertexAttribArray(2)
 
         # Element buffer (face indices) — upload once or if faces changed
-        if not self._faces_uploaded:
+        if not self._faces_uploaded or self._n_indices <= 0:
             idx_data = self._faces.astype(np.uint32).flatten()
             gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self._ebo)
             gl.glBufferData(

@@ -85,6 +85,30 @@ def _crop_transl_to_fullframe(tr_crop, K_crop, K_full, crop_x1, crop_y1):
     return np.stack([X_f, Y_f, Z], axis=-1).astype(np.float32)
 
 
+def _normalize_slam_w2c(slam) -> np.ndarray:
+    """Return SLAM poses as W2C matrices regardless of on-disk format.
+
+    SimpleVO stores homogeneous ``T_w2c`` matrices directly. DPVO stores
+    per-frame rows as ``[tx, ty, tz, qx, qy, qz, qw]`` in C2W form after an
+    internal inverse, so those rows must be converted back to W2C before the
+    rest of the viewport pipeline consumes them.
+    """
+    arr = np.array(slam, dtype=np.float32)
+    if arr.ndim == 2 and arr.shape[1] == 7:
+        from scipy.spatial.transform import Rotation as _R
+
+        quats_xyzw = arr[:, 3:7]
+        R_c2w = _R.from_quat(quats_xyzw).as_matrix()
+        t_c2w = arr[:, :3].astype(np.float32)
+        R_w2c = R_c2w.transpose(0, 2, 1)
+        t_w2c = -np.einsum("nij,nj->ni", R_w2c, t_c2w)
+        T = np.tile(np.eye(4, dtype=np.float32), (len(arr), 1, 1))
+        T[:, :3, :3] = R_w2c
+        T[:, :3, 3] = t_w2c
+        arr = T
+    return arr
+
+
 class _LowPassFilter:
     def __init__(self):
         self.s = None
@@ -212,30 +236,67 @@ def _umeyama_align(src, dst):
 def _align_slam_to_world(slam_w2c, body_c2w, n_refs=10):
     """Align SLAM W2C trajectory to GVHMR world frame via similarity transform.
 
-    Monocular VO (DPVO) has unknown scale. Uses Umeyama alignment on camera
-    positions to recover scale + rotation + translation, then applies the
-    similarity transform to produce C2W matrices in GVHMR's world frame.
+    Monocular VO has unknown scale and its world frame is its first camera
+    frame (OpenCV convention, not gravity-aligned). We want the similarity
+    transform (R, s, t) from SLAM world to body/GV world such that SLAM's
+    clean per-frame camera poses land in the Y-up world frame at the correct
+    metric scale.
+
+    Critical: position-only Umeyama alignment (which is what an earlier
+    version used) fits trajectory *point clouds* — the resulting R has no
+    intrinsic reason to match the rotation needed to align camera reference
+    frames, and with noisy body-derived positions it drifts badly. Instead we
+    derive:
+
+    * **R_align** from rotations: per-frame ``R_body[i] @ R_slam[i]^T`` is,
+      in theory, the frame-independent SLAM→body rotation. Average in
+      quaternion space (sign-aligned) for noise robustness.
+    * **scale** from trajectory path-length ratio (always positive, metric).
+      Body and SLAM should measure the same physical path length at
+      different scales; body-derived per-frame positions are noisy but the
+      total path length is a robust, always-positive scale estimator.
+    * **t_align** by anchoring at frame 0 — because SimpleVO starts at
+      identity (camera at origin, R=I), frame 0 of the aligned trajectory
+      should match body-derived frame 0 exactly. Downstream rendering then
+      inherits the body-derived anchor and gets clean SLAM motion on top.
     """
+    from scipy.spatial.transform import Rotation
+
     N = slam_w2c.shape[0]
+    slam_c2w_raw = np.linalg.inv(slam_w2c)  # (N, 4, 4) in SLAM's world frame
+    R_slam = slam_c2w_raw[:, :3, :3]        # (N, 3, 3)
+    t_slam = slam_c2w_raw[:, :3, 3]         # (N, 3)
+    R_body = body_c2w[:, :3, :3]
+    t_body = body_c2w[:, :3, 3]
 
-    # Extract camera positions from both sources
-    body_pos = body_c2w[:, :3, 3]  # (N, 3) — body-derived, noisy but correct scale
-    slam_c2w_raw = np.linalg.inv(slam_w2c)  # (N, 4, 4) — C2W in SLAM's world frame
-    slam_pos = slam_c2w_raw[:, :3, 3]  # (N, 3) — camera positions, wrong scale
+    # --- R_align from rotation alignment (quaternion mean) ---
+    R_rel = R_body @ R_slam.transpose(0, 2, 1)        # per-frame SLAM→body rotation
+    q = Rotation.from_matrix(R_rel).as_quat()         # (N, 4) xyzw
+    # Sign-align to the first quaternion so the mean is meaningful
+    flip = np.einsum('ij,j->i', q, q[0]) < 0
+    q[flip] = -q[flip]
+    q_mean = q.mean(axis=0)
+    q_mean = q_mean / max(np.linalg.norm(q_mean), 1e-12)
+    R_align = Rotation.from_quat(q_mean).as_matrix().astype(np.float32)
 
-    # Umeyama: find s, R, t mapping slam_pos → body_pos
-    s, R_align, t_align = _umeyama_align(slam_pos, body_pos)
-    logging.getLogger(__name__).info("SLAM alignment: scale=%.4f", s)
+    # --- Scale from trajectory path-length ratio ---
+    body_path = float(np.linalg.norm(np.diff(t_body, axis=0), axis=1).sum())
+    slam_path = float(np.linalg.norm(np.diff(t_slam, axis=0), axis=1).sum())
+    s = body_path / max(slam_path, 1e-8)
 
-    # Build aligned C2W for each frame
+    # --- Anchor translation at frame 0 ---
+    t_align = t_body[0] - s * (R_align @ t_slam[0])
+
+    logging.getLogger(__name__).info(
+        "SLAM alignment: scale=%.4f, body_path=%.2fm, slam_path=%.2f",
+        s, body_path, slam_path,
+    )
+
     aligned = np.zeros((N, 4, 4), dtype=np.float32)
     for i in range(N):
-        # Aligned camera position
-        aligned[i, :3, 3] = s * R_align @ slam_pos[i] + t_align
-        # Aligned rotation (scale doesn't affect rotation)
-        R_c2w_slam = slam_c2w_raw[i, :3, :3]
-        aligned[i, :3, :3] = R_align @ R_c2w_slam
-        aligned[i, 3, 3] = 1.0
+        aligned[i, :3, :3] = R_align @ R_slam[i]
+        aligned[i, :3, 3]  = s * (R_align @ t_slam[i]) + t_align
+        aligned[i, 3, 3]   = 1.0
 
     return aligned
 
@@ -634,6 +695,27 @@ class AppWindow(QMainWindow):
         dock._camera_combo.currentIndexChanged.connect(
             lambda idx: self._mesh_viewport.set_camera_mode("incam" if idx == 0 else "orbit")
         )
+        dock._motion_source_combo.currentIndexChanged.connect(
+            lambda idx: self._mesh_viewport.set_motion_source(
+                dock._motion_source_combo.itemData(idx) or "auto"
+            )
+        )
+        self._mesh_viewport.source_status_changed.connect(
+            lambda text: (
+                dock._motion_status.setText(text),
+                dock._motion_status.setToolTip(
+                    self._mesh_viewport.current_source_status_detail_text()
+                ),
+            )
+        )
+        self._mesh_viewport.mesh_status_changed.connect(
+            lambda text: (
+                dock._mesh_status.setText(text),
+                dock._mesh_status.setToolTip(
+                    self._mesh_viewport.current_mesh_status_detail_text()
+                ),
+            )
+        )
         dock._grid_cb.toggled.connect(self._mesh_viewport.set_show_grid)
         dock._labels_cb.toggled.connect(self._mesh_viewport.set_show_joint_labels)
         dock._frustum_cb.toggled.connect(self._mesh_viewport.set_show_camera_frustum)
@@ -642,6 +724,14 @@ class AppWindow(QMainWindow):
         dock._fov_spin.valueChanged.connect(self._mesh_viewport.set_frustum_fov)
         # Playback quality combo → mesh viewport
         dock._playback_quality.currentIndexChanged.connect(self._on_playback_quality_changed)
+        dock._motion_status.setText(self._mesh_viewport.current_source_status_text())
+        dock._motion_status.setToolTip(
+            self._mesh_viewport.current_source_status_detail_text()
+        )
+        dock._mesh_status.setText(self._mesh_viewport.current_mesh_status_text())
+        dock._mesh_status.setToolTip(
+            self._mesh_viewport.current_mesh_status_detail_text()
+        )
         # Person panel: selector bar + Identity/Pose Corrector tabs
         self._person_bar = PersonSelectorBar()
         self._person_bar.set_session(self._session)
@@ -679,6 +769,16 @@ class AppWindow(QMainWindow):
         # Video/3D stacked: split Video vertically so Mesh goes below Video
         # (Identity stays full-height in the right column)
         self.splitDockWidget(self._video_dock, self._mesh_dock, Qt.Vertical)
+        self.resizeDocks(
+            [self._video_dock, self._mesh_dock],
+            [520, 760],
+            Qt.Orientation.Vertical,
+        )
+        self.resizeDocks(
+            [self._video_dock, self._person_panel_dock],
+            [920, 560],
+            Qt.Orientation.Horizontal,
+        )
 
         # Bottom: Track overview (log dock added later in _setup_log_panel)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._track_overview_dock)
@@ -1431,7 +1531,7 @@ class AppWindow(QMainWindow):
         # If session already has person tracks (loaded from session JSON),
         # hydrate heavy data from disk and refresh all panels.
         if self._session.person_tracks:
-            self._hydrate_person_tracks()
+            self._hydrate_person_tracks(force_motion_reload=True)
             self._refresh_all_panels()
             return
 
@@ -1487,7 +1587,7 @@ class AppWindow(QMainWindow):
                 continue
 
             confidences, confidence_breakdown = self._load_confidences_csv(pdir)
-            smplx_params, soma_params, body_model_type = self._load_motion_params(pdir)
+            smplx_params, soma_params, body_model_type, motion_sources = self._load_motion_params(pdir)
 
             pt = PersonTrack(
                 person_id=pid,
@@ -1497,6 +1597,7 @@ class AppWindow(QMainWindow):
                 smplx_params=smplx_params,
                 soma_params=soma_params,
                 body_model_type=body_model_type,
+                motion_sources=motion_sources,
             )
             self._session.person_tracks[pid] = pt
 
@@ -1516,7 +1617,38 @@ class AppWindow(QMainWindow):
 
         self._refresh_all_panels()
 
-    def _hydrate_person_tracks(self):
+    def _motion_file_stamp(self, person_dir: Path | None) -> tuple[str | None, int | None]:
+        if person_dir is None or not person_dir.is_dir():
+            return None, None
+        hybrid_pt = self._select_hybrid_motion_file(person_dir)
+        if hybrid_pt is not None:
+            return str(hybrid_pt), int(hybrid_pt.stat().st_mtime_ns)
+        hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
+        if hmr4d_pt.is_file():
+            return str(hmr4d_pt), int(hmr4d_pt.stat().st_mtime_ns)
+        return None, None
+
+    def _refresh_track_motion_from_disk(self, track, *, force: bool = False) -> bool:
+        person_dir = track.person_dir
+        stamp = self._motion_file_stamp(person_dir)
+        current_stamp = getattr(track, "_motion_file_stamp", (None, None))
+        needs_reload = (
+            force
+            or (track.smplx_params is None and track.soma_params is None)
+            or getattr(track, "motion_sources", None) is None
+            or current_stamp != stamp
+        )
+        if not needs_reload:
+            return False
+        smplx, soma, bmt, motion_sources = self._load_motion_params(person_dir)
+        track.smplx_params = smplx
+        track.soma_params = soma
+        track.body_model_type = bmt
+        track.motion_sources = motion_sources
+        track._motion_file_stamp = stamp
+        return True
+
+    def _hydrate_person_tracks(self, *, force_motion_reload: bool = False):
         """Load heavy data (smplx_params, confidences) from disk for existing tracks.
 
         Why: Session JSON stores lightweight fields (person_id, person_dir,
@@ -1524,14 +1656,15 @@ class AppWindow(QMainWindow):
         confidence arrays.  This method fills in the gaps from disk so that
         the 3D viewport, identity inspector, and track overview can render.
         """
+        self._session.derived_c2w = None
+        self._session.raw_c2w = None
         for _pid, track in self._session.person_tracks.items():
             if not track.person_dir or not track.person_dir.is_dir():
                 continue
-            if track.smplx_params is None and track.soma_params is None:
-                smplx, soma, bmt = self._load_motion_params(track.person_dir)
-                track.smplx_params = smplx
-                track.soma_params = soma
-                track.body_model_type = bmt
+            self._refresh_track_motion_from_disk(
+                track,
+                force=force_motion_reload,
+            )
             if track.confidences is None:
                 track.confidences, track.confidence_breakdown = (
                     self._load_confidences_csv(track.person_dir)
@@ -1593,22 +1726,25 @@ class AppWindow(QMainWindow):
             try:
                 import torch
                 slam = torch.load(str(path), map_location="cpu", weights_only=False)
-                arr = np.array(slam, dtype=np.float32)
-                # Handle DPVO raw (N, 7) format: [x, y, z, qx, qy, qz, qw]
-                if arr.ndim == 2 and arr.shape[1] == 7:
-                    from scipy.spatial.transform import Rotation as _R
-                    quats_xyzw = arr[:, 3:7]
-                    # DPVO quaternion_to_matrix gives C2W; transpose → W2C
-                    R_w2c = _R.from_quat(quats_xyzw).as_matrix().transpose(0, 2, 1)
-                    T = np.tile(np.eye(4, dtype=np.float32), (len(arr), 1, 1))
-                    T[:, :3, :3] = R_w2c
-                    T[:, :3, 3] = arr[:, :3]
-                    arr = T
+                arr = _normalize_slam_w2c(slam)
                 self._session.slam_c2w = arr
-                log.info("Loaded SLAM c2w from %s: %s", path.name, arr.shape)
+                log.info("Loaded SLAM w2c from %s: %s", path.name, arr.shape)
                 return
             except Exception as e:
                 log.warning("Failed to load SLAM from %s: %s", path, e)
+
+    def _current_cam_smooth_preset(self) -> str:
+        """Return the active fallback camera smoothing preset."""
+        try:
+            settings = self._pipeline_dock.current_settings
+            if hasattr(settings, "get_config"):
+                config = settings.get_config()
+                preset = getattr(config, "cam_smooth_preset", None)
+                if preset in _CAM_SMOOTH_PRESETS:
+                    return preset
+        except Exception:
+            pass
+        return "moderate"
 
     def _refresh_all_panels(self):
         """Refresh all panels from current session state after results are loaded.
@@ -1651,6 +1787,7 @@ class AppWindow(QMainWindow):
         self._person_bar.set_person(pid)
         self._identity_inspector.set_person(pid)
         self._mesh_viewport.set_person(pid)
+        self._mesh_viewport.refresh()
         self._pose_corrector.set_person(pid)
 
         # Auto-switch to orbit camera when world-grounding data is available
@@ -1691,19 +1828,22 @@ class AppWindow(QMainWindow):
         self._video_player.seek(frame_idx)
         self.set_status(f"Selected Person {person_id} at frame {frame_idx}")
 
-    def _on_person_changed(self, person_id: int):
-        """Handle person change from PersonSelectorBar."""
+    def _apply_person_selection(self, person_id: int):
+        """Update all UI panes for the selected person exactly once."""
         self._session.selected_person = person_id
         self._identity_inspector.set_person(person_id)
         self._pose_corrector.set_person(person_id)
-        self._mesh_viewport.set_person(person_id)
         self._show_frame(self._session.current_frame)
         self.set_status(f"Selected Person {person_id}")
+
+    def _on_person_changed(self, person_id: int):
+        """Handle person change from PersonSelectorBar."""
+        self._apply_person_selection(person_id)
 
     def _on_identity_person_changed(self, person_id: int):
         """Handle person change from identity inspector (issue navigation etc.)."""
         self._person_bar.set_person(person_id)
-        self._on_person_changed(person_id)
+        self._apply_person_selection(person_id)
 
     def _on_bbox_overlay_changed(self, data: object):
         """Handle overlay changes (show-all-tracks toggle, edit preview)."""
@@ -1879,6 +2019,8 @@ class AppWindow(QMainWindow):
 
         self._session.person_tracks.clear()
         self._session.inactive_tracks.clear()
+        self._session.derived_c2w = None
+        self._session.raw_c2w = None
 
         all_tracks = getattr(multi_result, "all_tracks", [])
         person_dirs = getattr(multi_result, "person_dirs", [])
@@ -1915,7 +2057,7 @@ class AppWindow(QMainWindow):
             soma_params = None
             body_model_type = "smplx"
             if person_dir:
-                smplx_params, soma_params, body_model_type = self._load_motion_params(person_dir)
+                smplx_params, soma_params, body_model_type, motion_sources = self._load_motion_params(person_dir)
 
             # Use GEM-X embedded confidences if no CSV exists
             if confidences is None:
@@ -1936,6 +2078,7 @@ class AppWindow(QMainWindow):
                 smplx_params=smplx_params,
                 soma_params=soma_params,
                 body_model_type=body_model_type,
+                motion_sources=motion_sources,
             )
             self._load_crop_metadata(pt)
             self._session.person_tracks[tid] = pt
@@ -1960,31 +2103,124 @@ class AppWindow(QMainWindow):
                     except Exception:
                         pass
 
-    def _load_motion_params(self, person_dir: Path) -> tuple[dict | None, dict | None, str]:
-        """Load motion params — prefers the currently selected estimation backend."""
-        # Determine preferred backend from pipeline settings
-        prefer_gemx = True  # default fallback
+    def _load_motion_params(
+        self, person_dir: Path
+    ) -> tuple[dict | None, dict | None, str, dict[str, dict]]:
+        """Load motion params, preferring the richest viewport/export bundle."""
+        preferred_backend = "gemx"
         try:
             settings = self._pipeline_dock.current_settings
             backend, _ = settings._selected_backend()
-            prefer_gemx = (backend == "gemx")
+            preferred_backend = backend
         except Exception:
             pass
 
-        if prefer_gemx:
-            primary, fallback = self._try_load_gemx, self._try_load_gvhmr
-        else:
-            primary, fallback = self._try_load_gvhmr, self._try_load_gemx
+        candidates: list[tuple[int, int, str, tuple[dict | None, dict | None, str, dict[str, dict]]]] = []
+        for backend_name, loader in (
+            ("gemx", self._try_load_gemx),
+            ("gvhmr", self._try_load_gvhmr),
+        ):
+            result = loader(person_dir)
+            if result is None:
+                continue
+            score = self._motion_bundle_score(*result)
+            preferred = 1 if backend_name == preferred_backend else 0
+            candidates.append((score, preferred, backend_name, result))
 
-        result = primary(person_dir)
-        if result is not None:
-            return result
-        result = fallback(person_dir)
-        if result is not None:
-            return result
-        return None, None, "smplx"
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            chosen = candidates[0]
+            if len(candidates) > 1:
+                runner_up = candidates[1]
+                log.info(
+                    "Selected %s motion bundle for %s (score=%d, runner_up=%s:%d)",
+                    chosen[2],
+                    person_dir,
+                    chosen[0],
+                    runner_up[2],
+                    runner_up[0],
+                )
+            return chosen[3]
+        return None, None, "smplx", {}
 
-    def _try_load_gemx(self, person_dir: Path) -> tuple[dict | None, dict | None, str] | None:
+    def _motion_bundle_score(
+        self,
+        smplx_params: dict | None,
+        soma_params: dict | None,
+        body_model_type: str,
+        motion_sources: dict[str, dict],
+    ) -> int:
+        score = 0
+        if body_model_type == "smplx":
+            score += 10
+        elif body_model_type == "soma":
+            score += 5
+
+        if smplx_params is not None:
+            if smplx_params.get("betas") is not None:
+                score += 40
+            if (
+                smplx_params.get("global_orient_world") is not None
+                and smplx_params.get("transl_world") is not None
+            ):
+                score += 20
+            for key in (
+                "left_hand_pose",
+                "right_hand_pose",
+                "left_wrist_orient",
+                "right_wrist_orient",
+            ):
+                if smplx_params.get(key) is not None:
+                    score += 5
+
+        if soma_params is not None and soma_params.get("transl_world") is not None:
+            score += 20
+
+        if motion_sources.get("camera_baseline") is not None:
+            score += 10
+        if motion_sources.get("world_baseline") is not None:
+            score += 30
+        if motion_sources.get("world_physics") is not None:
+            score += 50
+
+        return score
+
+    def _build_gemx_motion_sources(self, gemx_result: dict) -> dict[str, dict]:
+        if not gemx_result:
+            return {}
+
+        def _clone_params(params: dict) -> dict:
+            cloned: dict = {}
+            for key, value in params.items():
+                if isinstance(value, np.ndarray):
+                    cloned[key] = np.array(value, copy=True)
+                else:
+                    cloned[key] = value
+            return cloned
+
+        camera_params = _clone_params(gemx_result)
+        motion_sources: dict[str, dict] = {"camera_baseline": camera_params}
+        if (
+            gemx_result.get("global_orient_world") is not None
+            and gemx_result.get("transl_world") is not None
+        ):
+            world_params = _clone_params(gemx_result)
+            world_params["global_orient"] = np.array(
+                gemx_result["global_orient_world"], dtype=np.float32
+            )
+            world_params["transl"] = np.array(
+                gemx_result["transl_world"], dtype=np.float32
+            )
+            if gemx_result.get("body_pose_world") is not None:
+                world_params["body_pose"] = np.array(
+                    gemx_result["body_pose_world"], dtype=np.float32
+                )
+            motion_sources["world_baseline"] = world_params
+        return motion_sources
+
+    def _try_load_gemx(
+        self, person_dir: Path
+    ) -> tuple[dict | None, dict | None, str, dict[str, dict]] | None:
         """Try loading GEM-X results from person_dir. Returns None on failure."""
         try:
             from workers.gemx_worker import load_gemx_soma_output
@@ -2007,103 +2243,247 @@ class AppWindow(QMainWindow):
                         )
                     bmt = gemx_result.pop("body_model_type", "soma")
                     if bmt == "smplx":
-                        return gemx_result, None, "smplx"
+                        motion_sources = self._build_gemx_motion_sources(gemx_result)
+                        return gemx_result, None, "smplx", motion_sources
                     else:
-                        return None, gemx_result, "soma"
+                        return None, gemx_result, "soma", {}
         except Exception:
             log.warning("GEM-X load failed for %s:\n%s", person_dir,
                         __import__("traceback").format_exc())
         return None
 
-    def _try_load_gvhmr(self, person_dir: Path) -> tuple[dict | None, dict | None, str] | None:
+    def _try_load_gvhmr(
+        self, person_dir: Path
+    ) -> tuple[dict | None, dict | None, str, dict[str, dict]] | None:
         """Try loading GVHMR results from person_dir. Returns None on failure."""
-        smplx_params = self._load_smplx_params_legacy(person_dir)
+        smplx_params, motion_sources = self._load_smplx_sources_legacy(person_dir)
         if smplx_params is not None:
-            return smplx_params, None, "smplx"
+            return smplx_params, None, "smplx", motion_sources
         return None
 
-    def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
-        """Load SMPL-X parameters from GVHMR results, augmented with hand
-        data from hybrid file (GVHMR body + SMPLest-X hands) when available.
-        """
+    def _select_hybrid_motion_file(self, person_dir: Path) -> Path | None:
+        hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
+        if not hybrid_pts:
+            return None
+        try:
+            import torch
+
+            scored: list[tuple[int, int, Path]] = []
+            for path in hybrid_pts:
+                score = 0
+                try:
+                    data = torch.load(str(path), map_location="cpu", weights_only=False)
+                    if data.get("source") == "phc_refined":
+                        score += 100
+                    if all(
+                        key in data
+                        for key in (
+                            "global_orient_world_physics",
+                            "body_pose_world_physics",
+                            "transl_world_physics",
+                        )
+                    ):
+                        score += 50
+                    if all(
+                        key in data
+                        for key in (
+                            "global_orient_world_baseline",
+                            "body_pose_world_baseline",
+                            "transl_world_baseline",
+                        )
+                    ):
+                        score += 25
+                except Exception:
+                    pass
+                scored.append((score, int(path.stat().st_mtime_ns), path))
+            scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            return scored[0][2]
+        except Exception:
+            return max(hybrid_pts, key=lambda p: p.stat().st_mtime_ns)
+
+    def _load_smplx_sources_legacy(self, person_dir: Path) -> tuple[dict | None, dict[str, dict]]:
+        """Load GVHMR/Hybrid SMPL-X params and preserve multiple viewport sources."""
         import torch
 
         hmr4d_pt = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
-        if not hmr4d_pt.is_file():
-            return None
+        hybrid_pt = self._select_hybrid_motion_file(person_dir)
+        if not hmr4d_pt.is_file() and hybrid_pt is None:
+            return None, {}
         try:
-            results = torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
-            params = results.get("smpl_params_incam")
-            if not params or "body_pose" not in params:
+            results = (
+                torch.load(hmr4d_pt, map_location="cpu", weights_only=False)
+                if hmr4d_pt.is_file()
+                else {}
+            )
+            hybrid_data = (
+                torch.load(str(hybrid_pt), map_location="cpu", weights_only=False)
+                if hybrid_pt is not None
+                else {}
+            )
+
+            def _to_numpy(value):
+                if value is None:
+                    return None
+                if hasattr(value, "detach"):
+                    value = value.detach()
+                if hasattr(value, "cpu"):
+                    value = value.cpu()
+                if hasattr(value, "numpy"):
+                    value = value.numpy()
+                return np.array(value)
+
+            def _copy_motion_dict(src: dict, orient_key: str, body_key: str, transl_key: str) -> dict | None:
+                if not src or orient_key not in src or body_key not in src:
+                    return None
+                params_dict = {
+                    "global_orient": _to_numpy(src.get(orient_key)).astype(np.float32),
+                    "body_pose": _to_numpy(src.get(body_key)).astype(np.float32),
+                }
+                transl = _to_numpy(src.get(transl_key))
+                if transl is not None:
+                    params_dict["transl"] = transl.astype(np.float32)
+                return params_dict
+
+            def _extract_optional(*sources: dict, key: str) -> np.ndarray | None:
+                for src in sources:
+                    if not src or key not in src:
+                        continue
+                    arr = _to_numpy(src[key])
+                    if arr is not None:
+                        return arr.astype(np.float32)
                 return None
 
-            K = results.get("K_fullimg")
+            def _clone_params(src: dict | None) -> dict | None:
+                if not src:
+                    return None
+                out = {}
+                for key, value in src.items():
+                    arr = _to_numpy(value)
+                    out[key] = arr.astype(np.float32) if arr is not None else value
+                return out
+
+            def _normalize_body_pose(params: dict):
+                bp = params.get("body_pose")
+                if bp is None:
+                    return
+                params["body_pose"] = np.array(bp, dtype=np.float32)
+                if params["body_pose"].ndim == 2 and params["body_pose"].shape[-1] != 3:
+                    params["body_pose"] = params["body_pose"].reshape(
+                        params["body_pose"].shape[0], -1, 3
+                    )
+
+            results_source = str(results.get("source") or "")
+            camera_results = _clone_params(results.get("smpl_params_incam"))
+            world_results = _clone_params(results.get("smpl_params_global"))
+            camera_results_flat = _copy_motion_dict(
+                results, "global_orient_cam", "body_pose_cam", "transl_cam"
+            )
+            results_world_baseline = _copy_motion_dict(
+                results,
+                "global_orient_world_baseline",
+                "body_pose_world_baseline",
+                "transl_world_baseline",
+            )
+            results_world_physics = _copy_motion_dict(
+                results,
+                "global_orient_world_physics",
+                "body_pose_world_physics",
+                "transl_world_physics",
+            )
+            results_world_generic = _copy_motion_dict(
+                results, "global_orient_world", "body_pose_world", "transl_world"
+            )
+            results_refined_generic = _copy_motion_dict(
+                results, "global_orient", "body_pose", "transl"
+            )
+            camera_hybrid = _copy_motion_dict(
+                hybrid_data, "global_orient_cam", "body_pose_cam", "transl_cam"
+            )
+            world_baseline = (
+                _copy_motion_dict(
+                    hybrid_data,
+                    "global_orient_world_baseline",
+                    "body_pose_world_baseline",
+                    "transl_world_baseline",
+                )
+                or _copy_motion_dict(
+                    hybrid_data, "global_orient_world", "body_pose_world", "transl_world"
+                )
+                or results_world_baseline
+                or (
+                    results_world_generic
+                    if results_source != "phc_refined"
+                    else None
+                )
+                or world_results
+            )
+            world_physics = (
+                _copy_motion_dict(
+                    hybrid_data,
+                    "global_orient_world_physics",
+                    "body_pose_world_physics",
+                    "transl_world_physics",
+                )
+            )
+            if world_physics is None and hybrid_data.get("source") == "phc_refined":
+                world_physics = _copy_motion_dict(
+                    hybrid_data, "global_orient_world", "body_pose_world", "transl_world"
+                )
+            if world_physics is None:
+                world_physics = results_world_physics
+            if world_physics is None and results_source == "phc_refined":
+                world_physics = results_world_generic or results_refined_generic
+
+            camera_baseline = camera_hybrid or camera_results_flat or camera_results
+            if camera_baseline is None and hybrid_data:
+                camera_baseline = _copy_motion_dict(
+                    hybrid_data, "global_orient", "body_pose", "transl"
+                )
+            if camera_baseline is None or "body_pose" not in camera_baseline:
+                return None, {}
+
+            K = hybrid_data.get("K_fullimg", results.get("K_fullimg"))
             if K is not None and self._session.camera_K is None:
-                # K_fullimg is actually estimate_K(crop_w, crop_h) — crop K,
-                # not full-frame K.  Compute true full-frame intrinsics so the
-                # frustum, FOV spinbox, and ray unproject use correct values.
                 from views.mesh_viewport import estimate_K as _estimate_K
+
                 self._session.camera_K = _estimate_K(
                     self._session.img_width or 1920,
                     self._session.img_height or 1080,
                 )
-                # Sync FOV spinbox to match loaded intrinsics
                 fov = self._mesh_viewport.get_frustum_fov()
                 self._mesh_dock._fov_spin.blockSignals(True)
                 self._mesh_dock._fov_spin.setValue(fov)
                 self._mesh_dock._fov_spin.blockSignals(False)
 
-            params = dict(params)  # shallow copy to add keys
+            body_pose_raw = _to_numpy(results.get("raw_body_pose"))
+            if body_pose_raw is not None:
+                body_pose_raw = body_pose_raw.astype(np.float32)
+                if body_pose_raw.ndim == 2 and body_pose_raw.shape[-1] != 3:
+                    body_pose_raw = body_pose_raw.reshape(body_pose_raw.shape[0], -1, 3)
 
-            # Stash K_fullimg so _load_crop_metadata can extract K_crop
-            if K is not None:
-                params["K_fullimg"] = K
+            wrist_and_hand = {}
+            for key in [
+                "left_hand_pose",
+                "right_hand_pose",
+                "left_wrist_orient",
+                "right_wrist_orient",
+            ]:
+                arr = _extract_optional(hybrid_data, results, key=key)
+                if arr is not None:
+                    wrist_and_hand[key] = arr
+            wrist_source = (
+                hybrid_pt.name
+                if any(k in hybrid_data for k in ("left_wrist_orient", "right_wrist_orient"))
+                else hmr4d_pt.name if any(k in results for k in ("left_wrist_orient", "right_wrist_orient"))
+                else "none"
+            )
 
-            # --- Raw body pose (pre-IK) for dance/rapid motion toggle ---
-            raw_bp = results.get("raw_body_pose")
-            if raw_bp is not None:
-                params["body_pose_raw"] = np.array(raw_bp).astype(np.float32)
-                if params["body_pose_raw"].ndim == 2 and params["body_pose_raw"].shape[-1] != 3:
-                    params["body_pose_raw"] = params["body_pose_raw"].reshape(
-                        params["body_pose_raw"].shape[0], -1, 3
-                    )
-
-            # --- Augment with hand data from hybrid file or HaMeR-merged results ---
-            hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
-            if hybrid_pts:
-                try:
-                    hybrid_pt = max(hybrid_pts, key=lambda p: p.stat().st_mtime)
-                    hybrid_data = torch.load(str(hybrid_pt), map_location="cpu",
-                                             weights_only=False)
-                    for key in ["left_hand_pose", "right_hand_pose"]:
-                        if key in hybrid_data:
-                            val = hybrid_data[key]
-                            params[key] = (val.numpy() if hasattr(val, "numpy")
-                                           else np.array(val))
-                except Exception:
-                    log.warning("Hybrid hand load failed:\n%s",
-                                __import__("traceback").format_exc())
-
-            # Fall back to top-level hand data in hmr4d_results.pt
-            # (written by HaMeR when SMPLest-X is skipped)
-            if "left_hand_pose" not in params:
-                for key in ["left_hand_pose", "right_hand_pose"]:
-                    if key in results:
-                        val = results[key]
-                        params[key] = (val.numpy() if hasattr(val, "numpy")
-                                       else np.array(val))
-
-            # --- Hand pose mean handling ---
-            # HaMeR outputs absolute MANO rotations (not offset-from-mean).
-            # SmplxLite's other_default_pose already contains the hand mean;
-            # our forward() replaces it with the provided hand data directly.
-            # Do NOT add the mean here — it would double-count the natural
-            # finger curl, causing hyperextension.
-
-            if "left_hand_pose" in params:
-                lh = params["left_hand_pose"]
-                msg = (f"Hand data: shape={lh.shape}, "
-                       f"nonzero={np.count_nonzero(lh)}/{lh.size}")
+            if "left_hand_pose" in wrist_and_hand:
+                lh = wrist_and_hand["left_hand_pose"]
+                msg = (
+                    f"Hand data ({wrist_source}): shape={lh.shape}, "
+                    f"nonzero={np.count_nonzero(lh)}/{lh.size}"
+                )
                 self._log_panel.append_line(msg, "info")
             else:
                 self._log_panel.append_line(
@@ -2111,72 +2491,209 @@ class AppWindow(QMainWindow):
                     "warning",
                 )
 
-            # --- Smooth hand poses (One Euro, same params as BVH export) ---
-            _smooth_hand_poses(params)
+            betas = _extract_optional(camera_hybrid or {}, camera_results or {}, hybrid_data, key="betas")
+            if betas is None and camera_results is not None:
+                betas = _to_numpy(camera_results.get("betas"))
+                if betas is not None:
+                    betas = betas.astype(np.float32)
 
-            # --- Amplify ankle/foot rotations (GVHMR under-predicts) ---
-            # Ensure body_pose is (N, 21, 3) before amplification
-            bp = params["body_pose"]
-            if hasattr(bp, "numpy"):
-                params["body_pose"] = bp.numpy().astype(np.float32)
-            else:
-                params["body_pose"] = np.array(bp, dtype=np.float32)
-            if params["body_pose"].ndim == 2 and params["body_pose"].shape[-1] != 3:
-                params["body_pose"] = params["body_pose"].reshape(
-                    params["body_pose"].shape[0], -1, 3
-                )
-            _amplify_ankle_rotations(params, gain=_DEFAULT_ANKLE_GAIN)
+            if camera_results is None and "betas" in results:
+                camera_results = camera_results or {}
+                camera_results["betas"] = _to_numpy(results["betas"]).astype(np.float32)
+            if hybrid_data and "betas" in hybrid_data and camera_hybrid is not None:
+                camera_hybrid["betas"] = _to_numpy(hybrid_data["betas"]).astype(np.float32)
+            if world_results is not None and "betas" not in world_results and betas is not None:
+                world_results["betas"] = np.array(betas, dtype=np.float32)
+            if world_baseline is not None and "betas" not in world_baseline and betas is not None:
+                world_baseline["betas"] = np.array(betas, dtype=np.float32)
+            if world_physics is not None and "betas" not in world_physics and betas is not None:
+                world_physics["betas"] = np.array(betas, dtype=np.float32)
 
-            # --- World-space params for orbit mode (with ground norm + offsets) ---
-            global_params = results.get("smpl_params_global")
-            if global_params and "global_orient" in global_params:
-                go_world = np.array(global_params["global_orient"]).astype(np.float32)
-                tr_world = np.array(global_params["transl"]).astype(np.float32)
-                # Ground-normalize Y
+            baseline_artifact = (
+                hybrid_pt.name
+                if world_baseline is not None and hybrid_pt is not None
+                else hmr4d_pt.name if world_baseline is not None and hmr4d_pt.is_file()
+                else None
+            )
+            physics_artifact = (
+                hybrid_pt.name
+                if world_physics is not None and hybrid_pt is not None
+                else hmr4d_pt.name if world_physics is not None and hmr4d_pt.is_file()
+                else None
+            )
+
+            def _augment_source(
+                base_params: dict | None,
+                *,
+                attach_world: dict | None = None,
+                include_raw_pose: bool = False,
+                add_hand_mean: bool = False,
+                motion_contract: str | None = None,
+                motion_artifact: str | None = None,
+            ) -> dict | None:
+                if base_params is None:
+                    return None
+                params = _clone_params(base_params) or {}
+                if K is not None:
+                    params["K_fullimg"] = _to_numpy(K).astype(np.float32)
+                if betas is not None and "betas" not in params:
+                    params["betas"] = np.array(betas, dtype=np.float32)
+                if include_raw_pose and body_pose_raw is not None:
+                    params["body_pose_raw"] = body_pose_raw.copy()
+                for key, value in wrist_and_hand.items():
+                    params[key] = np.array(value, dtype=np.float32)
+                params["wrist_debug_source"] = wrist_source
+                _normalize_body_pose(params)
+                if add_hand_mean and "left_hand_pose" in params:
+                    try:
+                        from smplx_to_bvh import _add_hand_mean_pose
+
+                        params = _add_hand_mean_pose(params)
+                    except Exception:
+                        log.debug("Hand mean pose not applied (smplx model unavailable)")
+                _smooth_hand_poses(params)
+                _amplify_ankle_rotations(params, gain=_DEFAULT_ANKLE_GAIN)
+                if attach_world is not None:
+                    params["global_orient_world"] = np.array(
+                        attach_world["global_orient"], dtype=np.float32
+                    )
+                    params["body_pose_world"] = np.array(
+                        attach_world["body_pose"], dtype=np.float32
+                    )
+                    params["transl_world"] = np.array(
+                        attach_world["transl"], dtype=np.float32
+                    )
+                if motion_contract is not None:
+                    params["motion_contract"] = motion_contract
+                if motion_artifact is not None:
+                    params["motion_artifact"] = motion_artifact
+                if results_source:
+                    params["source"] = results_source
+                return params
+
+            def _normalize_world_source(source_params: dict | None) -> dict | None:
+                if source_params is None:
+                    return None
+                params = _clone_params(source_params) or {}
+                _normalize_body_pose(params)
+                tr_world = np.array(params["transl"], dtype=np.float32)
                 if tr_world.shape[0] > 0:
                     floor_y = float(tr_world[0, 1]) - 0.933
                     tr_world[:, 1] -= floor_y
-                # Derive camera world pose (once, from first person loaded)
-                if self._session.derived_c2w is None:
-                    go_incam = np.array(params["global_orient"]).astype(np.float32)
-                    tr_incam = np.array(params["transl"]).astype(np.float32)
-                    c2w_body = _compute_camera_c2w(
-                        go_incam, tr_incam, go_world, tr_world
-                    )
-                    self._session.raw_c2w = c2w_body.copy()
-                    # Prefer SLAM trajectory when available (much smoother)
-                    self._load_slam_if_needed()
-                    if self._session.slam_c2w is not None:
-                        self._session.derived_c2w = _align_slam_to_world(
-                            self._session.slam_c2w, c2w_body
-                        )
-                        log.info("Using SLAM-aligned camera trajectory")
-                    else:
-                        # Fallback: smooth body-derived c2w with One Euro
-                        self._session.derived_c2w = _smooth_c2w(
-                            c2w_body, fps=self._session.fps
-                        )
-                        log.info("Using smoothed body-derived camera (no SLAM)")
-                # Multi-person lateral offset
                 offset_cam = self._get_person_world_offset(person_dir)
-                if offset_cam is not None:
+                if offset_cam is not None and camera_baseline is not None:
                     from scipy.spatial.transform import Rotation
-                    go_incam_0 = np.array(params["global_orient"][0])
+
+                    go_incam_0 = np.array(camera_baseline["global_orient"][0])
+                    go_world_0 = np.array(params["global_orient"][0])
                     R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
-                    R_world = Rotation.from_rotvec(go_world[0]).as_matrix()
+                    R_world = Rotation.from_rotvec(go_world_0).as_matrix()
                     R_c2w = R_world @ R_incam.T
-                    offset_lateral = np.array([offset_cam[0], 0.0, 0.0],
-                                              dtype=np.float32)
+                    offset_lateral = np.array([offset_cam[0], 0.0, 0.0], dtype=np.float32)
                     off_w = R_c2w @ offset_lateral
                     tr_world[:, 0] += off_w[0]
                     tr_world[:, 2] += off_w[2]
-                params["global_orient_world"] = go_world
-                params["transl_world"] = tr_world
-            return params
+                params["transl"] = tr_world.astype(np.float32)
+                return params
+
+            world_baseline = _normalize_world_source(world_baseline)
+            world_physics = _normalize_world_source(world_physics)
+
+            world_anchor = world_baseline or world_physics
+
+            camera_params = _augment_source(
+                camera_baseline,
+                attach_world=world_anchor,
+                include_raw_pose=True,
+                add_hand_mean=True,
+                motion_contract="camera_baseline",
+                motion_artifact=(
+                    hybrid_pt.name if camera_hybrid is not None and hybrid_pt is not None
+                    else hmr4d_pt.name if hmr4d_pt.is_file()
+                    else None
+                ),
+            )
+            world_baseline_params = _augment_source(
+                world_baseline,
+                add_hand_mean=True,
+                motion_contract="world_baseline",
+                motion_artifact=baseline_artifact,
+            )
+            world_physics_params = _augment_source(
+                world_physics,
+                add_hand_mean=True,
+                motion_contract=(
+                    "refined_hmr4d"
+                    if physics_artifact == hmr4d_pt.name and results_source == "phc_refined"
+                    else "world_physics"
+                ),
+                motion_artifact=physics_artifact,
+            )
+
+            if (
+                self._session.derived_c2w is None
+                and camera_params is not None
+                and (world_baseline_params is not None or world_physics_params is not None)
+            ):
+                go_incam = np.array(camera_params["global_orient"]).astype(np.float32)
+                tr_incam = np.array(camera_params["transl"]).astype(np.float32)
+                align_world = world_baseline_params or world_physics_params
+                go_world = np.array(align_world["global_orient"]).astype(np.float32)
+                tr_world = np.array(align_world["transl"]).astype(np.float32)
+                c2w_body = _compute_camera_c2w(go_incam, tr_incam, go_world, tr_world)
+                self._session.raw_c2w = c2w_body.copy()
+                self._load_slam_if_needed()
+                if self._session.slam_c2w is not None:
+                    self._session.derived_c2w = _align_slam_to_world(
+                        self._session.slam_c2w, c2w_body
+                    )
+                    log.info("Using SLAM-aligned camera trajectory")
+                else:
+                    self._session.derived_c2w = _smooth_c2w(
+                        c2w_body,
+                        fps=self._session.fps,
+                        preset=self._current_cam_smooth_preset(),
+                    )
+                    log.info("Using smoothed body-derived camera (no SLAM)")
+
+            motion_sources: dict[str, dict] = {}
+            if camera_params is not None:
+                motion_sources["camera_baseline"] = camera_params
+            if world_baseline_params is not None:
+                motion_sources["world_baseline"] = world_baseline_params
+            if world_physics_params is not None:
+                motion_sources["world_physics"] = world_physics_params
+
+            default_params = dict(camera_params) if camera_params is not None else None
+            if default_params is None and world_baseline_params is not None:
+                default_params = dict(world_baseline_params)
+            if default_params is None and world_physics_params is not None:
+                default_params = dict(world_physics_params)
+            if default_params is None:
+                return None, motion_sources
+            if world_physics_params is not None:
+                default_params["global_orient_world_physics"] = np.array(
+                    world_physics_params["global_orient"], dtype=np.float32
+                )
+                default_params["body_pose_world_physics"] = np.array(
+                    world_physics_params["body_pose"], dtype=np.float32
+                )
+                default_params["transl_world_physics"] = np.array(
+                    world_physics_params["transl"], dtype=np.float32
+                )
+            return default_params, motion_sources
         except Exception:
-            log.warning("Legacy SMPL-X load failed for %s:\n%s", person_dir,
-                        __import__("traceback").format_exc())
-        return None
+            log.warning(
+                "Legacy SMPL-X load failed for %s:\n%s",
+                person_dir,
+                __import__("traceback").format_exc(),
+            )
+        return None, {}
+
+    def _load_smplx_params_legacy(self, person_dir: Path) -> dict | None:
+        """Backward-compatible wrapper returning the default SMPL-X params."""
+        params, _sources = self._load_smplx_sources_legacy(person_dir)
+        return params
 
     def _get_person_world_offset(self, person_dir: Path):
         """Return [x, y, z] world offset for this person from assembly data."""

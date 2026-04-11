@@ -76,6 +76,26 @@ class TestMeshViewportDock:
         dock = MeshViewportDock(vp)
         assert dock.mesh_viewport is vp
 
+    def test_motion_source_combo_has_expected_items(self, qapp):
+        from views.mesh_viewport import MeshViewport
+
+        dock = MeshViewportDock(MeshViewport(gvhmr_root=Path("/tmp/GVHMR")))
+        assert dock._motion_source_combo.count() == 4
+        assert dock._motion_source_combo.itemData(0) == "auto"
+        assert dock._motion_source_combo.itemData(1) == "camera_baseline"
+        assert dock._motion_source_combo.itemData(2) == "world_baseline"
+        assert dock._motion_source_combo.itemData(3) == "world_physics"
+
+    def test_motion_status_label_exists(self, qapp):
+        from views.mesh_viewport import MeshViewport
+
+        dock = MeshViewportDock(MeshViewport(gvhmr_root=Path("/tmp/GVHMR")))
+        assert dock._motion_source_label.isHidden()
+        assert dock._motion_source_combo.isHidden()
+        assert dock._motion_status.text() == "Motion: waiting for session"
+        assert dock._mesh_status.text() == "Mesh: no person selected"
+        assert dock._status_strip.sizePolicy().verticalPolicy().name == "Maximum"
+
 
 # ===========================================================================
 # PersonPanelDock

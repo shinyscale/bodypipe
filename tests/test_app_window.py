@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import numpy as np
 import pytest
 
-from app_window import AppWindow, LogPanel
+from app_window import AppWindow, LogPanel, _normalize_slam_w2c
 from models.pipeline_config import PipelineConfig
 from models.session import Session
 
@@ -321,6 +322,197 @@ class TestSessionLoad:
         assert app_window._session.focal_mm == 50.0
 
 
+class TestCameraHelpers:
+    def test_normalize_slam_w2c_converts_dpvo_rows(self):
+        pose = np.array([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+        w2c = _normalize_slam_w2c(pose)
+
+        assert w2c.shape == (1, 4, 4)
+        np.testing.assert_allclose(w2c[0, :3, :3], np.eye(3), atol=1e-6)
+        np.testing.assert_allclose(w2c[0, :3, 3], [-1.0, -2.0, -3.0], atol=1e-6)
+
+
+class TestLegacySmplxLoading:
+    def _write_hmr4d(self, person_dir: Path):
+        import torch
+
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        torch.save(
+            {
+                "smpl_params_incam": {
+                    "global_orient": np.zeros((2, 3), dtype=np.float32),
+                    "body_pose": np.zeros((2, 21, 3), dtype=np.float32),
+                    "transl": np.zeros((2, 3), dtype=np.float32),
+                },
+                "smpl_params_global": {
+                    "global_orient": np.zeros((2, 3), dtype=np.float32),
+                    "body_pose": np.zeros((2, 21, 3), dtype=np.float32),
+                    "transl": np.array([[0.0, 0.933, 0.0], [1.0, 0.933, 0.0]], dtype=np.float32),
+                },
+                "K_fullimg": np.tile(np.eye(3, dtype=np.float32), (2, 1, 1)),
+            },
+            str(hmr_dir / "hmr4d_results.pt"),
+        )
+
+    def test_load_smplx_prefers_hybrid_body_and_wrist_data(self, app_window, tmp_path):
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        self._write_hmr4d(person_dir)
+
+        hybrid = {
+            "global_orient_cam": torch.full((2, 3), 7.0),
+            "body_pose_cam": torch.full((2, 63), 8.0),
+            "transl_cam": torch.full((2, 3), 9.0),
+            "global_orient_world": torch.full((2, 3), 1.5),
+            "body_pose_world": torch.full((2, 63), 2.5),
+            "transl_world": torch.tensor([[0.0, 0.933, 0.0], [2.0, 0.933, 0.0]], dtype=torch.float32),
+            "left_hand_pose": torch.full((2, 45), 3.0),
+            "right_hand_pose": torch.full((2, 45), 4.0),
+            "left_wrist_orient": torch.full((2, 3), 5.0),
+            "right_wrist_orient": torch.full((2, 3), 6.0),
+            "K_fullimg": torch.tile(torch.eye(3).unsqueeze(0), (2, 1, 1)),
+        }
+        torch.save(hybrid, str(person_dir / "clip_hybrid_smplx.pt"))
+
+        app_window._session.output_dir = tmp_path
+        params = app_window._load_smplx_params_legacy(person_dir)
+
+        assert params is not None
+        np.testing.assert_allclose(params["global_orient"], np.full((2, 3), 7.0, dtype=np.float32))
+        np.testing.assert_allclose(params["transl"], np.full((2, 3), 9.0, dtype=np.float32))
+        np.testing.assert_allclose(params["left_wrist_orient"], np.full((2, 3), 5.0, dtype=np.float32))
+        np.testing.assert_allclose(params["right_wrist_orient"], np.full((2, 3), 6.0, dtype=np.float32))
+        np.testing.assert_allclose(
+            params["body_pose_world"],
+            np.full((2, 21, 3), 2.5, dtype=np.float32),
+        )
+        np.testing.assert_allclose(params["body_pose"][:, 0], np.full((2, 3), 8.0, dtype=np.float32))
+        assert params["body_pose"].shape == (2, 21, 3)
+
+    def test_load_smplx_uses_selected_camera_smoothing_preset(self, app_window, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        self._write_hmr4d(person_dir)
+
+        app_window._pipeline_dock.set_mode("perf")
+        app_window._perf_settings.set_config(PipelineConfig(mode="perf", cam_smooth_preset="heavy"))
+        app_window._session.output_dir = tmp_path
+
+        with patch("app_window._smooth_c2w", side_effect=lambda c2w, fps=30.0, preset="moderate": c2w) as mock_smooth:
+            app_window._load_smplx_params_legacy(person_dir)
+
+        assert mock_smooth.called
+        assert mock_smooth.call_args.kwargs["preset"] == "heavy"
+
+    def test_load_smplx_sources_preserves_baseline_and_physics_variants(self, app_window, tmp_path):
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        self._write_hmr4d(person_dir)
+
+        hybrid = {
+            "global_orient_cam": torch.full((2, 3), 7.0),
+            "body_pose_cam": torch.full((2, 63), 8.0),
+            "transl_cam": torch.full((2, 3), 9.0),
+            "global_orient_world_baseline": torch.full((2, 3), 1.0),
+            "body_pose_world_baseline": torch.full((2, 63), 2.0),
+            "transl_world_baseline": torch.tensor([[0.0, 0.933, 0.0], [1.0, 0.933, 0.0]], dtype=torch.float32),
+            "global_orient_world_physics": torch.full((2, 3), 3.0),
+            "body_pose_world_physics": torch.full((2, 63), 4.0),
+            "transl_world_physics": torch.tensor([[0.0, 0.933, 0.0], [2.0, 0.933, 0.0]], dtype=torch.float32),
+            "betas": torch.full((1, 10), 0.25),
+            "left_wrist_orient": torch.full((2, 3), 5.0),
+            "right_wrist_orient": torch.full((2, 3), 6.0),
+            "K_fullimg": torch.tile(torch.eye(3).unsqueeze(0), (2, 1, 1)),
+            "source": "phc_refined",
+        }
+        torch.save(hybrid, str(person_dir / "clip_hybrid_smplx.pt"))
+
+        params, motion_sources = app_window._load_smplx_sources_legacy(person_dir)
+
+        assert params is not None
+        assert set(motion_sources) == {"camera_baseline", "world_baseline", "world_physics"}
+        np.testing.assert_allclose(
+            motion_sources["camera_baseline"]["left_wrist_orient"],
+            np.full((2, 3), 5.0, dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            motion_sources["world_baseline"]["transl"],
+            np.array([[0.0, 0.933, 0.0], [1.0, 0.933, 0.0]], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            motion_sources["world_physics"]["body_pose"][:, 0],
+            np.full((2, 3), 4.0, dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            motion_sources["world_physics"]["betas"],
+            np.full((1, 10), 0.25, dtype=np.float32),
+        )
+
+    def test_load_smplx_sources_uses_refined_hmr4d_as_world_physics(self, app_window, tmp_path):
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+        self._write_hmr4d(person_dir)
+
+        hmr_path = person_dir / "demo" / "isolated_video" / "hmr4d_results.pt"
+        data = torch.load(str(hmr_path), map_location="cpu", weights_only=False)
+        data["global_orient"] = torch.full((2, 3), 11.0)
+        data["body_pose"] = torch.full((2, 63), 12.0)
+        data["transl"] = torch.tensor([[0.0, 0.933, 0.0], [3.0, 0.933, 0.0]], dtype=torch.float32)
+        data["global_orient_world"] = data["global_orient"]
+        data["body_pose_world"] = data["body_pose"]
+        data["transl_world"] = data["transl"]
+        data["global_orient_world_physics"] = data["global_orient"]
+        data["body_pose_world_physics"] = data["body_pose"]
+        data["transl_world_physics"] = data["transl"]
+        data["source"] = "phc_refined"
+        torch.save(data, str(hmr_path))
+
+        params, motion_sources = app_window._load_smplx_sources_legacy(person_dir)
+
+        assert params is not None
+        assert set(motion_sources) == {"camera_baseline", "world_baseline", "world_physics"}
+        np.testing.assert_allclose(
+            motion_sources["world_baseline"]["transl"],
+            np.array([[0.0, 0.933, 0.0], [1.0, 0.933, 0.0]], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            motion_sources["world_physics"]["body_pose"][:, 0],
+            np.full((2, 3), 12.0, dtype=np.float32),
+        )
+        assert motion_sources["world_physics"]["motion_contract"] == "refined_hmr4d"
+        assert motion_sources["world_physics"]["motion_artifact"] == "hmr4d_results.pt"
+
+    def test_select_hybrid_motion_file_prefers_physics_refined_snapshot(self, app_window, tmp_path):
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+
+        older = person_dir / "older_hybrid_smplx.pt"
+        newer = person_dir / "newer_hybrid_smplx.pt"
+        torch.save(
+            {
+                "global_orient_world_physics": torch.ones((1, 3)),
+                "body_pose_world_physics": torch.ones((1, 63)),
+                "transl_world_physics": torch.ones((1, 3)),
+                "source": "phc_refined",
+            },
+            older,
+        )
+        torch.save({"source": "baseline_only"}, newer)
+
+        selected = app_window._select_hybrid_motion_file(person_dir)
+
+        assert selected == older
+
+
 # ---------------------------------------------------------------------------
 # Recent Sessions
 # ---------------------------------------------------------------------------
@@ -486,6 +678,16 @@ class TestSharedVideoPlayer:
     def test_has_mesh_viewport(self, app_window):
         from views.mesh_viewport import MeshViewport
         assert isinstance(app_window._mesh_viewport, MeshViewport)
+
+    def test_mesh_dock_status_labels_initialized_from_viewport(self, app_window):
+        assert (
+            app_window._mesh_dock._motion_status.text()
+            == app_window._mesh_viewport.current_source_status_text()
+        )
+        assert (
+            app_window._mesh_dock._mesh_status.text()
+            == app_window._mesh_viewport.current_mesh_status_text()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1363,35 @@ class TestHydratePersonTracks:
         assert pt.smplx_params is existing_params
         assert pt.confidences == [0.9]
 
+    def test_force_motion_reload_refreshes_existing_track_data(self, app_window, tmp_path):
+        from models.session import PersonTrack
+
+        pdir = tmp_path / "person_0"
+        pdir.mkdir()
+
+        existing_params = {"body_pose": "already_loaded"}
+        pt = PersonTrack(
+            person_id=0,
+            person_dir=pdir,
+            smplx_params=existing_params,
+            confidences=[0.9],
+            motion_sources={"world_baseline": {"global_orient": np.zeros((1, 3), dtype=np.float32)}},
+        )
+        pt._motion_file_stamp = ("old.pt", 1)
+        app_window._session.person_tracks[0] = pt
+
+        fresh = (
+            {"betas": np.zeros((1, 10), dtype=np.float32)},
+            None,
+            "smplx",
+            {"world_physics": {"global_orient": np.ones((1, 3), dtype=np.float32)}},
+        )
+        with patch.object(app_window, "_load_motion_params", return_value=fresh):
+            app_window._hydrate_person_tracks(force_motion_reload=True)
+
+        assert pt.smplx_params is fresh[0]
+        assert set(pt.motion_sources) == {"world_physics"}
+
 
 class TestRefreshAllPanels:
     """_refresh_all_panels syncs all panels from session state."""
@@ -1753,3 +1984,48 @@ class TestLoadMotionParams:
         assert smplx is None
         assert soma is None
         assert bmt == "smplx"
+
+    def test_prefers_richer_gvhmr_bundle_over_backend_preference(self, app_window, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir()
+
+        gemx_result = (
+            {
+                "global_orient": np.zeros((2, 3), dtype=np.float32),
+                "body_pose": np.zeros((2, 21, 3), dtype=np.float32),
+                "transl": np.zeros((2, 3), dtype=np.float32),
+                "global_orient_world": np.zeros((2, 3), dtype=np.float32),
+                "transl_world": np.zeros((2, 3), dtype=np.float32),
+            },
+            None,
+            "smplx",
+            {"camera_baseline": {"global_orient": np.zeros((2, 3), dtype=np.float32)}},
+        )
+        gvhmr_result = (
+            {"betas": np.zeros((1, 10), dtype=np.float32)},
+            None,
+            "smplx",
+            {
+                "camera_baseline": {"global_orient": np.zeros((2, 3), dtype=np.float32)},
+                "world_baseline": {"global_orient": np.ones((2, 3), dtype=np.float32)},
+                "world_physics": {"global_orient": np.full((2, 3), 2.0, dtype=np.float32)},
+            },
+        )
+
+        with patch.object(app_window, "_try_load_gemx", return_value=gemx_result), \
+             patch.object(app_window, "_try_load_gvhmr", return_value=gvhmr_result), \
+             patch.object(
+                 app_window._pipeline_dock.current_settings,
+                 "_selected_backend",
+                 return_value=("gemx", None),
+             ):
+            smplx, soma, bmt, motion_sources = app_window._load_motion_params(person_dir)
+
+        assert soma is None
+        assert bmt == "smplx"
+        assert "betas" in smplx
+        assert set(motion_sources) == {
+            "camera_baseline",
+            "world_baseline",
+            "world_physics",
+        }
