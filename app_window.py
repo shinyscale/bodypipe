@@ -2273,7 +2273,8 @@ class AppWindow(QMainWindow):
                 score = 0
                 try:
                     data = torch.load(str(path), map_location="cpu", weights_only=False)
-                    if data.get("source") == "phc_refined":
+                    source_tag = data.get("source")
+                    if source_tag in ("phc_refined", "spring_refined"):
                         score += 100
                     if all(
                         key in data
@@ -2281,6 +2282,15 @@ class AppWindow(QMainWindow):
                             "global_orient_world_physics",
                             "body_pose_world_physics",
                             "transl_world_physics",
+                        )
+                    ):
+                        score += 50
+                    if all(
+                        key in data
+                        for key in (
+                            "global_orient_world_spring",
+                            "body_pose_world_spring",
+                            "transl_world_spring",
                         )
                     ):
                         score += 50
@@ -2425,13 +2435,19 @@ class AppWindow(QMainWindow):
                     "transl_world_physics",
                 )
             )
-            if world_physics is None and hybrid_data.get("source") == "phc_refined":
+            if world_physics is None and hybrid_data.get("source") in (
+                "phc_refined",
+                "spring_refined",
+            ):
                 world_physics = _copy_motion_dict(
                     hybrid_data, "global_orient_world", "body_pose_world", "transl_world"
                 )
             if world_physics is None:
                 world_physics = results_world_physics
-            if world_physics is None and results_source == "phc_refined":
+            if world_physics is None and results_source in (
+                "phc_refined",
+                "spring_refined",
+            ):
                 world_physics = results_world_generic or results_refined_generic
 
             camera_baseline = camera_hybrid or camera_results_flat or camera_results

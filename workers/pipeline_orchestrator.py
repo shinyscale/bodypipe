@@ -21,7 +21,7 @@ _FULL_STAGES: list[tuple[float, float, str]] = [
     (0.02, 0.35, "GVHMR body solve"),
     (0.35, 0.50, "SMPLest-X hand solve"),
     (0.50, 0.52, "Merging body + hands"),
-    (0.52, 0.60, "Physics refinement"),
+    (0.52, 0.60, "Motion refinement"),
     (0.60, 0.75, "Face pipeline"),
     (0.75, 0.88, "BVH/FBX conversion"),
     (0.88, 1.00, "Rendering"),
@@ -81,9 +81,11 @@ def save_merged_pt(params: dict, output_path: Path) -> Path:
         "transl_cam", "transl_world",
         "global_orient_cam", "global_orient_world",
         "body_pose_cam", "body_pose_world",
-        "transl_world_baseline", "transl_world_physics",
+        "transl_world_baseline", "transl_world_physics", "transl_world_spring",
         "global_orient_world_baseline", "global_orient_world_physics",
+        "global_orient_world_spring",
         "body_pose_world_baseline", "body_pose_world_physics",
+        "body_pose_world_spring",
         "K_fullimg",
     ]:
         if key in params:
@@ -211,20 +213,28 @@ class FullPipelineWorker(SubprocessWorkerBase):
             if self._cancelled:
                 return
 
-            # Stage 4: Physics refinement
+            # Stage 4: Motion refinement (spring filter or dormant physics)
             self._emit_stage(4)
-            if self._config.use_physics_refine and world_params is not None:
+            if self._config.use_spring_refine and world_params is not None:
+                world_params, spring_ok = self._run_spring_refine(world_params)
+                if spring_ok:
+                    self._save_viewport_params_snapshot(
+                        results, world_params, camera_params, source="spring_refined"
+                    )
+            elif self._config.use_physics_refine and world_params is not None:
                 world_params, physics_refined_ok = self._run_physics_refine(world_params)
                 # Only write the refined viewport snapshot when PHC actually
                 # ran — otherwise _run_physics_refine silently returns the
                 # original baseline params and we would mislabel the snapshot
                 # as `source=phc_refined` over unrefined data.
                 if physics_refined_ok:
-                    self._save_viewport_params_snapshot(results, world_params, camera_params)
-            elif self._config.use_physics_refine:
-                self.log_line.emit("Physics refinement enabled but no params available, skipping.")
+                    self._save_viewport_params_snapshot(
+                        results, world_params, camera_params, source="phc_refined"
+                    )
+            elif self._config.use_physics_refine or self._config.use_spring_refine:
+                self.log_line.emit("Motion refinement enabled but no params available, skipping.")
             else:
-                self.log_line.emit("Physics refinement disabled, skipping.")
+                self.log_line.emit("Motion refinement disabled, skipping.")
             if self._cancelled:
                 return
 
@@ -479,21 +489,65 @@ class FullPipelineWorker(SubprocessWorkerBase):
             self.log_line.emit(f"WARNING: Physics refinement failed: {exc}")
             return world_params, False
 
+    def _run_spring_refine(self, world_params: dict) -> tuple[dict, bool]:
+        """Run spring-based motion refinement on world-space params.
+
+        In-process (no subprocess), pure numpy. Returns
+        ``(refined_params, ok)`` where ``ok`` is True only when the filter
+        produced refined data. On failure the original ``world_params`` is
+        returned with ``ok=False`` so downstream stages still have valid
+        data, but the caller can tell whether to label a viewport snapshot
+        as refined.
+        """
+        try:
+            from workers.spring_refine import run_spring_refine
+        except ImportError as exc:
+            self.log_line.emit(f"WARNING: Spring refine module not available: {exc}")
+            return world_params, False
+
+        progress_cb = self._stage_progress_callback(4)
+        try:
+            progress_cb(0.1, "Running spring filter...")
+            refined, ok = run_spring_refine(
+                world_params,
+                preset=self._config.spring_refine_preset,
+                fps=float(self._fps),
+                progress_cb=lambda f: progress_cb(0.1 + 0.8 * f, "Running spring filter..."),
+            )
+            if not ok:
+                self.log_line.emit(
+                    "WARNING: Spring refine returned no data, using original params."
+                )
+                return world_params, False
+            progress_cb(1.0, "Spring refinement complete")
+            self.log_line.emit(
+                f"Spring refinement: {refined['num_frames']} frames, "
+                f"preset={self._config.spring_refine_preset}"
+            )
+            return refined, True
+        except Exception as exc:
+            self.log_line.emit(f"WARNING: Spring refinement failed: {exc}")
+            return world_params, False
+
     def _save_viewport_params_snapshot(
         self,
         results: dict,
         world_params: dict,
         camera_params: dict | None,
+        source: str = "phc_refined",
     ) -> None:
         """Persist a viewport-readable SMPL-X snapshot after refinement.
 
-        Why: the desktop viewport reloads GVHMR results from disk. When physics
-        refinement only updates in-memory ``world_params``, exports reflect the
-        refined motion but a later UI reload falls back to stale body data.
+        Why: the desktop viewport reloads GVHMR results from disk. When
+        refinement only updates in-memory ``world_params``, exports reflect
+        the refined motion but a later UI reload falls back to stale body
+        data. The ``source`` tag is written so downstream viewport code can
+        distinguish PHC physics (``phc_refined``) from spring-filter
+        (``spring_refined``) output.
         """
         try:
             snapshot = dict(world_params)
-            snapshot["source"] = "phc_refined"
+            snapshot["source"] = source
             if camera_params is not None:
                 for src_key, dst_key in [
                     ("global_orient", "global_orient_cam"),
@@ -523,9 +577,16 @@ class FullPipelineWorker(SubprocessWorkerBase):
             snapshot.setdefault("global_orient_world", snapshot["global_orient"])
             snapshot.setdefault("body_pose_world", snapshot["body_pose"])
             snapshot.setdefault("transl_world", snapshot["transl"])
+            # Always populate the physics triad so legacy viewport code that
+            # looks for "*_world_physics" keys still finds the refined data,
+            # regardless of whether the refinement came from PHC or spring.
             snapshot.setdefault("global_orient_world_physics", snapshot["global_orient_world"])
             snapshot.setdefault("body_pose_world_physics", snapshot["body_pose_world"])
             snapshot.setdefault("transl_world_physics", snapshot["transl_world"])
+            if source == "spring_refined":
+                snapshot.setdefault("global_orient_world_spring", snapshot["global_orient_world"])
+                snapshot.setdefault("body_pose_world_spring", snapshot["body_pose_world"])
+                snapshot.setdefault("transl_world_spring", snapshot["transl_world"])
             snapshot.setdefault("global_orient_world_baseline", snapshot["global_orient_world"])
             snapshot.setdefault("body_pose_world_baseline", snapshot["body_pose_world"])
             snapshot.setdefault("transl_world_baseline", snapshot["transl_world"])
@@ -967,8 +1028,12 @@ class MultiPersonWorker(QThread):
                 self._try_hamer_multi(result)
                 timings.append(("HaMeR hands", time.monotonic() - t0))
 
-            # ── Post-pipeline physics refinement (per-person) ──
-            if self._config.use_physics_refine:
+            # ── Post-pipeline motion refinement (per-person) ──
+            if self._config.use_spring_refine:
+                t0 = time.monotonic()
+                self._run_spring_multi(result)
+                timings.append(("Spring refinement", time.monotonic() - t0))
+            elif self._config.use_physics_refine:
                 t0 = time.monotonic()
                 self._run_physics_multi(result)
                 timings.append(("Physics refinement", time.monotonic() - t0))
@@ -1216,39 +1281,7 @@ class MultiPersonWorker(QThread):
             base_frac = 0.85 + (i / total) * 0.07
             self.progress.emit(base_frac, f"Physics: person {i + 1}/{total}")
 
-            # Find params file.  Physics refinement must always start from
-            # the authoritative GVHMR output (hmr4d_results.pt), never from a
-            # *_hybrid_smplx.pt.  Two reasons:
-            #
-            # 1. Circular hazard: _save_person_physics_hybrid_snapshot writes
-            #    ``phc_refined_hybrid_smplx.pt`` into ``person_dir`` after a
-            #    successful refinement.  That file matches the hybrid glob
-            #    but is a flat viewport snapshot — it does NOT carry
-            #    ``smpl_params_global``, so extract_gvhmr_params (which does
-            #    bracket access ``data["smpl_params_global"]``) would raise
-            #    KeyError on every subsequent refinement attempt.
-            #
-            # 2. Even a valid HaMeR-merged ``*_hybrid_smplx.pt`` would be the
-            #    wrong input: physics should refine the *original* GVHMR
-            #    trajectory, not re-refine already-refined output.
-            #
-            # The refined hmr4d_results.pt preserves the pristine
-            # ``smpl_params_global`` across refinement runs (the overwrite at
-            # the bottom of this block only touches flat top-level keys), so
-            # extract_gvhmr_params always sees clean input.
-            gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
-            if gvhmr_pts:
-                pt_path = gvhmr_pts[0]
-            else:
-                # Fallback: legacy directories that only have a merged
-                # hybrid (pre-multi-person layout).  Skip phc_refined
-                # viewport snapshots explicitly — those cannot be parsed as
-                # a GVHMR-format input.
-                hybrid_pts = sorted(
-                    p for p in person_dir.glob("*_hybrid_smplx.pt")
-                    if p.name != "phc_refined_hybrid_smplx.pt"
-                )
-                pt_path = hybrid_pts[-1] if hybrid_pts else None
+            pt_path = self._candidate_gvhmr_pt(person_dir)
             if pt_path is None:
                 self.log_line.emit(f"[Physics] Person {i}: no params .pt, skipping.")
                 continue
@@ -1396,6 +1429,259 @@ class MultiPersonWorker(QThread):
 
             done_frac = 0.85 + ((i + 1) / total) * 0.07
             self.progress.emit(done_frac, f"Physics: person {i + 1}/{total} complete")
+
+    @staticmethod
+    def _candidate_gvhmr_pt(person_dir: Path) -> Path | None:
+        """Return the .pt file to use as motion-refinement input for a person.
+
+        Refinement (PHC physics or spring filter) must always start from
+        the authoritative GVHMR output (``hmr4d_results.pt``), never from a
+        ``*_hybrid_smplx.pt``. Two reasons:
+
+        1. Circular hazard: the refinement snapshot writers write
+           ``phc_refined_hybrid_smplx.pt`` / ``spring_refined_hybrid_smplx.pt``
+           after a successful refinement. Those files match the hybrid
+           glob but are flat viewport snapshots — they do NOT carry
+           ``smpl_params_global``, so ``extract_gvhmr_params`` (which does
+           bracket access ``data["smpl_params_global"]``) would raise
+           KeyError on every subsequent refinement attempt.
+        2. Even a valid HaMeR-merged ``*_hybrid_smplx.pt`` would be the
+           wrong input: refinement should operate on the *original* GVHMR
+           trajectory, not re-refine already-refined output.
+
+        The refined hmr4d_results.pt preserves the pristine
+        ``smpl_params_global`` across refinement runs (the overwrite at
+        the bottom of the refinement block only touches flat top-level
+        keys), so ``extract_gvhmr_params`` always sees clean input.
+        """
+        gvhmr_pts = list(person_dir.rglob("hmr4d_results.pt"))
+        if gvhmr_pts:
+            return gvhmr_pts[0]
+        # Legacy fallback: directories that only have a merged hybrid
+        # (pre-multi-person layout). Skip refinement-snapshot files
+        # explicitly — they cannot be parsed as GVHMR-format input.
+        excluded = {
+            "phc_refined_hybrid_smplx.pt",
+            "spring_refined_hybrid_smplx.pt",
+        }
+        hybrid_pts = sorted(
+            p for p in person_dir.glob("*_hybrid_smplx.pt") if p.name not in excluded
+        )
+        return hybrid_pts[-1] if hybrid_pts else None
+
+    def _run_spring_multi(self, result) -> None:
+        """Run spring-based motion refinement per-person.
+
+        Mirrors ``_run_physics_multi`` in structure: for each person,
+        reads pristine GVHMR params, runs the spring filter, writes the
+        refined triad back to ``hmr4d_results.pt`` under ``*_world_spring``
+        keys (alongside the ``*_world_physics`` triad for viewport
+        compatibility), persists a viewport snapshot, and re-exports BVH.
+        """
+        try:
+            from workers.spring_refine import run_spring_refine
+            from smplx_to_bvh import extract_gvhmr_params
+        except ImportError as exc:
+            self.log_line.emit(f"WARNING: Spring refine modules not available: {exc}")
+            return
+
+        import numpy as np
+        import torch
+
+        person_dirs = getattr(result, "person_dirs", None) or []
+        if not person_dirs:
+            return
+
+        total = len(person_dirs)
+        preset = self._config.spring_refine_preset
+        self.progress.emit(0.85, f"Spring refinement ({total} persons, preset={preset})...")
+
+        for i, person_dir in enumerate(person_dirs):
+            if self._cancelled:
+                return
+            person_dir = Path(person_dir)
+
+            base_frac = 0.85 + (i / total) * 0.07
+            self.progress.emit(base_frac, f"Spring: person {i + 1}/{total}")
+
+            pt_path = self._candidate_gvhmr_pt(person_dir)
+            if pt_path is None:
+                self.log_line.emit(f"[Spring] Person {i}: no params .pt, skipping.")
+                continue
+
+            try:
+                params = extract_gvhmr_params(str(pt_path))
+                refined, ok = run_spring_refine(
+                    params, preset=preset, fps=float(self._fps)
+                )
+                if not ok:
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: filter returned no data, skipping."
+                    )
+                    continue
+
+                # Capture baseline with the same fall-through chain as
+                # _run_physics_multi. Freshly-solved hmr4d_results.pt stores
+                # body_pose / global_orient / transl inside smpl_params_global,
+                # so without that fallback the baseline triad would be missing
+                # on the first refinement run and the viewport toggle would
+                # silently collapse to a single motion source.
+                data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                n = refined["num_frames"]
+                _spg = data.get("smpl_params_global")
+                if not isinstance(_spg, dict):
+                    _spg = {}
+
+                def _first_present(*entries):
+                    for src, key in entries:
+                        v = src.get(key)
+                        if v is not None:
+                            return v
+                    return None
+
+                baseline_go = _first_present(
+                    (data, "global_orient_world_baseline"),
+                    (data, "global_orient_world"),
+                    (data, "global_orient"),
+                    (_spg, "global_orient"),
+                )
+                baseline_bp = _first_present(
+                    (data, "body_pose_world_baseline"),
+                    (data, "body_pose_world"),
+                    (data, "body_pose"),
+                    (_spg, "body_pose"),
+                )
+                baseline_tr = _first_present(
+                    (data, "transl_world_baseline"),
+                    (data, "transl_world"),
+                    (data, "transl"),
+                    (_spg, "transl"),
+                )
+
+                go_t = torch.tensor(
+                    np.asarray(refined["global_orient"]).reshape(n, -1),
+                    dtype=torch.float32,
+                )
+                bp_t = torch.tensor(
+                    np.asarray(refined["body_pose"]).reshape(n, -1),
+                    dtype=torch.float32,
+                )
+                tr_t = torch.tensor(
+                    np.asarray(refined["transl"]).reshape(n, -1),
+                    dtype=torch.float32,
+                )
+                data["global_orient"] = go_t
+                data["body_pose"] = bp_t
+                data["transl"] = tr_t
+                data["global_orient_world"] = go_t
+                data["body_pose_world"] = bp_t
+                data["transl_world"] = tr_t
+                data["global_orient_world_spring"] = go_t
+                data["body_pose_world_spring"] = bp_t
+                data["transl_world_spring"] = tr_t
+                # Dual-write the *_world_physics triad so existing viewport
+                # source recognition (which keys off *_world_physics) still
+                # picks up the refined data on reload.
+                data["global_orient_world_physics"] = go_t
+                data["body_pose_world_physics"] = bp_t
+                data["transl_world_physics"] = tr_t
+                if baseline_go is not None:
+                    data["global_orient_world_baseline"] = baseline_go
+                if baseline_bp is not None:
+                    data["body_pose_world_baseline"] = baseline_bp
+                if baseline_tr is not None:
+                    data["transl_world_baseline"] = baseline_tr
+                data["source"] = "spring_refined"
+                torch.save(data, str(pt_path))
+
+                snapshot_path: Path | None = None
+                try:
+                    snapshot_path = self._save_person_spring_hybrid_snapshot(
+                        person_dir, data
+                    )
+                except Exception as snap_exc:
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: snapshot write failed — {snap_exc}"
+                    )
+
+                self.log_line.emit(
+                    f"[Spring] Person {i}: refined {n} frames "
+                    f"(preset={preset}) -> {pt_path.name}"
+                )
+                if snapshot_path is not None:
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: wrote viewport snapshot -> {snapshot_path.name}"
+                    )
+
+                # Re-export BVH so FBX conversion picks up refined motion
+                try:
+                    from multi_person_split import _export_person_bvh
+                    bvh_path = _export_person_bvh(person_dir)
+                    if bvh_path:
+                        self.log_line.emit(
+                            f"[Spring] Person {i}: re-exported BVH -> {bvh_path.name}"
+                        )
+                except Exception as exc:
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: BVH re-export failed — {exc}"
+                    )
+
+            except Exception as exc:
+                self.log_line.emit(f"[Spring] Person {i}: failed — {exc}")
+                continue
+
+            done_frac = 0.85 + ((i + 1) / total) * 0.07
+            self.progress.emit(done_frac, f"Spring: person {i + 1}/{total} complete")
+
+    def _save_person_spring_hybrid_snapshot(
+        self, person_dir: Path, data: dict
+    ) -> Path | None:
+        import torch
+
+        snapshot: dict = {}
+        for key in [
+            "global_orient",
+            "body_pose",
+            "transl",
+            "global_orient_world",
+            "body_pose_world",
+            "transl_world",
+            "global_orient_world_baseline",
+            "body_pose_world_baseline",
+            "transl_world_baseline",
+            "global_orient_world_physics",
+            "body_pose_world_physics",
+            "transl_world_physics",
+            "global_orient_world_spring",
+            "body_pose_world_spring",
+            "transl_world_spring",
+            "left_hand_pose",
+            "right_hand_pose",
+            "left_wrist_orient",
+            "right_wrist_orient",
+            "betas",
+            "K_fullimg",
+            "source",
+        ]:
+            if key in data:
+                snapshot[key] = data[key]
+
+        incam = data.get("smpl_params_incam")
+        if isinstance(incam, dict):
+            for src_key, dst_key in [
+                ("global_orient", "global_orient_cam"),
+                ("body_pose", "body_pose_cam"),
+                ("transl", "transl_cam"),
+            ]:
+                if dst_key not in snapshot and src_key in incam:
+                    snapshot[dst_key] = incam[src_key]
+
+        if not snapshot:
+            return None
+
+        output_path = person_dir / "spring_refined_hybrid_smplx.pt"
+        torch.save(snapshot, str(output_path))
+        return output_path
 
     def _save_person_physics_hybrid_snapshot(self, person_dir: Path, data: dict) -> Path | None:
         import torch

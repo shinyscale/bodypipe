@@ -202,6 +202,44 @@ class TestPipelineConfig:
         assert c.body_smooth_preset == "light"
         assert c.use_vitpose_face_crops is False
 
+    def test_spring_refine_defaults(self):
+        """Spring-refine fields default to disabled with moderate preset."""
+        c = PipelineConfig()
+        assert c.use_spring_refine is False
+        assert c.spring_refine_preset == "moderate"
+
+    def test_spring_refine_round_trip(self, tmp_path):
+        """use_spring_refine and spring_refine_preset should persist through save/load."""
+        c = PipelineConfig(
+            mode="perf",
+            use_spring_refine=True,
+            spring_refine_preset="heavy",
+        )
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.use_spring_refine is True
+        assert loaded.spring_refine_preset == "heavy"
+
+    def test_spring_refine_not_forced_off_on_load(self):
+        """Unlike use_physics_refine, use_spring_refine should survive from_dict()."""
+        c = PipelineConfig.from_dict({
+            "mode": "perf",
+            "use_spring_refine": True,
+            "spring_refine_preset": "light",
+        })
+        assert c.use_spring_refine is True
+        assert c.spring_refine_preset == "light"
+
+    def test_spring_refine_in_to_dict(self):
+        """to_dict() should include the spring-refine fields."""
+        c = PipelineConfig(use_spring_refine=True, spring_refine_preset="light")
+        d = c.to_dict()
+        assert "use_spring_refine" in d
+        assert "spring_refine_preset" in d
+        assert d["use_spring_refine"] is True
+        assert d["spring_refine_preset"] == "light"
+
 
 class TestUndoStack:
     """Tests for UndoStack — the command-pattern undo/redo engine.

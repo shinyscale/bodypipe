@@ -1465,6 +1465,287 @@ class TestPhysicsViewportSnapshot:
         assert bvh_mock.called, "BVH re-export must run even when snapshot failed"
 
 
+class TestSpringRefine:
+    """Tests for the spring-filter motion refinement path.
+
+    Mirrors TestPhysicsViewportSnapshot in shape: exercises
+    ``_run_spring_refine``, ``_run_spring_multi``, and the viewport
+    snapshot writer under the ``source="spring_refined"`` tag. Physics
+    internals are untouched by these tests.
+    """
+
+    def test_save_viewport_snapshot_writes_spring_source(self, qapp, tmp_path):
+        import torch
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_spring_refine=True, spring_refine_preset="moderate"),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+
+        n = 3
+        world_params = {
+            "num_frames": n,
+            "global_orient": np.ones((n, 3), dtype=np.float32),
+            "body_pose": np.ones((n, 21, 3), dtype=np.float32),
+            "transl": np.ones((n, 3), dtype=np.float32),
+            "left_hand_pose": np.zeros((n, 15, 3), dtype=np.float32),
+            "right_hand_pose": np.zeros((n, 15, 3), dtype=np.float32),
+            "left_wrist_orient": np.zeros((n, 3), dtype=np.float32),
+            "right_wrist_orient": np.zeros((n, 3), dtype=np.float32),
+        }
+        camera_params = {
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": np.zeros((n, 3), dtype=np.float32),
+            "K_fullimg": np.tile(np.eye(3, dtype=np.float32), (n, 1, 1)),
+        }
+        results: dict = {}
+        worker._save_viewport_params_snapshot(
+            results, world_params, camera_params, source="spring_refined"
+        )
+
+        out_path = Path(results["merged_pt"])
+        assert out_path.is_file()
+        loaded = torch.load(str(out_path), map_location="cpu", weights_only=False)
+        assert loaded["source"] == "spring_refined"
+        # Spring-specific triad present.
+        assert loaded["global_orient_world_spring"].shape == (n, 3)
+        assert loaded["body_pose_world_spring"].shape == (n, 63)
+        assert loaded["transl_world_spring"].shape == (n, 3)
+        # Physics triad is dual-written for viewport compatibility.
+        assert loaded["body_pose_world_physics"].shape == (n, 63)
+
+    def test_run_spring_refine_success(self, qapp, tmp_path):
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_spring_refine=True, spring_refine_preset="moderate"),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        captured_log: list[str] = []
+        worker.log_line.connect(captured_log.append)
+
+        n = 40
+        rng = np.random.default_rng(0)
+        world_params = {
+            "num_frames": n,
+            "global_orient": rng.normal(scale=0.05, size=(n, 3)).astype(np.float32),
+            "body_pose": rng.normal(scale=0.1, size=(n, 21, 3)).astype(np.float32),
+            "transl": np.zeros((n, 3), dtype=np.float32),
+        }
+        refined, ok = worker._run_spring_refine(world_params)
+        assert ok is True
+        assert refined["source"] == "spring_refined"
+        assert refined["num_frames"] == n
+        assert any("Spring refinement" in line for line in captured_log)
+
+    def test_run_spring_refine_reports_failure_on_import_error(
+        self, qapp, tmp_path
+    ):
+        import sys
+        from unittest.mock import patch
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_spring_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        captured_log: list[str] = []
+        worker.log_line.connect(captured_log.append)
+
+        world_params = {
+            "num_frames": 2,
+            "global_orient": np.zeros((2, 3), dtype=np.float32),
+            "body_pose": np.zeros((2, 21, 3), dtype=np.float32),
+            "transl": np.zeros((2, 3), dtype=np.float32),
+        }
+        # Force the import to fail by stubbing the package to None.
+        with patch.dict(sys.modules, {"workers.spring_refine": None}):
+            result, ok = worker._run_spring_refine(world_params)
+        assert ok is False
+        assert result is world_params
+        assert any(
+            "Spring refine module not available" in line for line in captured_log
+        )
+
+    def test_run_spring_refine_reports_failure_on_runtime_error(
+        self, qapp, tmp_path
+    ):
+        import sys
+        from unittest.mock import patch, MagicMock
+
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(use_spring_refine=True),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        world_params = {
+            "num_frames": 2,
+            "global_orient": np.zeros((2, 3), dtype=np.float32),
+            "body_pose": np.zeros((2, 21, 3), dtype=np.float32),
+            "transl": np.zeros((2, 3), dtype=np.float32),
+        }
+
+        bad_module = MagicMock(
+            run_spring_refine=MagicMock(side_effect=RuntimeError("boom"))
+        )
+        with patch.dict(sys.modules, {"workers.spring_refine": bad_module}):
+            result, ok = worker._run_spring_refine(world_params)
+        assert ok is False
+        assert result is world_params
+
+    def test_candidate_gvhmr_pt_prefers_hmr4d(self, tmp_path):
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        (hmr_dir / "hmr4d_results.pt").write_bytes(b"x")
+        (person_dir / "clip_hybrid_smplx.pt").write_bytes(b"y")
+        result = MultiPersonWorker._candidate_gvhmr_pt(person_dir)
+        assert result is not None
+        assert result.name == "hmr4d_results.pt"
+
+    def test_candidate_gvhmr_pt_excludes_refined_snapshots(self, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir(parents=True)
+        (person_dir / "phc_refined_hybrid_smplx.pt").write_bytes(b"x")
+        (person_dir / "spring_refined_hybrid_smplx.pt").write_bytes(b"y")
+        (person_dir / "clip_hybrid_smplx.pt").write_bytes(b"z")
+        result = MultiPersonWorker._candidate_gvhmr_pt(person_dir)
+        assert result is not None
+        assert result.name == "clip_hybrid_smplx.pt"
+
+    def test_candidate_gvhmr_pt_returns_none_when_empty(self, tmp_path):
+        person_dir = tmp_path / "person_0"
+        person_dir.mkdir(parents=True)
+        assert MultiPersonWorker._candidate_gvhmr_pt(person_dir) is None
+
+    def test_run_spring_multi_writes_spring_triad(self, qapp, tmp_path):
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+
+        # Freshly-solved GVHMR state: only smpl_params_global (no top-
+        # level body_pose / body_pose_world triad). The spring refiner
+        # must capture baseline through the smpl_params_global fallback.
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.full((2, 3), 0.5, dtype=torch.float32),
+                    "body_pose": torch.full((2, 63), 0.25, dtype=torch.float32),
+                    "transl": torch.full((2, 3), 0.1, dtype=torch.float32),
+                    "betas": torch.zeros((2, 10), dtype=torch.float32),
+                },
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(
+                use_spring_refine=True, spring_refine_preset="moderate"
+            ),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        import sys
+        from unittest.mock import patch, MagicMock
+
+        # extract_gvhmr_params returns params that the real run_spring_refine
+        # can actually filter (so we exercise the true pipeline end-to-end).
+        n = 8
+        extracted = {
+            "num_frames": n,
+            "global_orient": np.full((n, 3), 0.5, dtype=np.float32),
+            "body_pose": np.full((n, 21, 3), 0.25, dtype=np.float32),
+            "transl": np.full((n, 3), 0.1, dtype=np.float32),
+        }
+        modules = {
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value=extracted)
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "p.bvh")
+            ),
+        }
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, modules):
+            worker._run_spring_multi(result)
+
+        persisted = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        assert persisted["source"] == "spring_refined"
+        # Spring-specific keys were written.
+        for key in (
+            "global_orient_world_spring",
+            "body_pose_world_spring",
+            "transl_world_spring",
+        ):
+            assert key in persisted, f"missing {key}"
+        # Physics keys dual-written for viewport compat.
+        assert "body_pose_world_physics" in persisted
+        # Baseline captured from smpl_params_global.
+        np.testing.assert_allclose(
+            persisted["body_pose_world_baseline"].numpy(),
+            np.full((2, 63), 0.25, dtype=np.float32),
+        )
+        # Spring output is NOT identical to the constant baseline (filter
+        # converges quickly but values still differ at float32 precision
+        # after the IIR + roundtrip through quaternion log space).
+        snap_path = person_dir / "spring_refined_hybrid_smplx.pt"
+        assert snap_path.is_file()
+        snap = torch.load(str(snap_path), map_location="cpu", weights_only=False)
+        assert snap["source"] == "spring_refined"
+        assert "body_pose_world_spring" in snap
+
+    def test_run_spring_multi_skips_refined_snapshot_input(self, qapp, tmp_path):
+        """Regression: _run_spring_multi must not read its own output back
+        as a new input. Circular-hazard test — mirrors the physics-side
+        exclusion in memory/project_phc_snapshot_input_hazard.md.
+        """
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+
+        good_pt = hmr_dir / "hmr4d_results.pt"
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((2, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((2, 63), dtype=torch.float32),
+                    "transl": torch.zeros((2, 3), dtype=torch.float32),
+                }
+            },
+            good_pt,
+        )
+        # Write a viewport snapshot next to the hmr4d_results.pt that would
+        # trip the legacy hybrid-glob fallback if the exclusion list was
+        # wrong. _candidate_gvhmr_pt must still pick the GVHMR file.
+        (person_dir / "spring_refined_hybrid_smplx.pt").write_bytes(b"not-a-gvhmr-file")
+        (person_dir / "phc_refined_hybrid_smplx.pt").write_bytes(b"not-a-gvhmr-file")
+
+        picked = MultiPersonWorker._candidate_gvhmr_pt(person_dir)
+        assert picked == good_pt
+
+
 # ---------------------------------------------------------------------------
 # extract_bboxes_from_output (module-level helper)
 # ---------------------------------------------------------------------------

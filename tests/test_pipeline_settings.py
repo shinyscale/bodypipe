@@ -464,6 +464,101 @@ class TestMultiPipelineSettingsVideoLoading:
 
 
 # ===========================================================================
+# Motion refinement (spring filter) UI
+# ===========================================================================
+
+
+class TestPerfMotionRefinementGroup:
+    """Verify the Motion Refinement group in the perf (single) tab."""
+
+    def test_has_spring_widgets(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_spring")
+        assert hasattr(w, "_spring_preset")
+        assert not hasattr(w, "_use_physics")
+
+    def test_spring_defaults_off_moderate(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        cfg = w.get_config()
+        assert cfg.use_spring_refine is False
+        assert cfg.spring_refine_preset == "moderate"
+
+    def test_spring_round_trip(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(
+            PipelineConfig(
+                mode="perf",
+                use_spring_refine=True,
+                spring_refine_preset="heavy",
+            )
+        )
+        recovered = w.get_config()
+        assert recovered.use_spring_refine is True
+        assert recovered.spring_refine_preset == "heavy"
+        w.set_config(
+            PipelineConfig(
+                mode="perf",
+                use_spring_refine=True,
+                spring_refine_preset="light",
+            )
+        )
+        assert w.get_config().spring_refine_preset == "light"
+
+    def test_set_running_disables_spring_widgets(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._set_running(True)
+        assert not w._use_spring.isEnabled()
+        assert not w._spring_preset.isEnabled()
+
+    def test_visible_stages_include_motion_when_spring_on(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._use_spring.setChecked(True)
+        w._use_hands.setChecked(True)
+        w._use_face.setChecked(False)
+        w._set_running(True)
+        # Body -> Hands -> Motion -> Export
+        assert "Stage 1/4" in w._progress_label.text()
+
+
+class TestMultiMotionRefinementGroup:
+    """Verify the Motion Refinement group in the multi-person tab."""
+
+    def test_has_spring_widgets(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_spring")
+        assert hasattr(w, "_spring_preset")
+        assert not hasattr(w, "_use_physics")
+
+    def test_spring_round_trip(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(
+            PipelineConfig(
+                mode="multi",
+                use_spring_refine=True,
+                spring_refine_preset="light",
+            )
+        )
+        recovered = w.get_config()
+        assert recovered.use_spring_refine is True
+        assert recovered.spring_refine_preset == "light"
+
+    def test_set_running_disables_spring_widgets(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
+        assert not w._use_spring.isEnabled()
+        assert not w._spring_preset.isEnabled()
+
+
+# ===========================================================================
 # DropArea + extension tests
 # ===========================================================================
 

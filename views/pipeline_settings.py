@@ -482,7 +482,7 @@ _INTERNAL_TO_USER_STAGE: dict[str, str] = {
     "GVHMR body solve": "Body",
     "SMPLest-X hand solve": "Hands",
     "Merging body + hands": "Hands",
-    "Physics refinement": "Physics",
+    "Motion refinement": "Motion",
     "Face pipeline": "Face",
     "BVH/FBX conversion": "Export",
     "Rendering": "Export",
@@ -490,18 +490,20 @@ _INTERNAL_TO_USER_STAGE: dict[str, str] = {
 
 
 def compute_visible_stages(
-    use_hands: bool, use_face: bool, use_physics: bool = False
+    use_hands: bool, use_face: bool, use_motion: bool = False
 ) -> list[str]:
     """Return ordered list of user-visible pipeline stage names.
 
-    Stages are dynamic — Hands, Physics, and Face only appear when enabled.
-    Body and Export are always present.
+    Stages are dynamic — Hands, Motion, and Face only appear when enabled.
+    Body and Export are always present. ``use_motion`` controls the
+    motion-refinement stage (spring filter in v1; dormant physics path
+    also lives at the same slot).
     """
     stages = ["Body"]
     if use_hands:
         stages.append("Hands")
-    if use_physics:
-        stages.append("Physics")
+    if use_motion:
+        stages.append("Motion")
     if use_face:
         stages.append("Face")
     stages.append("Export")
@@ -512,7 +514,7 @@ def map_stage_label(
     internal_label: str,
     use_hands: bool,
     use_face: bool,
-    use_physics: bool = False,
+    use_motion: bool = False,
 ) -> str | None:
     """Map internal worker stage label to user-visible stage name.
 
@@ -526,8 +528,8 @@ def map_stage_label(
     # When hands disabled, merge is instant GVHMR-only extraction -> Export
     if user_stage == "Hands" and not use_hands:
         return "Export"
-    # When physics disabled, swallow the stage emission
-    if user_stage == "Physics" and not use_physics:
+    # When motion refinement disabled, swallow the stage emission
+    if user_stage == "Motion" and not use_motion:
         return None
     # When face disabled, the worker briefly emits "Face pipeline" then skips
     if user_stage == "Face" and not use_face:
@@ -624,24 +626,37 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         self._left_layout.insertWidget(run_idx + 1, face_group)
 
-        # Physics refinement group
-        physics_group = QGroupBox("Physics Refinement")
-        physics_layout = QVBoxLayout(physics_group)
+        # Motion refinement group (replaces disabled Physics Refinement)
+        motion_group = QGroupBox("Motion Refinement")
+        motion_layout = QVBoxLayout(motion_group)
 
-        self._use_physics = QCheckBox("Enable physics refinement (PHC) — unavailable")
-        self._use_physics.setChecked(False)
-        self._use_physics.setEnabled(False)
-        self._use_physics.setToolTip(
-            "PHC physics refinement is currently unavailable on this hardware.\n"
-            "Isaac Sim 5.1 / Omniverse Kit cannot initialise PhysX on WSL2 + Blackwell "
-            "(sm_120): the GPU solver crashes at init and the software fallback deadlocks "
-            "in SimulationContext.reset(). The integration code remains in place and can "
-            "be re-enabled in pipeline_config.py / pipeline_settings.py when a viable "
-            "backend is available."
+        self._use_spring = QCheckBox("Enable spring-based refinement")
+        self._use_spring.setChecked(False)
+        self._use_spring.setToolTip(
+            "Per-joint critically-damped spring filter applied to body motion in\n"
+            "quaternion log space. Adds weight and follow-through (Lieberman-style)\n"
+            "without rigid-body simulation. CPU-only, deterministic, fast."
         )
-        physics_layout.addWidget(self._use_physics)
+        motion_layout.addWidget(self._use_spring)
 
-        self._left_layout.insertWidget(run_idx + 2, physics_group)
+        motion_layout.addWidget(QLabel("Spring preset:"))
+        self._spring_preset = QComboBox()
+        self._spring_preset.addItems(
+            [
+                "Light (snappier)",
+                "Moderate (balanced)",
+                "Heavy (loose follow-through)",
+            ]
+        )
+        self._spring_preset.setCurrentIndex(1)
+        self._spring_preset.setToolTip(
+            "Light: higher stiffness, less filtering, snappier response.\n"
+            "Moderate: baseline gains from the per-joint proximal->distal table.\n"
+            "Heavy: softer stiffness, more follow-through, ghost/puppet aesthetic."
+        )
+        motion_layout.addWidget(self._spring_preset)
+
+        self._left_layout.insertWidget(run_idx + 2, motion_group)
 
         # Pipeline output settings group
         output_group = QGroupBox("Pipeline Settings")
@@ -819,13 +834,13 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         use_hands = self._use_hands.isChecked()
         use_face = self._use_face.isChecked()
-        use_physics = self._use_physics.isChecked()
+        use_motion = self._use_spring.isChecked()
 
-        visible = map_stage_label(stage, use_hands, use_face, use_physics)
+        visible = map_stage_label(stage, use_hands, use_face, use_motion)
         if visible is not None:
             self._current_stage = visible
 
-        stages = compute_visible_stages(use_hands, use_face, use_physics)
+        stages = compute_visible_stages(use_hands, use_face, use_motion)
         current = getattr(self, "_current_stage", stages[0])
         idx = stages.index(current) + 1 if current in stages else len(stages)
         total = len(stages)
@@ -845,12 +860,13 @@ class PerfPipelineSettings(SinglePipelineSettings):
             stages = compute_visible_stages(
                 self._use_hands.isChecked(),
                 self._use_face.isChecked(),
-                self._use_physics.isChecked(),
+                self._use_spring.isChecked(),
             )
             self._progress_label.setText(f"Stage 1/{len(stages)}: Body")
         self._use_hands.setEnabled(not running)
         self._use_face.setEnabled(not running)
-        # self._use_physics intentionally left disabled — see __init__ tooltip.
+        self._use_spring.setEnabled(not running)
+        self._spring_preset.setEnabled(not running)
         self._use_vitpose_face.setEnabled(not running)
         self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
         self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
@@ -886,6 +902,15 @@ class PerfPipelineSettings(SinglePipelineSettings):
         else:
             cam_smooth_key = "moderate"
 
+        # Map spring preset combo text -> internal key
+        spring_text = self._spring_preset.currentText()
+        if "Light" in spring_text:
+            spring_key = "light"
+        elif "Heavy" in spring_text:
+            spring_key = "heavy"
+        else:
+            spring_key = "moderate"
+
         be, bm = self._selected_backend()
         return PipelineConfig(
             mode="perf",
@@ -904,7 +929,8 @@ class PerfPipelineSettings(SinglePipelineSettings):
             use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
             estimation_backend=be,
             body_model=bm,
-            use_physics_refine=self._use_physics.isChecked(),
+            use_spring_refine=self._use_spring.isChecked(),
+            spring_refine_preset=spring_key,
         )
 
     def set_config(self, config: PipelineConfig):
@@ -912,7 +938,11 @@ class PerfPipelineSettings(SinglePipelineSettings):
         super().set_config(config)
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
-        self._use_physics.setChecked(config.use_physics_refine)
+        self._use_spring.setChecked(config.use_spring_refine)
+        spring_map = {"light": 0, "moderate": 1, "heavy": 2}
+        self._spring_preset.setCurrentIndex(
+            spring_map.get(config.spring_refine_preset, 1)
+        )
         if config.hand_mode == "smplestx_only":
             self._hand_smplestx.setChecked(True)
         else:
@@ -1113,18 +1143,33 @@ class MultiPipelineSettings(QWidget):
         self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
         self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
 
-        self._use_physics = QCheckBox("Enable physics refinement (PHC) — unavailable")
-        self._use_physics.setChecked(False)
-        self._use_physics.setEnabled(False)
-        self._use_physics.setToolTip(
-            "PHC physics refinement is currently unavailable on this hardware.\n"
-            "Isaac Sim 5.1 / Omniverse Kit cannot initialise PhysX on WSL2 + Blackwell "
-            "(sm_120): the GPU solver crashes at init and the software fallback deadlocks "
-            "in SimulationContext.reset(). The integration code remains in place and can "
-            "be re-enabled in pipeline_config.py / pipeline_settings.py when a viable "
-            "backend is available."
+        # Motion refinement (replaces disabled Physics Refinement)
+        mp_layout.addWidget(QLabel("Motion refinement:"))
+        self._use_spring = QCheckBox("Enable spring-based refinement")
+        self._use_spring.setChecked(False)
+        self._use_spring.setToolTip(
+            "Per-joint critically-damped spring filter applied to body motion in\n"
+            "quaternion log space. Adds weight and follow-through (Lieberman-style)\n"
+            "without rigid-body simulation. CPU-only, deterministic, fast."
         )
-        mp_layout.addWidget(self._use_physics)
+        mp_layout.addWidget(self._use_spring)
+
+        mp_layout.addWidget(QLabel("Spring preset:"))
+        self._spring_preset = QComboBox()
+        self._spring_preset.addItems(
+            [
+                "Light (snappier)",
+                "Moderate (balanced)",
+                "Heavy (loose follow-through)",
+            ]
+        )
+        self._spring_preset.setCurrentIndex(1)
+        self._spring_preset.setToolTip(
+            "Light: higher stiffness, less filtering, snappier response.\n"
+            "Moderate: baseline gains from the per-joint proximal->distal table.\n"
+            "Heavy: softer stiffness, more follow-through, ghost/puppet aesthetic."
+        )
+        mp_layout.addWidget(self._spring_preset)
 
         layout.addWidget(mp_group)
 
@@ -1325,7 +1370,8 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setEnabled(not running)
         self._use_inpainting.setEnabled(not running)
         self._use_hands.setEnabled(not running)
-        # self._use_physics intentionally left disabled — see __init__ tooltip.
+        self._use_spring.setEnabled(not running)
+        self._spring_preset.setEnabled(not running)
         self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
         self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:
@@ -1363,6 +1409,14 @@ class MultiPipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def get_config(self) -> PipelineConfig:
+        spring_text = self._spring_preset.currentText()
+        if "Light" in spring_text:
+            spring_key = "light"
+        elif "Heavy" in spring_text:
+            spring_key = "heavy"
+        else:
+            spring_key = "moderate"
+
         be, bm = self._selected_backend()
         return PipelineConfig(
             mode="multi",
@@ -1379,7 +1433,8 @@ class MultiPipelineSettings(QWidget):
             body_model=bm,
             use_hands=self._use_hands.isChecked(),
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
-            use_physics_refine=self._use_physics.isChecked(),
+            use_spring_refine=self._use_spring.isChecked(),
+            spring_refine_preset=spring_key,
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1395,7 +1450,11 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setChecked(config.render_overlays)
         self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
-        self._use_physics.setChecked(config.use_physics_refine)
+        self._use_spring.setChecked(config.use_spring_refine)
+        spring_map = {"light": 0, "moderate": 1, "heavy": 2}
+        self._spring_preset.setCurrentIndex(
+            spring_map.get(config.spring_refine_preset, 1)
+        )
         if config.hand_source == "hamer":
             self._hand_src_hamer.setChecked(True)
         else:

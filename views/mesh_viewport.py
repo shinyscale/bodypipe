@@ -2155,9 +2155,17 @@ class MeshViewport(_BaseWidget):
                 # that PHC ran (and not just that baseline world motion is
                 # active).
                 parts.append("physics refined")
+            elif source_tag == "spring_refined":
+                # Parallel happy path for the spring-filter refinement:
+                # data loaded from spring_refined_hybrid_smplx.pt is stored
+                # under the *_world_physics triad for viewport compat, but
+                # the source tag lets us report the correct refiner.
+                parts.append("spring refined")
         if source == "world_baseline" and sources.get("world_physics") is None:
             if source_tag == "phc_refined":
                 parts.append("physics expected but artifact missing")
+            elif source_tag == "spring_refined":
+                parts.append("spring expected but artifact missing")
             else:
                 parts.append("world physics missing")
         if not world_active and world_reason == "camera fallback":

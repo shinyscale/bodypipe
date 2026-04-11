@@ -35,6 +35,8 @@ class PipelineConfig:
     estimation_backend: str = "gvhmr"    # "gvhmr" | "gemx"
     kimodo_model: str = "kimodo-soma-rp"  # Kimodo model for AI correction
     use_physics_refine: bool = False
+    use_spring_refine: bool = False
+    spring_refine_preset: str = "moderate"  # "light" | "moderate" | "heavy"
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
 
     def to_dict(self) -> dict:
@@ -60,6 +62,8 @@ class PipelineConfig:
             "estimation_backend": self.estimation_backend,
             "kimodo_model": self.kimodo_model,
             "use_physics_refine": self.use_physics_refine,
+            "use_spring_refine": self.use_spring_refine,
+            "spring_refine_preset": self.spring_refine_preset,
             "cam_smooth_preset": self.cam_smooth_preset,
         }
 
