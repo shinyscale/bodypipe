@@ -1,18 +1,21 @@
 """Foot contact detection + stance anchor tracking for spring-refine v2.
 
-Contact detection reuses the height/velocity heuristic from
-``workers.physics.evaluate.detect_foot_contacts`` so before/after foot
-skating metrics are apples-to-apples with the (now dormant) physics
-code. Anchor tracking splits the contact mask into stance episodes and
-locks each episode's pin target to the median of the first few toe
-positions — robust to noisy first-contact frames.
+Contact detection estimates a per-foot ground level from a low percentile
+of each ankle's Y trajectory so one noisy low frame cannot anchor the
+whole clip. This replaces an earlier reuse of the physics evaluator's
+``detect_foot_contacts`` which used ``min(ankle_y)`` plus a tight 5 cm
+window and caused the v2 pin pass to silently no-op on real footage.
+The physics code is intentionally left alone so its before/after
+metrics stay apples-to-apples against older runs.
+
+Anchor tracking splits the contact mask into stance episodes and locks
+each episode's pin target to the median of the first few toe positions —
+robust to noisy first-contact frames.
 """
 
 from __future__ import annotations
 
 import numpy as np
-
-from workers.physics.evaluate import detect_foot_contacts
 
 from .fk import forward_kinematics_body
 
@@ -28,18 +31,29 @@ def detect_contacts(
     global_orient: np.ndarray,
     transl: np.ndarray,
     fps: float,
-    height_threshold: float = 0.05,
-    velocity_threshold: float = 0.3,
+    height_threshold: float = 0.07,
+    velocity_threshold: float = 0.5,
+    ground_percentile: float = 10.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Run FK, detect per-frame contact for both feet.
+    """Run FK and detect per-frame contact for both feet.
+
+    Uses a per-foot low-percentile ground estimate so mild asymmetry in
+    the rest pose or gait does not force one foot to be treated as
+    never-planted. A frame is "in contact" when its ankle is within
+    ``height_threshold`` of that foot's percentile ground level AND the
+    ankle's 3-D speed is below ``velocity_threshold``.
 
     Parameters
     ----------
     body_pose, global_orient, transl : SMPL-X body params.
     fps : frame rate for the velocity criterion.
-    height_threshold : ankle height (m) above the sequence minimum that
-        still counts as contact.
+    height_threshold : ankle height (m) above the per-foot percentile
+        ground that still counts as contact.
     velocity_threshold : ankle speed (m/s) below which we count as still.
+    ground_percentile : low percentile (0-100) used to estimate each
+        foot's ground level. ``10.0`` tolerates single noisy low frames
+        and still anchors to the planted band when a foot is stationary
+        for ``>=`` ~10 % of the clip.
 
     Returns
     -------
@@ -49,9 +63,24 @@ def detect_contacts(
     joints = forward_kinematics_body(body_pose, global_orient, transl)
     ankles = joints[:, [_L_ANKLE, _R_ANKLE], :]
     toes = joints[:, [_L_FOOT, _R_FOOT], :]
-    contacts = detect_foot_contacts(
-        ankles, fps, height_threshold, velocity_threshold
-    )
+    n = int(ankles.shape[0])
+    contacts = np.zeros((n, 2), dtype=bool)
+    if n < 2:
+        return contacts, toes
+
+    dt = 1.0 / float(fps)
+    for foot in range(2):
+        y = ankles[:, foot, 1]
+        ground = float(np.percentile(y, ground_percentile))
+        height_ok = (y - ground) < height_threshold
+
+        vel = np.zeros_like(ankles[:, foot, :])
+        vel[1:] = (ankles[1:, foot, :] - ankles[:-1, foot, :]) / dt
+        vel[0] = vel[1]
+        speed = np.linalg.norm(vel, axis=-1)
+        vel_ok = speed < velocity_threshold
+
+        contacts[:, foot] = height_ok & vel_ok
     return contacts, toes
 
 

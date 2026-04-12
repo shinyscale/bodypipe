@@ -19,6 +19,17 @@ from scipy.ndimage import gaussian_filter1d
 from .contact import detect_contacts, track_stance_anchors
 
 
+# Contact-heuristic sensitivity presets. Dialed from walking-gait
+# observation: planted ankles dip/rise within ~7 cm and lift off around
+# 1 m/s. "low" is strict (swing-friendly), "high" is lenient (catches
+# fast footwork but may pin some swing frames).
+_SENSITIVITY_PRESETS: dict[str, dict[str, float]] = {
+    "low":    {"height_threshold": 0.04, "velocity_threshold": 0.3},
+    "medium": {"height_threshold": 0.07, "velocity_threshold": 0.5},
+    "high":   {"height_threshold": 0.12, "velocity_threshold": 1.0},
+}
+
+
 def compute_pin_offset(
     toes: np.ndarray,
     anchors: np.ndarray,
@@ -80,18 +91,28 @@ def compute_pin_offset(
     else:
         smoothed = interpolated
 
-    return smoothed
+    # Preserve the exact ``(anchor - toe)`` offset at contact frames so
+    # the per-frame drift inside a stance is fully cancelled. Smoothing
+    # only applies to the interpolated non-contact gaps. Without this,
+    # the Gaussian bleeds correction across short stance episodes and
+    # the pin barely budges the foot (observed on dance clips where
+    # stance episodes are only 3-4 frames long).
+    out = smoothed.copy()
+    out[has] = per_frame[has]
+    return out
 
 
 def apply_foot_pin(
     refined: dict,
     fps: float,
     preset: str = "moderate",
+    sensitivity: str = "medium",
+    pin_strength: float = 1.0,
     min_stance_frames: int = 2,
     anchor_window: int = 3,
     smoothing_sigma_sec: float = 0.1,
-    height_threshold: float = 0.05,
-    velocity_threshold: float = 0.3,
+    height_threshold: float | None = None,
+    velocity_threshold: float | None = None,
 ) -> tuple[dict, dict]:
     """Run the full foot-pin pass on a refined params dict.
 
@@ -107,27 +128,51 @@ def apply_foot_pin(
         filter is disabled).
     fps : frame rate for contact velocity + smoothing sigma.
     preset : spring preset string, passed through for logging only.
-    min_stance_frames, anchor_window, smoothing_sigma_sec,
-    height_threshold, velocity_threshold : tuning knobs — see
-        ``contact.detect_contacts`` and ``track_stance_anchors``.
+    sensitivity : one of ``"low"``, ``"medium"`` (default), ``"high"``.
+        Picks a ``(height_threshold, velocity_threshold)`` preset —
+        ``low`` is strict (swing-friendly), ``high`` is lenient (catches
+        fast footwork). Ignored if both explicit thresholds are given.
+    pin_strength : scales the pin correction. ``1.0`` (default) is full
+        pinning, ``0.0`` is a no-op. Clamped to ``[0.0, 1.0]``.
+    min_stance_frames, anchor_window, smoothing_sigma_sec : stance-episode
+        knobs — see ``contact.detect_contacts`` and
+        ``track_stance_anchors``.
+    height_threshold, velocity_threshold : optional explicit overrides;
+        when provided they win over the sensitivity preset.
 
     Returns
     -------
     out : dict — shallow copy of ``refined`` with pinned ``transl``.
     stats : dict — ``contact_frame_count``, ``stance_episode_count``,
-        ``mean_pin_magnitude_m``, ``max_pin_magnitude_m``, ``preset``.
+        ``mean_pin_magnitude_m``, ``max_pin_magnitude_m``, ``preset``,
+        ``sensitivity``, ``pin_strength``.
     """
     body_pose = np.asarray(refined["body_pose"])
     global_orient = np.asarray(refined["global_orient"])
     transl = np.asarray(refined["transl"], dtype=np.float64)
+
+    sens_key = str(sensitivity).lower()
+    if sens_key not in _SENSITIVITY_PRESETS:
+        sens_key = "medium"
+    sens_cfg = _SENSITIVITY_PRESETS[sens_key]
+    h_thr = (
+        float(height_threshold)
+        if height_threshold is not None
+        else sens_cfg["height_threshold"]
+    )
+    v_thr = (
+        float(velocity_threshold)
+        if velocity_threshold is not None
+        else sens_cfg["velocity_threshold"]
+    )
 
     contacts, toes = detect_contacts(
         body_pose,
         global_orient,
         transl,
         fps=fps,
-        height_threshold=height_threshold,
-        velocity_threshold=velocity_threshold,
+        height_threshold=h_thr,
+        velocity_threshold=v_thr,
     )
     anchors, valid, episode_count = track_stance_anchors(
         toes,
@@ -143,13 +188,18 @@ def apply_foot_pin(
         smoothing_sigma_sec=smoothing_sigma_sec,
     )
 
-    pinned_transl = (transl + offset).astype(np.float32)
+    strength = float(np.clip(pin_strength, 0.0, 1.0))
+    pinned_transl = (transl + strength * offset).astype(np.float32)
     out = dict(refined)
     out["transl"] = pinned_transl
 
-    magnitudes = np.linalg.norm(offset, axis=1) if offset.size else np.zeros(0)
+    magnitudes = np.linalg.norm(offset * strength, axis=1) if offset.size else np.zeros(0)
     stats = {
         "preset": preset,
+        "sensitivity": sens_key,
+        "pin_strength": strength,
+        "height_threshold": h_thr,
+        "velocity_threshold": v_thr,
         "contact_frame_count": int(valid.any(axis=1).sum()),
         "stance_episode_count": int(episode_count),
         "mean_pin_magnitude_m": float(magnitudes.mean()) if magnitudes.size else 0.0,

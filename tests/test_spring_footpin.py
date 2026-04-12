@@ -403,6 +403,133 @@ def test_write_spring_metrics_json_verdict_improved(tmp_path):
     assert loaded["pin_enabled"] is True
 
 
+# ----------------------------------------------------------------------
+# Contact percentile ground + sensitivity presets
+# ----------------------------------------------------------------------
+
+
+def test_contact_percentile_ground_handles_outlier_low_frame():
+    """One noisy low ankle frame must not anchor the ground for the
+    whole clip. With the old min() logic every non-outlier frame would
+    fail the 5 cm height check; with the 10th-percentile estimate those
+    frames remain in contact.
+    """
+    from workers.spring_refine.contact import detect_contacts
+    from workers.spring_refine.fk import forward_kinematics_body
+
+    n = 60
+    body_pose = np.zeros((n, 21, 3), dtype=np.float32)
+    global_orient = np.zeros((n, 3), dtype=np.float32)
+    # All frames have the same root position except one outlier low frame.
+    transl = np.zeros((n, 3), dtype=np.float32)
+    transl[17, 1] = -0.5  # single noisy low frame
+
+    contacts, _ = detect_contacts(body_pose, global_orient, transl, fps=30.0)
+    # Every non-outlier frame (excluding the two velocity-tainted neighbours
+    # at 16/18 where dY/dt is huge) must still register as contact — the
+    # old min()-anchored logic would reject them all.
+    safe = np.array([i for i in range(n) if i not in (16, 17, 18)])
+    assert contacts[safe].all()
+
+
+def test_contact_sensitivity_low_medium_high_widens():
+    """Low sensitivity yields fewer contact frames than high on the same
+    trajectory. Use a one-foot-lifted scenario so height thresholds
+    distinguish the three presets.
+    """
+    from workers.spring_refine.footpin import _SENSITIVITY_PRESETS
+    from workers.spring_refine.contact import detect_contacts
+
+    n = 40
+    body_pose = np.zeros((n, 21, 3), dtype=np.float32)
+    global_orient = np.zeros((n, 3), dtype=np.float32)
+    # Slow vertical oscillation of ~10 cm amplitude above a planted base.
+    transl = np.zeros((n, 3), dtype=np.float32)
+    transl[:, 1] = 0.05 * np.sin(np.linspace(0, 2 * np.pi, n))
+
+    counts: dict[str, int] = {}
+    for name in ("low", "medium", "high"):
+        cfg = _SENSITIVITY_PRESETS[name]
+        contacts, _ = detect_contacts(
+            body_pose,
+            global_orient,
+            transl,
+            fps=30.0,
+            height_threshold=cfg["height_threshold"],
+            velocity_threshold=cfg["velocity_threshold"],
+        )
+        counts[name] = int(contacts.sum())
+
+    assert counts["low"] <= counts["medium"] <= counts["high"]
+    assert counts["high"] > counts["low"]
+
+
+# ----------------------------------------------------------------------
+# Pin strength
+# ----------------------------------------------------------------------
+
+
+def test_apply_foot_pin_strength_half_gives_half_correction():
+    """pin_strength=0.5 should attenuate the residual correction to
+    roughly half of the full-strength case."""
+    n = 60
+    slide = np.zeros((n, 3), dtype=np.float32)
+    slide[:, 0] = np.linspace(0.0, 0.4, n, dtype=np.float32)
+
+    params_full = _zero_params(n, transl=slide)
+    params_half = _zero_params(n, transl=slide)
+
+    full, _ = apply_foot_pin(params_full, fps=30.0, pin_strength=1.0)
+    half, _ = apply_foot_pin(params_half, fps=30.0, pin_strength=0.5)
+
+    full_delta = full["transl"] - slide
+    half_delta = half["transl"] - slide
+
+    # Over the frames where the pin made a meaningful correction, half
+    # strength should be ~0.5 of full.
+    active = np.linalg.norm(full_delta, axis=1) > 1e-4
+    assert active.any()
+    ratio = np.linalg.norm(half_delta[active], axis=1) / np.linalg.norm(
+        full_delta[active], axis=1
+    )
+    assert np.all(np.abs(ratio - 0.5) < 1e-5)
+
+
+def test_apply_foot_pin_strength_zero_is_noop():
+    n = 60
+    slide = np.zeros((n, 3), dtype=np.float32)
+    slide[:, 0] = np.linspace(0.0, 0.4, n, dtype=np.float32)
+    params = _zero_params(n, transl=slide)
+
+    out, stats = apply_foot_pin(params, fps=30.0, pin_strength=0.0)
+    np.testing.assert_allclose(out["transl"], slide, atol=1e-6)
+    # Stance detection still runs (strength only scales the offset).
+    assert stats["stance_episode_count"] >= 1
+    assert stats["pin_strength"] == 0.0
+
+
+def test_run_spring_refine_threads_sensitivity_and_strength():
+    """Runner must forward sensitivity + strength into pin_stats."""
+    n = 60
+    slide = np.zeros((n, 3), dtype=np.float32)
+    slide[:, 0] = np.linspace(0.0, 0.4, n, dtype=np.float32)
+    params = _zero_params(n, transl=slide)
+
+    refined, ok = run_spring_refine(
+        params,
+        preset="moderate",
+        fps=30.0,
+        pin_feet=True,
+        filter_rotations=False,
+        foot_pin_sensitivity="high",
+        foot_pin_strength=0.5,
+    )
+    assert ok is True
+    stats = refined["foot_pin_stats"]
+    assert stats["sensitivity"] == "high"
+    assert stats["pin_strength"] == 0.5
+
+
 def test_write_spring_metrics_json_verdict_neutral(tmp_path):
     n = 30
     baseline = _zero_params(n)

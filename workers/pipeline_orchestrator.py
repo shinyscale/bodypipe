@@ -535,6 +535,8 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 progress_cb=lambda f: progress_cb(0.1 + 0.8 * f, "Running spring filter..."),
                 pin_feet=bool(self._config.use_foot_pin),
                 filter_rotations=bool(self._config.use_spring_refine),
+                foot_pin_sensitivity=self._config.foot_pin_sensitivity,
+                foot_pin_strength=float(self._config.foot_pin_strength),
             )
             if not ok:
                 self.log_line.emit(
@@ -1592,6 +1594,8 @@ class MultiPersonWorker(QThread):
                     fps=float(self._fps),
                     pin_feet=pin_enabled,
                     filter_rotations=filter_enabled,
+                    foot_pin_sensitivity=self._config.foot_pin_sensitivity,
+                    foot_pin_strength=float(self._config.foot_pin_strength),
                 )
                 if not ok:
                     self.log_line.emit(

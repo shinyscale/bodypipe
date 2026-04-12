@@ -263,6 +263,29 @@ class TestPipelineConfig:
         c = PipelineConfig.from_dict({"mode": "perf", "use_foot_pin": True})
         assert c.use_foot_pin is True
 
+    def test_foot_pin_sensitivity_default_medium(self):
+        """New contact sensitivity knob defaults to 'medium'."""
+        c = PipelineConfig()
+        assert c.foot_pin_sensitivity == "medium"
+
+    def test_foot_pin_sensitivity_round_trip(self, tmp_path):
+        c = PipelineConfig(mode="perf", foot_pin_sensitivity="high")
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.foot_pin_sensitivity == "high"
+
+    def test_foot_pin_strength_default_one(self):
+        c = PipelineConfig()
+        assert c.foot_pin_strength == 1.0
+
+    def test_foot_pin_strength_round_trip(self, tmp_path):
+        c = PipelineConfig(mode="perf", foot_pin_strength=0.5)
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.foot_pin_strength == 0.5
+
 
 class TestUndoStack:
     """Tests for UndoStack — the command-pattern undo/redo engine.

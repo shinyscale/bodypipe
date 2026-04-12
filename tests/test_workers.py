@@ -1755,6 +1755,8 @@ class TestSpringRefine:
                 use_spring_refine=True,
                 use_foot_pin=True,
                 spring_refine_preset="moderate",
+                foot_pin_sensitivity="high",
+                foot_pin_strength=0.5,
             ),
             tmp_path / "GVHMR",
             tmp_path / "out",
@@ -1780,6 +1782,11 @@ class TestSpringRefine:
         payload = json.loads(metrics_path.read_text())
         assert payload["pin_enabled"] is True
         assert payload["verdict"] in ("improved", "neutral", "worse")
+        # The sensitivity + strength should be threaded into pin_stats.
+        pin_stats = payload.get("pin_stats") or refined.get("foot_pin_stats")
+        assert pin_stats is not None
+        assert pin_stats["sensitivity"] == "high"
+        assert pin_stats["pin_strength"] == 0.5
 
     def test_run_spring_refine_pin_disabled_still_writes_metrics(
         self, qapp, tmp_path

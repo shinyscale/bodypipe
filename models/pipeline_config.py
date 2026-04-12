@@ -38,6 +38,8 @@ class PipelineConfig:
     use_spring_refine: bool = False
     spring_refine_preset: str = "moderate"  # "light" | "moderate" | "heavy"
     use_foot_pin: bool = False
+    foot_pin_sensitivity: str = "medium"  # "low" | "medium" | "high"
+    foot_pin_strength: float = 1.0          # 0.0 - 1.0
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
 
     def to_dict(self) -> dict:
@@ -66,6 +68,8 @@ class PipelineConfig:
             "use_spring_refine": self.use_spring_refine,
             "spring_refine_preset": self.spring_refine_preset,
             "use_foot_pin": self.use_foot_pin,
+            "foot_pin_sensitivity": self.foot_pin_sensitivity,
+            "foot_pin_strength": self.foot_pin_strength,
             "cam_smooth_preset": self.cam_smooth_preset,
         }
 

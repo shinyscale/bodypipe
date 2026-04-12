@@ -99,6 +99,8 @@ def run_spring_refine(
     progress_cb: Callable[[float], None] | None = None,
     pin_feet: bool = False,
     filter_rotations: bool = True,
+    foot_pin_sensitivity: str = "medium",
+    foot_pin_strength: float = 1.0,
 ) -> tuple[dict, bool]:
     """Orchestrator-facing entry. Returns ``(refined_params, ok)``.
 
@@ -157,7 +159,11 @@ def run_spring_refine(
             from .footpin import apply_foot_pin
 
             refined, pin_stats = apply_foot_pin(
-                refined, fps=float(fps), preset=preset
+                refined,
+                fps=float(fps),
+                preset=preset,
+                sensitivity=foot_pin_sensitivity,
+                pin_strength=foot_pin_strength,
             )
             refined["foot_pin_stats"] = pin_stats
             refined["source"] = "spring_refined_pinned"

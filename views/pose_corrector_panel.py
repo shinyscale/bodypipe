@@ -53,6 +53,7 @@ from PySide6.QtGui import QFont
 from models.session import Session, UndoEntry
 from theme import COLORS
 from views.mesh_viewport import MeshViewport, JOINT_NAMES, JOINT_PARENTS
+from views.widgets import CollapsibleSection
 from models.skeleton import SMPLX_SKELETON as _SKEL
 
 try:
@@ -774,50 +775,10 @@ _SLIDER_FIXED_HEIGHT = 22
 _MONO_FONT_FAMILY = "Consolas, Courier New, monospace"
 
 
-class _CollapsibleSection(QWidget):
-    """Collapsible section with arrow toggle for property panel organization.
-
-    Why: The pose corrector has many control groups that overwhelm the interface
-    when all visible at once. Collapsible sections let users hide groups they
-    are not actively using while keeping them one click away. Uses QToolButton
-    with arrow type indicator for a clean, consistent toggle mechanism.
-    """
-
-    def __init__(self, title: str, parent=None, collapsed=False):
-        super().__init__(parent)
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 2)
-        main_layout.setSpacing(0)
-
-        self._header = QToolButton()
-        self._header.setArrowType(Qt.RightArrow if collapsed else Qt.DownArrow)
-        self._header.setText(title)
-        self._header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._header.setCheckable(True)
-        self._header.setChecked(not collapsed)
-        self._header.setStyleSheet(
-            f"QToolButton {{ border: none; font-weight: bold; "
-            f"color: {COLORS['text_primary']}; padding: 4px 2px; }}"
-            f"QToolButton:hover {{ color: {COLORS['accent']}; }}"
-        )
-        main_layout.addWidget(self._header)
-
-        self._content = QWidget()
-        self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(8, 2, 2, 2)
-        self._content.setVisible(not collapsed)
-        main_layout.addWidget(self._content)
-
-        self._header.toggled.connect(self._on_toggled)
-
-    def _on_toggled(self, checked: bool):
-        self._content.setVisible(checked)
-        self._header.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
-
-    @property
-    def content_layout(self) -> QVBoxLayout:
-        """Layout to add child widgets into."""
-        return self._content_layout
+# Shim: the collapsible section was promoted to views.widgets so
+# pipeline settings can reuse the same implementation. Existing
+# references to the private name (and test_pose_corrector) keep working.
+_CollapsibleSection = CollapsibleSection
 
 
 class PoseCorrectorPanel(QWidget):

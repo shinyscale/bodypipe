@@ -532,6 +532,40 @@ class TestPerfMotionRefinementGroup:
         w.set_config(PipelineConfig(mode="perf", use_foot_pin=False))
         assert w.get_config().use_foot_pin is False
 
+    def test_has_foot_pin_sensitivity_combo(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_foot_pin_sensitivity")
+        # Defaults to medium.
+        assert w.get_config().foot_pin_sensitivity == "medium"
+
+    def test_has_foot_pin_strength_spinbox(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_foot_pin_strength")
+        assert w.get_config().foot_pin_strength == 1.0
+
+    def test_foot_pin_sensitivity_round_trip(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(mode="perf", foot_pin_sensitivity="high"))
+        assert w.get_config().foot_pin_sensitivity == "high"
+        w.set_config(PipelineConfig(mode="perf", foot_pin_sensitivity="low"))
+        assert w.get_config().foot_pin_sensitivity == "low"
+
+    def test_foot_pin_strength_round_trip(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(mode="perf", foot_pin_strength=0.5))
+        assert abs(w.get_config().foot_pin_strength - 0.5) < 1e-9
+
+    def test_set_running_disables_foot_pin_tuning(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._set_running(True)
+        assert not w._foot_pin_sensitivity.isEnabled()
+        assert not w._foot_pin_strength.isEnabled()
+
     def test_visible_stages_include_motion_when_spring_on(self, qapp):
         session = Session()
         w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
@@ -590,6 +624,106 @@ class TestMultiMotionRefinementGroup:
             PipelineConfig(mode="multi", use_foot_pin=True, use_spring_refine=True)
         )
         assert w.get_config().use_foot_pin is True
+
+    def test_has_foot_pin_sensitivity_combo(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_foot_pin_sensitivity")
+        assert w.get_config().foot_pin_sensitivity == "medium"
+
+    def test_has_foot_pin_strength_spinbox(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_foot_pin_strength")
+        assert w.get_config().foot_pin_strength == 1.0
+
+    def test_foot_pin_sensitivity_round_trip(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(mode="multi", foot_pin_sensitivity="low"))
+        assert w.get_config().foot_pin_sensitivity == "low"
+        w.set_config(PipelineConfig(mode="multi", foot_pin_sensitivity="high"))
+        assert w.get_config().foot_pin_sensitivity == "high"
+
+    def test_foot_pin_strength_round_trip(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(PipelineConfig(mode="multi", foot_pin_strength=0.25))
+        assert abs(w.get_config().foot_pin_strength - 0.25) < 1e-9
+
+    def test_set_running_disables_foot_pin_tuning(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w._video_path = Path("/tmp/test.mp4")
+        w._set_running(True)
+        assert not w._foot_pin_sensitivity.isEnabled()
+        assert not w._foot_pin_strength.isEnabled()
+
+
+# ===========================================================================
+# Pipeline settings layout (scroll area, sticky footer, collapsible sections)
+# ===========================================================================
+
+
+class TestPipelineSettingsLayout:
+    """Verify the scroll area + sticky footer + collapsible section layout."""
+
+    def test_single_has_scroll_area(self, qapp):
+        from PySide6.QtWidgets import QScrollArea
+        session = Session()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        assert isinstance(w._scroll_area, QScrollArea)
+
+    def test_perf_has_scroll_area(self, qapp):
+        from PySide6.QtWidgets import QScrollArea
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert isinstance(w._scroll_area, QScrollArea)
+
+    def test_multi_has_scroll_area(self, qapp):
+        from PySide6.QtWidgets import QScrollArea
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert isinstance(w._scroll_area, QScrollArea)
+
+    def _assert_run_btn_outside_scroll(self, w):
+        """Walk parents of run button; none should be the scroll area."""
+        parent = w._run_btn.parent()
+        while parent is not None:
+            assert parent is not w._scroll_area
+            parent = parent.parent()
+
+    def test_single_run_button_not_inside_scroll_area(self, qapp):
+        session = Session()
+        w = SinglePipelineSettings(session, Path("/tmp/GVHMR"))
+        self._assert_run_btn_outside_scroll(w)
+
+    def test_perf_run_button_not_inside_scroll_area(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        self._assert_run_btn_outside_scroll(w)
+
+    def test_multi_run_button_not_inside_scroll_area(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        self._assert_run_btn_outside_scroll(w)
+
+    def test_motion_refinement_section_is_collapsible(self, qapp):
+        """The Motion Refinement group is a CollapsibleSection with a
+        content_layout and a checkable _header QToolButton."""
+        from PySide6.QtWidgets import QToolButton
+        from views.widgets import CollapsibleSection
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        motion_section = None
+        for child in w.findChildren(CollapsibleSection):
+            if child._header.text() == "Motion Refinement":
+                motion_section = child
+                break
+        assert motion_section is not None
+        assert hasattr(motion_section, "content_layout")
+        assert isinstance(motion_section._header, QToolButton)
+        assert motion_section._header.isCheckable()
 
 
 # ===========================================================================

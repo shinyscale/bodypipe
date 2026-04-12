@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QGroupBox,
     QLabel,
     QPushButton,
     QCheckBox,
@@ -29,15 +28,38 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QSizePolicy,
+    QScrollArea,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QPixmap, QImage, QDragEnterEvent, QDropEvent
 
 from models.pipeline_config import PipelineConfig
 from models.session import Session
+from views.widgets import CollapsibleSection
 from workers.gvhmr_worker import GVHMRWorker
 from workers.gemx_worker import GEMXWorker
 from workers.pipeline_orchestrator import FullPipelineWorker, MultiPersonWorker
+
+
+# Sensitivity combo entries (display text, internal key).
+_SENSITIVITY_OPTIONS = [
+    ("Low (strict)", "low"),
+    ("Medium (default)", "medium"),
+    ("High (lenient)", "high"),
+]
+
+
+def _sensitivity_index_for_key(key: str) -> int:
+    for i, (_, k) in enumerate(_SENSITIVITY_OPTIONS):
+        if k == key:
+            return i
+    return 1  # medium
+
+
+def _sensitivity_key_for_index(idx: int) -> str:
+    if 0 <= idx < len(_SENSITIVITY_OPTIONS):
+        return _SENSITIVITY_OPTIONS[idx][1]
+    return "medium"
 
 # Estimation backend display names → config values
 _BACKEND_OPTIONS = [
@@ -116,13 +138,34 @@ class SinglePipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        self._left_layout = left_layout = QVBoxLayout(self)
-        left_layout.setContentsMargins(8, 8, 8, 8)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
-        # Video input
-        input_group = QGroupBox("Video Input")
-        input_layout = QVBoxLayout(input_group)
+        # Outer layout: scroll body (stretch=1) + sticky footer (stretch=0).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
+        self._scroll_area.setMinimumHeight(200)
+        scroll_inner = QWidget()
+        self._left_layout = left_layout = QVBoxLayout(scroll_inner)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        self._scroll_area.setWidget(scroll_inner)
+        outer.addWidget(self._scroll_area, 1)
+
+        # ------------------------------------------------------------------
+        # Scrollable body
+        # ------------------------------------------------------------------
+
+        # Video input — not collapsible; drop area is the primary affordance.
+        input_container = QWidget()
+        input_layout = QVBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 0, 0, 4)
+        input_title = QLabel("Video Input")
+        input_title.setStyleSheet("font-weight: bold; padding: 4px 2px;")
+        input_layout.addWidget(input_title)
 
         self._drop_area = _DropArea()
         input_layout.addWidget(self._drop_area)
@@ -141,11 +184,11 @@ class SinglePipelineSettings(QWidget):
         self._video_info.hide()
         input_layout.addWidget(self._video_info)
 
-        left_layout.addWidget(input_group)
+        left_layout.addWidget(input_container)
 
-        # Pipeline Settings
-        settings_group = QGroupBox("Pipeline Settings")
-        settings_layout = QVBoxLayout(settings_group)
+        # Pipeline Settings — collapsible, expanded.
+        self._settings_section = CollapsibleSection("Pipeline Settings", collapsed=False)
+        settings_layout = self._settings_section.content_layout
 
         backend_row = QHBoxLayout()
         backend_row.addWidget(QLabel("Backend:"))
@@ -185,31 +228,47 @@ class SinglePipelineSettings(QWidget):
         focal_row.addWidget(self._focal_mm)
         settings_layout.addLayout(focal_row)
 
-        left_layout.addWidget(settings_group)
+        left_layout.addWidget(self._settings_section)
 
-        # Run / Cancel / Progress
+        # Trailing stretch keeps the sections pinned to the top while
+        # the scroll area grows to fill any available vertical space.
+        # Subclasses insert further sections before this stretch.
+        left_layout.addStretch()
+
+        # ------------------------------------------------------------------
+        # Sticky footer — run / cancel / progress are never scrolled away.
+        # ------------------------------------------------------------------
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 4, 8, 8)
+        footer_layout.setSpacing(4)
+
         self._run_btn = QPushButton("Run GVHMR")
         self._run_btn.setEnabled(False)
         self._run_btn.setStyleSheet(
             "QPushButton { font-weight: bold; padding: 10px; }"
         )
-        left_layout.addWidget(self._run_btn)
+        footer_layout.addWidget(self._run_btn)
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.hide()
-        left_layout.addWidget(self._cancel_btn)
+        footer_layout.addWidget(self._cancel_btn)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 1000)
         self._progress_bar.setValue(0)
         self._progress_bar.hide()
-        left_layout.addWidget(self._progress_bar)
+        footer_layout.addWidget(self._progress_bar)
 
         self._progress_label = QLabel("")
         self._progress_label.hide()
-        left_layout.addWidget(self._progress_label)
+        footer_layout.addWidget(self._progress_label)
 
-        left_layout.addStretch()
+        outer.addWidget(footer, 0)
+
+    def _insert_before_stretch(self, widget: QWidget) -> None:
+        """Insert ``widget`` into ``_left_layout`` just before the trailing stretch."""
+        self._left_layout.insertWidget(self._left_layout.count() - 1, widget)
 
     def _selected_backend(self) -> tuple[str, str]:
         """Return (estimation_backend, body_model) from combo selection."""
@@ -556,13 +615,14 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._add_hand_face_settings()
 
     def _add_hand_face_settings(self):
-        """Insert hand/face/pipeline settings between body settings and run button."""
-        # Find the run button index in the left layout
-        run_idx = self._left_layout.indexOf(self._run_btn)
+        """Insert hand/face/motion/output sections into the scroll body.
 
-        # Hand capture group
-        hand_group = QGroupBox("Hand Capture")
-        hand_layout = QVBoxLayout(hand_group)
+        Appended before the trailing stretch that the base class placed at
+        the bottom of ``_left_layout`` so sections remain top-aligned.
+        """
+        # Hand capture group — collapsible, expanded.
+        hand_section = CollapsibleSection("Hand Capture", collapsed=False)
+        hand_layout = hand_section.content_layout
 
         self._use_hands = QCheckBox("Enable hand capture")
         self._use_hands.setChecked(True)
@@ -605,11 +665,11 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_hands.toggled.connect(self._hand_src_smplestx.setEnabled)
         self._use_hands.toggled.connect(self._hand_src_hamer.setEnabled)
 
-        self._left_layout.insertWidget(run_idx, hand_group)
+        self._insert_before_stretch(hand_section)
 
-        # Face capture group
-        face_group = QGroupBox("Face Capture")
-        face_layout = QVBoxLayout(face_group)
+        # Face capture group — collapsed by default (most users don't touch it).
+        face_section = CollapsibleSection("Face Capture", collapsed=True)
+        face_layout = face_section.content_layout
 
         self._use_face = QCheckBox("Enable face capture")
         self._use_face.setChecked(False)
@@ -625,11 +685,11 @@ class PerfPipelineSettings(SinglePipelineSettings):
         )
         face_layout.addWidget(self._use_vitpose_face)
 
-        self._left_layout.insertWidget(run_idx + 1, face_group)
+        self._insert_before_stretch(face_section)
 
-        # Motion refinement group (replaces disabled Physics Refinement)
-        motion_group = QGroupBox("Motion Refinement")
-        motion_layout = QVBoxLayout(motion_group)
+        # Motion refinement group (replaces disabled Physics Refinement).
+        motion_section = CollapsibleSection("Motion Refinement", collapsed=False)
+        motion_layout = motion_section.content_layout
 
         self._use_spring = QCheckBox("Enable spring-based refinement")
         self._use_spring.setChecked(False)
@@ -674,11 +734,42 @@ class PerfPipelineSettings(SinglePipelineSettings):
         )
         motion_layout.addWidget(self._use_foot_pin)
 
-        self._left_layout.insertWidget(run_idx + 2, motion_group)
+        # Contact sensitivity
+        sens_row = QHBoxLayout()
+        sens_row.addWidget(QLabel("Contact sensitivity:"))
+        self._foot_pin_sensitivity = QComboBox()
+        for label, _key in _SENSITIVITY_OPTIONS:
+            self._foot_pin_sensitivity.addItem(label)
+        self._foot_pin_sensitivity.setCurrentIndex(1)
+        self._foot_pin_sensitivity.setToolTip(
+            "Controls how aggressively the heuristic marks a frame as in-contact.\n"
+            "Low: tight 4 cm / 0.3 m/s window — use when swing phases get wrongly pinned.\n"
+            "Medium: 7 cm / 0.5 m/s — good starting point for most walking clips.\n"
+            "High: 12 cm / 1.0 m/s — use when the pin misses real contacts on fast footwork."
+        )
+        sens_row.addWidget(self._foot_pin_sensitivity)
+        motion_layout.addLayout(sens_row)
 
-        # Pipeline output settings group
-        output_group = QGroupBox("Pipeline Settings")
-        output_layout = QVBoxLayout(output_group)
+        # Pin strength
+        strength_row = QHBoxLayout()
+        strength_row.addWidget(QLabel("Pin strength:"))
+        self._foot_pin_strength = QDoubleSpinBox()
+        self._foot_pin_strength.setRange(0.0, 1.0)
+        self._foot_pin_strength.setSingleStep(0.1)
+        self._foot_pin_strength.setDecimals(2)
+        self._foot_pin_strength.setValue(1.0)
+        self._foot_pin_strength.setToolTip(
+            "Scales the pin correction. 1.0 = full pinning, 0.5 = half, 0.0 = no correction.\n"
+            "Lower values help when pinning over-corrects mild drift."
+        )
+        strength_row.addWidget(self._foot_pin_strength)
+        motion_layout.addLayout(strength_row)
+
+        self._insert_before_stretch(motion_section)
+
+        # Pipeline output settings section — collapsed by default.
+        output_section = CollapsibleSection("Pipeline Output", collapsed=True)
+        output_layout = output_section.content_layout
 
         # Target FPS
         fps_row = QHBoxLayout()
@@ -740,7 +831,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         cam_smooth_row.addWidget(self._cam_smooth)
         output_layout.addLayout(cam_smooth_row)
 
-        self._left_layout.insertWidget(run_idx + 3, output_group)
+        self._insert_before_stretch(output_section)
 
         # Update run button text
         self._run_btn.setText("Run Pipeline")
@@ -886,6 +977,8 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
+        self._foot_pin_sensitivity.setEnabled(not running)
+        self._foot_pin_strength.setEnabled(not running)
         self._use_vitpose_face.setEnabled(not running)
         self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
         self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
@@ -951,6 +1044,10 @@ class PerfPipelineSettings(SinglePipelineSettings):
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
+            foot_pin_sensitivity=_sensitivity_key_for_index(
+                self._foot_pin_sensitivity.currentIndex()
+            ),
+            foot_pin_strength=float(self._foot_pin_strength.value()),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -960,6 +1057,10 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_face.setChecked(config.use_face)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
+        self._foot_pin_sensitivity.setCurrentIndex(
+            _sensitivity_index_for_key(config.foot_pin_sensitivity)
+        )
+        self._foot_pin_strength.setValue(float(config.foot_pin_strength))
         spring_map = {"light": 0, "moderate": 1, "heavy": 2}
         self._spring_preset.setCurrentIndex(
             spring_map.get(config.spring_refine_preset, 1)
@@ -1026,12 +1127,29 @@ class MultiPipelineSettings(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
-        # Video input
-        input_group = QGroupBox("Video Input")
-        input_layout = QVBoxLayout(input_group)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
+        self._scroll_area.setMinimumHeight(200)
+        scroll_inner = QWidget()
+        layout = QVBoxLayout(scroll_inner)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self._scroll_area.setWidget(scroll_inner)
+        outer.addWidget(self._scroll_area, 1)
+
+        # Video input — not collapsible.
+        input_container = QWidget()
+        input_layout = QVBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 0, 0, 4)
+        input_title = QLabel("Video Input")
+        input_title.setStyleSheet("font-weight: bold; padding: 4px 2px;")
+        input_layout.addWidget(input_title)
 
         self._drop_area = _DropArea()
         input_layout.addWidget(self._drop_area)
@@ -1044,11 +1162,11 @@ class MultiPipelineSettings(QWidget):
         self._video_info.hide()
         input_layout.addWidget(self._video_info)
 
-        layout.addWidget(input_group)
+        layout.addWidget(input_container)
 
-        # Pipeline settings
-        settings_group = QGroupBox("Pipeline Settings")
-        settings_layout = QVBoxLayout(settings_group)
+        # Pipeline settings — collapsible, expanded.
+        settings_section = CollapsibleSection("Pipeline Settings", collapsed=False)
+        settings_layout = settings_section.content_layout
 
         backend_row = QHBoxLayout()
         backend_row.addWidget(QLabel("Backend:"))
@@ -1098,11 +1216,11 @@ class MultiPipelineSettings(QWidget):
         naming_row.addWidget(self._fbx_naming)
         settings_layout.addLayout(naming_row)
 
-        layout.addWidget(settings_group)
+        layout.addWidget(settings_section)
 
-        # Multi-person specific settings
-        mp_group = QGroupBox("Multi-Person")
-        mp_layout = QVBoxLayout(mp_group)
+        # Multi-person specific settings — collapsible, expanded.
+        mp_section = CollapsibleSection("Multi-Person", collapsed=False)
+        mp_layout = mp_section.content_layout
 
         max_row = QHBoxLayout()
         max_row.addWidget(QLabel("Max persons:"))
@@ -1207,27 +1325,68 @@ class MultiPipelineSettings(QWidget):
         )
         mp_layout.addWidget(self._use_foot_pin)
 
-        layout.addWidget(mp_group)
+        # Contact sensitivity
+        mp_sens_row = QHBoxLayout()
+        mp_sens_row.addWidget(QLabel("Contact sensitivity:"))
+        self._foot_pin_sensitivity = QComboBox()
+        for label, _key in _SENSITIVITY_OPTIONS:
+            self._foot_pin_sensitivity.addItem(label)
+        self._foot_pin_sensitivity.setCurrentIndex(1)
+        self._foot_pin_sensitivity.setToolTip(
+            "Controls how aggressively the heuristic marks a frame as in-contact.\n"
+            "Low: tight 4 cm / 0.3 m/s window — use when swing phases get wrongly pinned.\n"
+            "Medium: 7 cm / 0.5 m/s — good starting point for most walking clips.\n"
+            "High: 12 cm / 1.0 m/s — use when the pin misses real contacts on fast footwork."
+        )
+        mp_sens_row.addWidget(self._foot_pin_sensitivity)
+        mp_layout.addLayout(mp_sens_row)
 
-        # Run / Cancel / Progress
+        # Pin strength
+        mp_strength_row = QHBoxLayout()
+        mp_strength_row.addWidget(QLabel("Pin strength:"))
+        self._foot_pin_strength = QDoubleSpinBox()
+        self._foot_pin_strength.setRange(0.0, 1.0)
+        self._foot_pin_strength.setSingleStep(0.1)
+        self._foot_pin_strength.setDecimals(2)
+        self._foot_pin_strength.setValue(1.0)
+        self._foot_pin_strength.setToolTip(
+            "Scales the pin correction. 1.0 = full pinning, 0.5 = half, 0.0 = no correction.\n"
+            "Lower values help when pinning over-corrects mild drift."
+        )
+        mp_strength_row.addWidget(self._foot_pin_strength)
+        mp_layout.addLayout(mp_strength_row)
+
+        layout.addWidget(mp_section)
+        layout.addStretch()
+
+        # ------------------------------------------------------------------
+        # Sticky footer — run/cancel/progress are never scrolled out of view.
+        # ------------------------------------------------------------------
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 4, 8, 8)
+        footer_layout.setSpacing(4)
+
         self._run_btn = QPushButton("Run Multi-Person Pipeline")
         self._run_btn.setEnabled(False)
         self._run_btn.setStyleSheet("QPushButton { font-weight: bold; padding: 10px; }")
-        layout.addWidget(self._run_btn)
+        footer_layout.addWidget(self._run_btn)
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.hide()
-        layout.addWidget(self._cancel_btn)
+        footer_layout.addWidget(self._cancel_btn)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 1000)
         self._progress_bar.setValue(0)
         self._progress_bar.hide()
-        layout.addWidget(self._progress_bar)
+        footer_layout.addWidget(self._progress_bar)
 
         self._progress_label = QLabel("")
         self._progress_label.hide()
-        layout.addWidget(self._progress_label)
+        footer_layout.addWidget(self._progress_label)
+
+        outer.addWidget(footer, 0)
 
     def _selected_backend(self) -> tuple[str, str]:
         """Return (estimation_backend, body_model) from combo selection."""
@@ -1409,6 +1568,8 @@ class MultiPipelineSettings(QWidget):
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
+        self._foot_pin_sensitivity.setEnabled(not running)
+        self._foot_pin_strength.setEnabled(not running)
         self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
         self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:
@@ -1473,6 +1634,10 @@ class MultiPipelineSettings(QWidget):
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
+            foot_pin_sensitivity=_sensitivity_key_for_index(
+                self._foot_pin_sensitivity.currentIndex()
+            ),
+            foot_pin_strength=float(self._foot_pin_strength.value()),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1490,6 +1655,10 @@ class MultiPipelineSettings(QWidget):
         self._use_hands.setChecked(config.use_hands)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
+        self._foot_pin_sensitivity.setCurrentIndex(
+            _sensitivity_index_for_key(config.foot_pin_sensitivity)
+        )
+        self._foot_pin_strength.setValue(float(config.foot_pin_strength))
         spring_map = {"light": 0, "moderate": 1, "heavy": 2}
         self._spring_preset.setCurrentIndex(
             spring_map.get(config.spring_refine_preset, 1)
