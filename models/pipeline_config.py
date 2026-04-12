@@ -40,6 +40,7 @@ class PipelineConfig:
     use_foot_pin: bool = False
     foot_pin_sensitivity: str = "medium"  # "low" | "medium" | "high"
     foot_pin_strength: float = 1.0          # 0.0 - 1.0
+    use_camera_stabilize: bool = True
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
 
     def to_dict(self) -> dict:
@@ -70,6 +71,7 @@ class PipelineConfig:
             "use_foot_pin": self.use_foot_pin,
             "foot_pin_sensitivity": self.foot_pin_sensitivity,
             "foot_pin_strength": self.foot_pin_strength,
+            "use_camera_stabilize": self.use_camera_stabilize,
             "cam_smooth_preset": self.cam_smooth_preset,
         }
 

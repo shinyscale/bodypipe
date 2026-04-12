@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-from .contact import detect_contacts, track_stance_anchors
+from .contact import detect_contacts, find_episodes, track_stance_anchors
 
 
 # Contact-heuristic sensitivity presets. Dialed from walking-gait
@@ -36,6 +36,7 @@ def compute_pin_offset(
     valid_mask: np.ndarray,
     fps: float,
     smoothing_sigma_sec: float = 0.1,
+    taper_sec: float = 0.067,
 ) -> np.ndarray:
     """Compute a per-frame translation correction that pins feet.
 
@@ -45,6 +46,11 @@ def compute_pin_offset(
     - Neither valid → interpolated from neighboring valid frames (linear
       on each component). Beyond the first/last valid frame we hold the
       boundary value. A fully-invalid sequence yields all zeros.
+
+    At stance boundaries a cosine taper blends between the smoothed
+    (interpolated) offset and the exact per-frame offset over
+    ``taper_frames = max(1, round(taper_sec * fps))`` frames.  This
+    eliminates the visible lurch that the previous hard switch caused.
 
     Returns
     -------
@@ -91,14 +97,41 @@ def compute_pin_offset(
     else:
         smoothed = interpolated
 
-    # Preserve the exact ``(anchor - toe)`` offset at contact frames so
-    # the per-frame drift inside a stance is fully cancelled. Smoothing
-    # only applies to the interpolated non-contact gaps. Without this,
-    # the Gaussian bleeds correction across short stance episodes and
-    # the pin barely budges the foot (observed on dance clips where
-    # stance episodes are only 3-4 frames long).
+    # Cosine taper at stance boundaries: blend from smoothed to exact
+    # offset over ``taper_frames`` at each edge of a contact episode.
+    # Interior frames keep the exact per-frame offset.
+    taper_frames = max(1, round(float(taper_sec) * float(fps)))
     out = smoothed.copy()
-    out[has] = per_frame[has]
+
+    # Find contiguous stance episodes from the combined valid mask
+    any_valid = has  # True where at least one foot has a valid anchor
+    episodes = find_episodes(any_valid)
+
+    for start, end in episodes:
+        length = end - start + 1
+        # Half-taper at each end, clamped to not exceed half the episode
+        half = min(taper_frames, length // 2) if length > 1 else 0
+
+        # Leading taper: frames [start, start + half)
+        for k in range(half):
+            # Cosine ramp from 0 to 1
+            alpha = 0.5 * (1.0 - np.cos(np.pi * (k + 1) / (half + 1)))
+            t = start + k
+            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame[t]
+
+        # Interior: exact offset
+        interior_start = start + half
+        interior_end = end - half + 1  # exclusive
+        if interior_start < interior_end:
+            out[interior_start:interior_end] = per_frame[interior_start:interior_end]
+
+        # Trailing taper: frames (end - half, end]
+        for k in range(half):
+            # Cosine ramp from 1 to 0
+            alpha = 0.5 * (1.0 - np.cos(np.pi * (half - k) / (half + 1)))
+            t = end - k
+            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame[t]
+
     return out
 
 

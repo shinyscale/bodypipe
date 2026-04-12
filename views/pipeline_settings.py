@@ -691,6 +691,20 @@ class PerfPipelineSettings(SinglePipelineSettings):
         motion_section = CollapsibleSection("Motion Refinement", collapsed=False)
         motion_layout = motion_section.content_layout
 
+        self._use_camera_stabilize = QCheckBox("Stabilize camera drift")
+        self._use_camera_stabilize.setChecked(True)
+        self._use_camera_stabilize.setToolTip(
+            "Re-derive world-space body params using smoothed camera trajectory.\n"
+            "Removes drift caused by camera movement (dolly, orbit). Uses the\n"
+            "Camera Smoothing preset to control smoothing strength."
+        )
+        motion_layout.addWidget(self._use_camera_stabilize)
+
+        _stab_sep = QFrame()
+        _stab_sep.setFrameShape(QFrame.HLine)
+        _stab_sep.setFrameShadow(QFrame.Sunken)
+        motion_layout.addWidget(_stab_sep)
+
         self._use_spring = QCheckBox("Enable spring-based refinement")
         self._use_spring.setChecked(False)
         self._use_spring.setToolTip(
@@ -976,6 +990,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_face.setEnabled(not running)
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
+        self._use_camera_stabilize.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
         self._foot_pin_sensitivity.setEnabled(not running)
         self._foot_pin_strength.setEnabled(not running)
@@ -1041,6 +1056,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             use_vitpose_face_crops=self._use_vitpose_face.isChecked(),
             estimation_backend=be,
             body_model=bm,
+            use_camera_stabilize=self._use_camera_stabilize.isChecked(),
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
@@ -1055,6 +1071,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         super().set_config(config)
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
+        self._use_camera_stabilize.setChecked(config.use_camera_stabilize)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
         self._foot_pin_sensitivity.setCurrentIndex(
@@ -1284,6 +1301,21 @@ class MultiPipelineSettings(QWidget):
 
         # Motion refinement (replaces disabled Physics Refinement)
         mp_layout.addWidget(QLabel("Motion refinement:"))
+
+        self._use_camera_stabilize = QCheckBox("Stabilize camera drift")
+        self._use_camera_stabilize.setChecked(True)
+        self._use_camera_stabilize.setToolTip(
+            "Re-derive world-space body params using smoothed camera trajectory.\n"
+            "Removes drift caused by camera movement (dolly, orbit). Uses the\n"
+            "Camera Smoothing preset to control smoothing strength."
+        )
+        mp_layout.addWidget(self._use_camera_stabilize)
+
+        _mp_stab_sep = QFrame()
+        _mp_stab_sep.setFrameShape(QFrame.HLine)
+        _mp_stab_sep.setFrameShadow(QFrame.Sunken)
+        mp_layout.addWidget(_mp_stab_sep)
+
         self._use_spring = QCheckBox("Enable spring-based refinement")
         self._use_spring.setChecked(False)
         self._use_spring.setToolTip(
@@ -1565,6 +1597,7 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setEnabled(not running)
         self._use_inpainting.setEnabled(not running)
         self._use_hands.setEnabled(not running)
+        self._use_camera_stabilize.setEnabled(not running)
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
@@ -1631,6 +1664,7 @@ class MultiPipelineSettings(QWidget):
             body_model=bm,
             use_hands=self._use_hands.isChecked(),
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
+            use_camera_stabilize=self._use_camera_stabilize.isChecked(),
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
@@ -1653,6 +1687,7 @@ class MultiPipelineSettings(QWidget):
         self._render_overlays.setChecked(config.render_overlays)
         self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
+        self._use_camera_stabilize.setChecked(config.use_camera_stabilize)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
         self._foot_pin_sensitivity.setCurrentIndex(

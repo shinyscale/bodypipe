@@ -545,3 +545,114 @@ def test_write_spring_metrics_json_verdict_neutral(tmp_path):
     )
     assert payload["verdict"] == "neutral"
     assert abs(payload["foot_skating_delta_m"]) < 1e-6
+
+
+# ----------------------------------------------------------------------
+# Pin taper (cosine blend at stance boundaries)
+# ----------------------------------------------------------------------
+
+
+def test_pin_offset_taper_no_discontinuity():
+    """Cosine taper should produce smooth transitions at stance boundaries.
+
+    Build two disjoint stance episodes with different offsets and check
+    that the per-frame step is bounded (no hard pop).
+    """
+    n = 60
+    anchors = np.zeros((n, 2, 3), dtype=np.float64)
+    toes = np.zeros((n, 2, 3), dtype=np.float64)
+    valid = np.zeros((n, 2), dtype=bool)
+
+    # Episode 1: frames 5-20, offset ~ (0.1, 0, 0)
+    anchors[5:21, 0] = [1.1, 0.0, 0.0]
+    toes[5:21, 0] = [1.0, 0.0, 0.0]
+    valid[5:21, 0] = True
+
+    # Episode 2: frames 35-55, offset ~ (0, 0, 0.2)
+    anchors[35:56, 0] = [0.0, 0.0, 0.2]
+    toes[35:56, 0] = [0.0, 0.0, 0.0]
+    valid[35:56, 0] = True
+
+    offset = compute_pin_offset(toes, anchors, valid, fps=30.0, smoothing_sigma_sec=0.1)
+    diffs = np.linalg.norm(np.diff(offset, axis=0), axis=-1)
+    # No single-frame step should exceed 2.5 cm (taper + Gaussian smoothing)
+    assert diffs.max() < 0.025
+
+
+def test_pin_offset_taper_interior_exact():
+    """Interior frames of a stance episode should still get the exact offset."""
+    n = 40
+    anchors = np.zeros((n, 2, 3), dtype=np.float64)
+    toes = np.zeros((n, 2, 3), dtype=np.float64)
+    valid = np.zeros((n, 2), dtype=bool)
+
+    # Episode: frames 5-35, offset = (0.05, 0, 0)
+    anchors[5:36, 0] = [1.05, 0.0, 0.0]
+    toes[5:36, 0] = [1.0, 0.0, 0.0]
+    valid[5:36, 0] = True
+
+    offset = compute_pin_offset(toes, anchors, valid, fps=30.0, taper_sec=0.067)
+    # At 30 fps, taper_frames = max(1, round(0.067*30)) = 2
+    # Interior frames (well inside) should have exact offset
+    interior = offset[10:30, 0]  # X component
+    np.testing.assert_allclose(interior, 0.05, atol=1e-10)
+
+
+def test_pin_offset_taper_edges_blended():
+    """Edge frames of a stance episode should be blended (not exact)
+    when the smoothed value differs from the exact offset."""
+    n = 60
+    anchors = np.zeros((n, 2, 3), dtype=np.float64)
+    toes = np.zeros((n, 2, 3), dtype=np.float64)
+    valid = np.zeros((n, 2), dtype=bool)
+
+    # Two episodes with different offsets so that interpolation between
+    # them causes the smoothed value to differ from exact at edges.
+    # Episode 1: frames 5-15, offset X = 0.2
+    anchors[5:16, 0] = [1.2, 0.0, 0.0]
+    toes[5:16, 0] = [1.0, 0.0, 0.0]
+    valid[5:16, 0] = True
+
+    # Episode 2: frames 40-55, offset X = 0.0
+    anchors[40:56, 0] = [1.0, 0.0, 0.0]
+    toes[40:56, 0] = [1.0, 0.0, 0.0]
+    valid[40:56, 0] = True
+
+    offset = compute_pin_offset(
+        toes, anchors, valid, fps=30.0, smoothing_sigma_sec=0.15, taper_sec=0.067
+    )
+    # Interior of episode 1 should be at or very near the exact offset
+    assert abs(offset[10, 0] - 0.2) < 1e-6
+    # Edge of episode 1 (frame 5) should be tapered — between smoothed
+    # and exact. The smoothed value at the edge is pulled by Gaussian
+    # bleed, so it should be less than the full 0.2 exact offset.
+    assert offset[5, 0] < 0.2 - 1e-6
+    assert offset[5, 0] > 0.0
+
+
+def test_pin_offset_taper_short_episode():
+    """A very short stance (2 frames) should still work without crash."""
+    n = 20
+    anchors = np.zeros((n, 2, 3), dtype=np.float64)
+    toes = np.zeros((n, 2, 3), dtype=np.float64)
+    valid = np.zeros((n, 2), dtype=bool)
+
+    # 2-frame episode
+    anchors[10:12, 0] = [1.05, 0.0, 0.0]
+    toes[10:12, 0] = [1.0, 0.0, 0.0]
+    valid[10:12, 0] = True
+
+    offset = compute_pin_offset(toes, anchors, valid, fps=30.0, taper_sec=0.067)
+    # Should not crash and should produce something reasonable
+    assert offset.shape == (n, 3)
+    # The 2-frame episode should have some positive X offset
+    assert offset[10, 0] > 0 or offset[11, 0] > 0
+
+
+def test_find_episodes_public_import():
+    """find_episodes (was _find_episodes) should be importable."""
+    from workers.spring_refine.contact import find_episodes
+
+    mask = np.array([False, True, True, False, True, False])
+    episodes = find_episodes(mask)
+    assert episodes == [(1, 2), (4, 4)]

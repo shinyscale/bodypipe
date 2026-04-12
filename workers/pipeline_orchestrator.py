@@ -216,6 +216,27 @@ class FullPipelineWorker(SubprocessWorkerBase):
 
             # Stage 4: Motion refinement (spring filter or dormant physics)
             self._emit_stage(4)
+            # Camera stabilization: re-derive world params from smoothed SLAM
+            if (
+                self._config.use_camera_stabilize
+                and world_params is not None
+                and results.get("gvhmr_pt")
+            ):
+                try:
+                    from workers.spring_refine.camera_stabilize import stabilize_world_params
+
+                    stabilized = stabilize_world_params(
+                        Path(results["gvhmr_pt"]),
+                        cam_smooth_preset=self._config.cam_smooth_preset,
+                        fps=float(self._fps),
+                    )
+                    if stabilized is not None:
+                        world_params["global_orient"] = stabilized["global_orient"]
+                        world_params["transl"] = stabilized["transl"]
+                        self.log_line.emit("Camera stabilization applied.")
+                except Exception as exc:
+                    self.log_line.emit(f"WARNING: Camera stabilization failed: {exc}")
+
             if (
                 (self._config.use_spring_refine or self._config.use_foot_pin)
                 and world_params is not None
@@ -1092,7 +1113,11 @@ class MultiPersonWorker(QThread):
                 timings.append(("HaMeR hands", time.monotonic() - t0))
 
             # ── Post-pipeline motion refinement (per-person) ──
-            if self._config.use_spring_refine or self._config.use_foot_pin:
+            if (
+                self._config.use_spring_refine
+                or self._config.use_foot_pin
+                or self._config.use_camera_stabilize
+            ):
                 t0 = time.monotonic()
                 self._run_spring_multi(result)
                 timings.append(("Spring refinement", time.monotonic() - t0))
@@ -1582,6 +1607,28 @@ class MultiPersonWorker(QThread):
 
             try:
                 params = extract_gvhmr_params(str(pt_path))
+
+                # Camera stabilization (per-person)
+                if self._config.use_camera_stabilize:
+                    try:
+                        from workers.spring_refine.camera_stabilize import stabilize_world_params
+
+                        stabilized = stabilize_world_params(
+                            pt_path,
+                            cam_smooth_preset=self._config.cam_smooth_preset,
+                            fps=float(self._fps),
+                        )
+                        if stabilized is not None:
+                            params["global_orient"] = stabilized["global_orient"]
+                            params["transl"] = stabilized["transl"]
+                            self.log_line.emit(
+                                f"[Spring] Person {i}: camera stabilization applied."
+                            )
+                    except Exception as stab_exc:
+                        self.log_line.emit(
+                            f"[Spring] Person {i}: camera stabilization failed: {stab_exc}"
+                        )
+
                 baseline_params = dict(params)
                 baseline_transl = (
                     np.asarray(params.get("transl")).copy()

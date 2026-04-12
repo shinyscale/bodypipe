@@ -84,7 +84,7 @@ def detect_contacts(
     return contacts, toes
 
 
-def _find_episodes(mask: np.ndarray) -> list[tuple[int, int]]:
+def find_episodes(mask: np.ndarray) -> list[tuple[int, int]]:
     """Return ``[(start, end_inclusive), ...]`` for contiguous True runs."""
     episodes: list[tuple[int, int]] = []
     n = int(mask.shape[0])
@@ -131,7 +131,7 @@ def track_stance_anchors(
     total_episodes = 0
 
     for foot in range(2):
-        episodes = _find_episodes(contacts[:, foot])
+        episodes = find_episodes(contacts[:, foot])
         for start, end in episodes:
             length = end - start + 1
             if length < min_stance_frames:
