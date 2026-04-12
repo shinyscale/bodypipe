@@ -97,9 +97,18 @@ def compute_pin_offset(
     else:
         smoothed = interpolated
 
-    # Cosine taper at stance boundaries: blend from smoothed to exact
-    # offset over ``taper_frames`` at each edge of a contact episode.
-    # Interior frames keep the exact per-frame offset.
+    # Smooth per-frame offsets *within* each stance episode to eliminate
+    # jumps at source transitions (e.g., both-feet average → one-foot-
+    # only).  Smoothing is restricted to each episode so it never bleeds
+    # across non-contact gaps.  A short Gaussian (~1.2 frames) only
+    # affects frames where the contributing-foot set changes.
+    transition_sigma = max(0.5, 0.04 * float(fps))  # ~1.2 frames at 30 fps
+    per_frame_smooth = per_frame.copy()
+
+    # Cosine taper at stance boundaries: blend from the long-range
+    # smoothed curve to the transition-smoothed per-frame offset over
+    # ``taper_frames`` at each edge of a contact episode.  Interior
+    # frames use the transition-smoothed offset (no hard overwrite).
     taper_frames = max(1, round(float(taper_sec) * float(fps)))
     out = smoothed.copy()
 
@@ -109,6 +118,13 @@ def compute_pin_offset(
 
     for start, end in episodes:
         length = end - start + 1
+
+        # Per-episode transition smoothing (isolated from other episodes)
+        if length > 2 and transition_sigma > 0:
+            chunk = per_frame[start : end + 1].copy()
+            chunk = gaussian_filter1d(chunk, sigma=transition_sigma, axis=0, mode="nearest")
+            per_frame_smooth[start : end + 1] = chunk
+
         # Half-taper at each end, clamped to not exceed half the episode
         half = min(taper_frames, length // 2) if length > 1 else 0
 
@@ -117,20 +133,20 @@ def compute_pin_offset(
             # Cosine ramp from 0 to 1
             alpha = 0.5 * (1.0 - np.cos(np.pi * (k + 1) / (half + 1)))
             t = start + k
-            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame[t]
+            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame_smooth[t]
 
-        # Interior: exact offset
+        # Interior: transition-smoothed offset
         interior_start = start + half
         interior_end = end - half + 1  # exclusive
         if interior_start < interior_end:
-            out[interior_start:interior_end] = per_frame[interior_start:interior_end]
+            out[interior_start:interior_end] = per_frame_smooth[interior_start:interior_end]
 
         # Trailing taper: frames (end - half, end]
         for k in range(half):
             # Cosine ramp from 1 to 0
             alpha = 0.5 * (1.0 - np.cos(np.pi * (half - k) / (half + 1)))
             t = end - k
-            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame[t]
+            out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame_smooth[t]
 
     return out
 
