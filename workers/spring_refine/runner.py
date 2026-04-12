@@ -97,12 +97,24 @@ def run_spring_refine(
     preset: str = "moderate",
     fps: float = 30.0,
     progress_cb: Callable[[float], None] | None = None,
+    pin_feet: bool = False,
+    filter_rotations: bool = True,
 ) -> tuple[dict, bool]:
     """Orchestrator-facing entry. Returns ``(refined_params, ok)``.
 
     On any missing required key, returns ``(world_params, False)`` —
     matching the contract used by ``workers.physics.phc_runner.run_phc_local``.
-    ``transl`` is passed through unchanged (v1 refines rotations only).
+
+    ``filter_rotations`` (v1): run the per-joint critically-damped IIR on
+    ``body_pose`` + ``global_orient``. When ``False``, the rotation
+    channels pass through unchanged — useful when the caller only wants
+    the foot-pin pass.
+
+    ``pin_feet`` (v2): after the rotation filter (if any), run the
+    contact-aware foot-pin pass. This modifies ``transl`` to anchor the
+    feet during stance episodes, fixing foot slide under camera moves.
+    Pin failure is non-fatal — we log into ``foot_pin_stats.error`` and
+    return the rotation-refined result with ``source="spring_refined"``.
     """
     try:
         body_pose = np.asarray(world_params["body_pose"])
@@ -110,22 +122,53 @@ def run_spring_refine(
     except (KeyError, TypeError):
         return world_params, False
 
-    if progress_cb is not None:
-        progress_cb(0.1)
-
-    try:
-        body_pose_filt, go_filt = refine_body_sequence(
-            body_pose, global_orient, fps=fps, preset=preset
-        )
-    except Exception:
+    # If the caller disabled both passes there is nothing to do — return
+    # a failure so the orchestrator can label the snapshot as baseline.
+    if not filter_rotations and not pin_feet:
         return world_params, False
 
     if progress_cb is not None:
-        progress_cb(1.0)
+        progress_cb(0.1)
+
+    if filter_rotations:
+        try:
+            body_pose_filt, go_filt = refine_body_sequence(
+                body_pose, global_orient, fps=fps, preset=preset
+            )
+        except Exception:
+            return world_params, False
+    else:
+        body_pose_filt = np.asarray(body_pose, dtype=np.float32)
+        go_filt = np.asarray(global_orient, dtype=np.float32)
 
     refined = dict(world_params)
     refined["body_pose"] = body_pose_filt
     refined["global_orient"] = go_filt
-    refined["source"] = "spring_refined"
     refined["num_frames"] = int(body_pose_filt.reshape(-1, 63).shape[0])
-    return refined, True
+    # Source tag reflects what we've actually done so far. Overwritten
+    # below if the foot-pin pass also runs successfully.
+    refined["source"] = "spring_refined"
+
+    pin_ok = False
+    if pin_feet:
+        if progress_cb is not None:
+            progress_cb(0.6)
+        try:
+            from .footpin import apply_foot_pin
+
+            refined, pin_stats = apply_foot_pin(
+                refined, fps=float(fps), preset=preset
+            )
+            refined["foot_pin_stats"] = pin_stats
+            refined["source"] = "spring_refined_pinned"
+            pin_ok = True
+        except Exception as exc:  # pragma: no cover - defensive
+            refined["foot_pin_stats"] = {"error": repr(exc)}
+            # Pin failure is non-fatal — keep the rotation-refined result.
+
+    if progress_cb is not None:
+        progress_cb(1.0)
+
+    # ok == True when we produced *something* different from the raw
+    # baseline (either filter ran, or pin ran, or both).
+    return refined, bool(filter_rotations or pin_ok)

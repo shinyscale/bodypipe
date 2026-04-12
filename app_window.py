@@ -2274,7 +2274,11 @@ class AppWindow(QMainWindow):
                 try:
                     data = torch.load(str(path), map_location="cpu", weights_only=False)
                     source_tag = data.get("source")
-                    if source_tag in ("phc_refined", "spring_refined"):
+                    if source_tag in (
+                        "phc_refined",
+                        "spring_refined",
+                        "spring_refined_pinned",
+                    ):
                         score += 100
                     if all(
                         key in data
@@ -2438,6 +2442,7 @@ class AppWindow(QMainWindow):
             if world_physics is None and hybrid_data.get("source") in (
                 "phc_refined",
                 "spring_refined",
+                "spring_refined_pinned",
             ):
                 world_physics = _copy_motion_dict(
                     hybrid_data, "global_orient_world", "body_pose_world", "transl_world"
@@ -2447,6 +2452,7 @@ class AppWindow(QMainWindow):
             if world_physics is None and results_source in (
                 "phc_refined",
                 "spring_refined",
+                "spring_refined_pinned",
             ):
                 world_physics = results_world_generic or results_refined_generic
 

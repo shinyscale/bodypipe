@@ -2161,10 +2161,15 @@ class MeshViewport(_BaseWidget):
                 # under the *_world_physics triad for viewport compat, but
                 # the source tag lets us report the correct refiner.
                 parts.append("spring refined")
+            elif source_tag == "spring_refined_pinned":
+                # v2 foot-pinned spring output. Same plumbing as
+                # ``spring_refined``, just the tag is distinct so users can
+                # see at a glance that the contact-aware pin pass ran.
+                parts.append("spring refined (pinned)")
         if source == "world_baseline" and sources.get("world_physics") is None:
             if source_tag == "phc_refined":
                 parts.append("physics expected but artifact missing")
-            elif source_tag == "spring_refined":
+            elif source_tag in ("spring_refined", "spring_refined_pinned"):
                 parts.append("spring expected but artifact missing")
             else:
                 parts.append("world physics missing")

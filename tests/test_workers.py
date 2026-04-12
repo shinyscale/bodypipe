@@ -1745,6 +1745,161 @@ class TestSpringRefine:
         picked = MultiPersonWorker._candidate_gvhmr_pt(person_dir)
         assert picked == good_pt
 
+    def test_run_spring_refine_pin_feet_path(self, qapp, tmp_path):
+        """Foot-pin pass: source tag should flip to spring_refined_pinned
+        and a metrics.json should land in output_dir/spring_refine/.
+        """
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(
+                use_spring_refine=True,
+                use_foot_pin=True,
+                spring_refine_preset="moderate",
+            ),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        n = 60
+        slide = np.zeros((n, 3), dtype=np.float32)
+        slide[:, 0] = np.linspace(0.0, 0.4, n, dtype=np.float32)
+        world_params = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": slide,
+        }
+        refined, ok = worker._run_spring_refine(world_params)
+        assert ok is True
+        assert refined["source"] == "spring_refined_pinned"
+        metrics_path = worker._output_dir / "spring_refine" / "metrics.json"
+        assert metrics_path.is_file()
+        import json
+        payload = json.loads(metrics_path.read_text())
+        assert payload["pin_enabled"] is True
+        assert payload["verdict"] in ("improved", "neutral", "worse")
+
+    def test_run_spring_refine_pin_disabled_still_writes_metrics(
+        self, qapp, tmp_path
+    ):
+        worker = FullPipelineWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(
+                use_spring_refine=True,
+                use_foot_pin=False,
+                spring_refine_preset="moderate",
+            ),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+        worker._output_dir.mkdir(parents=True, exist_ok=True)
+        worker._fps = 30.0
+
+        n = 30
+        world_params = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": np.zeros((n, 3), dtype=np.float32),
+        }
+        refined, ok = worker._run_spring_refine(world_params)
+        assert ok is True
+        assert refined["source"] == "spring_refined"
+        metrics_path = worker._output_dir / "spring_refine" / "metrics.json"
+        assert metrics_path.is_file()
+
+    def test_run_spring_multi_pin_feet_path(self, qapp, tmp_path):
+        """Multi-person pin pass: each person gets a metrics.json and the
+        hmr4d_results.pt source tag flips to spring_refined_pinned.
+        """
+        import torch
+
+        person_dir = tmp_path / "person_0"
+        hmr_dir = person_dir / "demo" / "isolated_video"
+        hmr_dir.mkdir(parents=True)
+        pt_path = hmr_dir / "hmr4d_results.pt"
+
+        n = 60
+        slide = torch.zeros((n, 3), dtype=torch.float32)
+        slide[:, 0] = torch.linspace(0.0, 0.4, n)
+        torch.save(
+            {
+                "smpl_params_global": {
+                    "global_orient": torch.zeros((n, 3), dtype=torch.float32),
+                    "body_pose": torch.zeros((n, 63), dtype=torch.float32),
+                    "transl": slide,
+                    "betas": torch.zeros((n, 10), dtype=torch.float32),
+                },
+            },
+            pt_path,
+        )
+
+        worker = MultiPersonWorker(
+            tmp_path / "video.mp4",
+            PipelineConfig(
+                use_spring_refine=True,
+                use_foot_pin=True,
+                spring_refine_preset="moderate",
+            ),
+            tmp_path / "GVHMR",
+            tmp_path / "out",
+        )
+
+        import sys
+        from unittest.mock import patch, MagicMock
+
+        extracted = {
+            "num_frames": n,
+            "global_orient": np.zeros((n, 3), dtype=np.float32),
+            "body_pose": np.zeros((n, 21, 3), dtype=np.float32),
+            "transl": slide.numpy(),
+        }
+        modules = {
+            "smplx_to_bvh": MagicMock(
+                extract_gvhmr_params=MagicMock(return_value=extracted)
+            ),
+            "multi_person_split": MagicMock(
+                _export_person_bvh=MagicMock(return_value=person_dir / "p.bvh")
+            ),
+        }
+        result = type("Result", (), {"person_dirs": [person_dir]})()
+        with patch.dict(sys.modules, modules):
+            worker._run_spring_multi(result)
+
+        persisted = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        assert persisted["source"] == "spring_refined_pinned"
+        assert "transl_world_spring_unpin" in persisted
+        metrics_path = person_dir / "spring_refine" / "metrics.json"
+        assert metrics_path.is_file()
+        import json
+        payload = json.loads(metrics_path.read_text())
+        assert payload["pin_enabled"] is True
+        assert "verdict" in payload
+        assert "foot_skating_delta_m" in payload
+
+    def test_save_merged_pt_persists_transl_world_spring_unpin(self, tmp_path):
+        import torch
+        params = {
+            "num_frames": 4,
+            "global_orient": np.zeros((4, 3), dtype=np.float32),
+            "body_pose": np.zeros((4, 21, 3), dtype=np.float32),
+            "left_hand_pose": np.zeros((4, 15, 3), dtype=np.float32),
+            "right_hand_pose": np.zeros((4, 15, 3), dtype=np.float32),
+            "transl": np.ones((4, 3), dtype=np.float32),
+            "transl_world_spring": np.ones((4, 3), dtype=np.float32) * 2,
+            "transl_world_spring_unpin": np.ones((4, 3), dtype=np.float32) * 3,
+        }
+        out_path = tmp_path / "merged.pt"
+        save_merged_pt(params, out_path)
+        loaded = torch.load(str(out_path), map_location="cpu", weights_only=False)
+        assert "transl_world_spring_unpin" in loaded
+        assert torch.allclose(
+            loaded["transl_world_spring_unpin"],
+            torch.full((4, 3), 3.0, dtype=torch.float32),
+        )
+
 
 # ---------------------------------------------------------------------------
 # extract_bboxes_from_output (module-level helper)

@@ -240,6 +240,29 @@ class TestPipelineConfig:
         assert d["use_spring_refine"] is True
         assert d["spring_refine_preset"] == "light"
 
+    def test_use_foot_pin_default_false(self):
+        """v2 foot-pin flag is off by default so existing configs don't change behaviour."""
+        c = PipelineConfig()
+        assert c.use_foot_pin is False
+
+    def test_use_foot_pin_round_trip(self, tmp_path):
+        """use_foot_pin should persist through save/load and survive from_dict."""
+        c = PipelineConfig(mode="perf", use_foot_pin=True)
+        path = tmp_path / "config.json"
+        c.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.use_foot_pin is True
+
+    def test_use_foot_pin_in_to_dict(self):
+        c = PipelineConfig(use_foot_pin=True)
+        d = c.to_dict()
+        assert d.get("use_foot_pin") is True
+
+    def test_use_foot_pin_from_dict_preserved(self):
+        """Unlike physics, foot-pin is not force-disabled on load."""
+        c = PipelineConfig.from_dict({"mode": "perf", "use_foot_pin": True})
+        assert c.use_foot_pin is True
+
 
 class TestUndoStack:
     """Tests for UndoStack — the command-pattern undo/redo engine.

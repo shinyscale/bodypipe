@@ -9,6 +9,20 @@ are non-viable (WSL2 + Blackwell sm_120).
 
 from __future__ import annotations
 
+from .footpin import apply_foot_pin, compute_pin_offset
+from .metrics import (
+    classify_verdict,
+    compute_foot_skating_meters,
+    write_spring_metrics_json,
+)
 from .runner import refine_body_sequence, run_spring_refine
 
-__all__ = ["refine_body_sequence", "run_spring_refine"]
+__all__ = [
+    "apply_foot_pin",
+    "classify_verdict",
+    "compute_foot_skating_meters",
+    "compute_pin_offset",
+    "refine_body_sequence",
+    "run_spring_refine",
+    "write_spring_metrics_json",
+]

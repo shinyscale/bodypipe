@@ -513,6 +513,24 @@ class TestPerfMotionRefinementGroup:
         w._set_running(True)
         assert not w._use_spring.isEnabled()
         assert not w._spring_preset.isEnabled()
+        assert not w._use_foot_pin.isEnabled()
+
+    def test_has_foot_pin_checkbox(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_foot_pin")
+        cfg = w.get_config()
+        assert cfg.use_foot_pin is False
+
+    def test_foot_pin_round_trip(self, qapp):
+        session = Session()
+        w = PerfPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(
+            PipelineConfig(mode="perf", use_foot_pin=True, use_spring_refine=True)
+        )
+        assert w.get_config().use_foot_pin is True
+        w.set_config(PipelineConfig(mode="perf", use_foot_pin=False))
+        assert w.get_config().use_foot_pin is False
 
     def test_visible_stages_include_motion_when_spring_on(self, qapp):
         session = Session()
@@ -556,6 +574,22 @@ class TestMultiMotionRefinementGroup:
         w._set_running(True)
         assert not w._use_spring.isEnabled()
         assert not w._spring_preset.isEnabled()
+        assert not w._use_foot_pin.isEnabled()
+
+    def test_has_foot_pin_checkbox(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        assert hasattr(w, "_use_foot_pin")
+        cfg = w.get_config()
+        assert cfg.use_foot_pin is False
+
+    def test_foot_pin_round_trip(self, qapp):
+        session = Session()
+        w = MultiPipelineSettings(session, Path("/tmp/GVHMR"))
+        w.set_config(
+            PipelineConfig(mode="multi", use_foot_pin=True, use_spring_refine=True)
+        )
+        assert w.get_config().use_foot_pin is True
 
 
 # ===========================================================================

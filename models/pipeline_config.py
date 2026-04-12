@@ -37,6 +37,7 @@ class PipelineConfig:
     use_physics_refine: bool = False
     use_spring_refine: bool = False
     spring_refine_preset: str = "moderate"  # "light" | "moderate" | "heavy"
+    use_foot_pin: bool = False
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
 
     def to_dict(self) -> dict:
@@ -64,6 +65,7 @@ class PipelineConfig:
             "use_physics_refine": self.use_physics_refine,
             "use_spring_refine": self.use_spring_refine,
             "spring_refine_preset": self.spring_refine_preset,
+            "use_foot_pin": self.use_foot_pin,
             "cam_smooth_preset": self.cam_smooth_preset,
         }
 

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QComboBox,
+    QFrame,
     QSizePolicy,
 )
 from PySide6.QtCore import Signal, Qt
@@ -656,6 +657,23 @@ class PerfPipelineSettings(SinglePipelineSettings):
         )
         motion_layout.addWidget(self._spring_preset)
 
+        # Contact-aware foot pinning (v2). Independent of the spring
+        # preset combo — preset only affects the rotation filter.
+        _pin_sep = QFrame()
+        _pin_sep.setFrameShape(QFrame.HLine)
+        _pin_sep.setFrameShadow(QFrame.Sunken)
+        motion_layout.addWidget(_pin_sep)
+        self._use_foot_pin = QCheckBox("Pin feet during contact")
+        self._use_foot_pin.setChecked(False)
+        self._use_foot_pin.setToolTip(
+            "Detect foot contact frames and snap the foot to a fixed world\n"
+            "position during each stance episode. Fixes foot sliding under\n"
+            "camera moves. Applied after the spring filter. Heuristic contact\n"
+            "detection — works independently of the spring filter, so can\n"
+            "be enabled alone."
+        )
+        motion_layout.addWidget(self._use_foot_pin)
+
         self._left_layout.insertWidget(run_idx + 2, motion_group)
 
         # Pipeline output settings group
@@ -834,7 +852,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         use_hands = self._use_hands.isChecked()
         use_face = self._use_face.isChecked()
-        use_motion = self._use_spring.isChecked()
+        use_motion = self._use_spring.isChecked() or self._use_foot_pin.isChecked()
 
         visible = map_stage_label(stage, use_hands, use_face, use_motion)
         if visible is not None:
@@ -860,13 +878,14 @@ class PerfPipelineSettings(SinglePipelineSettings):
             stages = compute_visible_stages(
                 self._use_hands.isChecked(),
                 self._use_face.isChecked(),
-                self._use_spring.isChecked(),
+                self._use_spring.isChecked() or self._use_foot_pin.isChecked(),
             )
             self._progress_label.setText(f"Stage 1/{len(stages)}: Body")
         self._use_hands.setEnabled(not running)
         self._use_face.setEnabled(not running)
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
+        self._use_foot_pin.setEnabled(not running)
         self._use_vitpose_face.setEnabled(not running)
         self._hand_hybrid.setEnabled(not running and self._use_hands.isChecked())
         self._hand_smplestx.setEnabled(not running and self._use_hands.isChecked())
@@ -931,6 +950,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             body_model=bm,
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
+            use_foot_pin=self._use_foot_pin.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -939,6 +959,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
         self._use_spring.setChecked(config.use_spring_refine)
+        self._use_foot_pin.setChecked(config.use_foot_pin)
         spring_map = {"light": 0, "moderate": 1, "heavy": 2}
         self._spring_preset.setCurrentIndex(
             spring_map.get(config.spring_refine_preset, 1)
@@ -1171,6 +1192,21 @@ class MultiPipelineSettings(QWidget):
         )
         mp_layout.addWidget(self._spring_preset)
 
+        _mp_pin_sep = QFrame()
+        _mp_pin_sep.setFrameShape(QFrame.HLine)
+        _mp_pin_sep.setFrameShadow(QFrame.Sunken)
+        mp_layout.addWidget(_mp_pin_sep)
+        self._use_foot_pin = QCheckBox("Pin feet during contact")
+        self._use_foot_pin.setChecked(False)
+        self._use_foot_pin.setToolTip(
+            "Detect foot contact frames and snap the foot to a fixed world\n"
+            "position during each stance episode. Fixes foot sliding under\n"
+            "camera moves. Applied after the spring filter. Heuristic contact\n"
+            "detection — works independently of the spring filter, so can\n"
+            "be enabled alone."
+        )
+        mp_layout.addWidget(self._use_foot_pin)
+
         layout.addWidget(mp_group)
 
         # Run / Cancel / Progress
@@ -1372,6 +1408,7 @@ class MultiPipelineSettings(QWidget):
         self._use_hands.setEnabled(not running)
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
+        self._use_foot_pin.setEnabled(not running)
         self._hand_src_smplestx.setEnabled(not running and self._use_hands.isChecked())
         self._hand_src_hamer.setEnabled(not running and self._use_hands.isChecked())
         if not running:
@@ -1435,6 +1472,7 @@ class MultiPipelineSettings(QWidget):
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
+            use_foot_pin=self._use_foot_pin.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
@@ -1451,6 +1489,7 @@ class MultiPipelineSettings(QWidget):
         self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
         self._use_spring.setChecked(config.use_spring_refine)
+        self._use_foot_pin.setChecked(config.use_foot_pin)
         spring_map = {"light": 0, "moderate": 1, "heavy": 2}
         self._spring_preset.setCurrentIndex(
             spring_map.get(config.spring_refine_preset, 1)

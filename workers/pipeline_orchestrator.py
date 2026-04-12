@@ -82,6 +82,7 @@ def save_merged_pt(params: dict, output_path: Path) -> Path:
         "global_orient_cam", "global_orient_world",
         "body_pose_cam", "body_pose_world",
         "transl_world_baseline", "transl_world_physics", "transl_world_spring",
+        "transl_world_spring_unpin",
         "global_orient_world_baseline", "global_orient_world_physics",
         "global_orient_world_spring",
         "body_pose_world_baseline", "body_pose_world_physics",
@@ -215,11 +216,19 @@ class FullPipelineWorker(SubprocessWorkerBase):
 
             # Stage 4: Motion refinement (spring filter or dormant physics)
             self._emit_stage(4)
-            if self._config.use_spring_refine and world_params is not None:
+            if (
+                (self._config.use_spring_refine or self._config.use_foot_pin)
+                and world_params is not None
+            ):
                 world_params, spring_ok = self._run_spring_refine(world_params)
                 if spring_ok:
+                    snapshot_source = (
+                        "spring_refined_pinned"
+                        if world_params.get("source") == "spring_refined_pinned"
+                        else "spring_refined"
+                    )
                     self._save_viewport_params_snapshot(
-                        results, world_params, camera_params, source="spring_refined"
+                        results, world_params, camera_params, source=snapshot_source
                     )
             elif self._config.use_physics_refine and world_params is not None:
                 world_params, physics_refined_ok = self._run_physics_refine(world_params)
@@ -498,12 +507,23 @@ class FullPipelineWorker(SubprocessWorkerBase):
         returned with ``ok=False`` so downstream stages still have valid
         data, but the caller can tell whether to label a viewport snapshot
         as refined.
+
+        v2: honours ``use_foot_pin`` by passing the flag through to
+        ``run_spring_refine`` and writes a ``spring_refine/metrics.json``
+        with before/after foot-skating in meters.
         """
+        import numpy as np
+
         try:
             from workers.spring_refine import run_spring_refine
         except ImportError as exc:
             self.log_line.emit(f"WARNING: Spring refine module not available: {exc}")
             return world_params, False
+
+        # Preserve the pre-refine baseline so we can compute metrics and
+        # persist a pre-pin transl alongside the pinned output.
+        baseline_params = dict(world_params)
+        baseline_transl = np.asarray(world_params.get("transl")).copy() if world_params.get("transl") is not None else None
 
         progress_cb = self._stage_progress_callback(4)
         try:
@@ -513,16 +533,57 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 preset=self._config.spring_refine_preset,
                 fps=float(self._fps),
                 progress_cb=lambda f: progress_cb(0.1 + 0.8 * f, "Running spring filter..."),
+                pin_feet=bool(self._config.use_foot_pin),
+                filter_rotations=bool(self._config.use_spring_refine),
             )
             if not ok:
                 self.log_line.emit(
                     "WARNING: Spring refine returned no data, using original params."
                 )
                 return world_params, False
+
+            # Persist the pre-pin transl alongside the pinned output so
+            # future A/B diffs don't require a re-run. Only meaningful
+            # when the pin ran — otherwise the two would be identical.
+            if (
+                self._config.use_foot_pin
+                and refined.get("source") == "spring_refined_pinned"
+                and baseline_transl is not None
+            ):
+                refined["transl_world_spring_unpin"] = baseline_transl
+
+            # Write metrics JSON (before/after foot skating + verdict).
+            try:
+                from workers.spring_refine import write_spring_metrics_json
+
+                metrics_dir = self._output_dir / "spring_refine"
+                metrics_path = metrics_dir / "metrics.json"
+                payload = write_spring_metrics_json(
+                    baseline_params=baseline_params,
+                    refined_params=refined,
+                    fps=float(self._fps),
+                    preset=self._config.spring_refine_preset,
+                    pin_enabled=bool(self._config.use_foot_pin),
+                    out_path=metrics_path,
+                    pin_stats=refined.get("foot_pin_stats"),
+                )
+                verdict = payload.get("verdict", "unknown")
+                delta = payload.get("foot_skating_delta_m")
+                delta_str = f"{delta * 100:.2f} cm" if isinstance(delta, (int, float)) and not np.isnan(delta) else "n/a"
+                self.log_line.emit(
+                    f"Spring verdict: {verdict.upper()} "
+                    f"(foot-skating delta={delta_str}) -> {metrics_path}"
+                )
+            except Exception as metrics_exc:
+                self.log_line.emit(
+                    f"WARNING: Spring metrics failed: {metrics_exc}"
+                )
+
             progress_cb(1.0, "Spring refinement complete")
             self.log_line.emit(
                 f"Spring refinement: {refined['num_frames']} frames, "
-                f"preset={self._config.spring_refine_preset}"
+                f"preset={self._config.spring_refine_preset}, "
+                f"pin={'on' if self._config.use_foot_pin else 'off'}"
             )
             return refined, True
         except Exception as exc:
@@ -583,7 +644,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
             snapshot.setdefault("global_orient_world_physics", snapshot["global_orient_world"])
             snapshot.setdefault("body_pose_world_physics", snapshot["body_pose_world"])
             snapshot.setdefault("transl_world_physics", snapshot["transl_world"])
-            if source == "spring_refined":
+            if source in ("spring_refined", "spring_refined_pinned"):
                 snapshot.setdefault("global_orient_world_spring", snapshot["global_orient_world"])
                 snapshot.setdefault("body_pose_world_spring", snapshot["body_pose_world"])
                 snapshot.setdefault("transl_world_spring", snapshot["transl_world"])
@@ -1029,7 +1090,7 @@ class MultiPersonWorker(QThread):
                 timings.append(("HaMeR hands", time.monotonic() - t0))
 
             # ── Post-pipeline motion refinement (per-person) ──
-            if self._config.use_spring_refine:
+            if self._config.use_spring_refine or self._config.use_foot_pin:
                 t0 = time.monotonic()
                 self._run_spring_multi(result)
                 timings.append(("Spring refinement", time.monotonic() - t0))
@@ -1479,7 +1540,10 @@ class MultiPersonWorker(QThread):
         compatibility), persists a viewport snapshot, and re-exports BVH.
         """
         try:
-            from workers.spring_refine import run_spring_refine
+            from workers.spring_refine import (
+                run_spring_refine,
+                write_spring_metrics_json,
+            )
             from smplx_to_bvh import extract_gvhmr_params
         except ImportError as exc:
             self.log_line.emit(f"WARNING: Spring refine modules not available: {exc}")
@@ -1494,7 +1558,12 @@ class MultiPersonWorker(QThread):
 
         total = len(person_dirs)
         preset = self._config.spring_refine_preset
-        self.progress.emit(0.85, f"Spring refinement ({total} persons, preset={preset})...")
+        pin_enabled = bool(self._config.use_foot_pin)
+        filter_enabled = bool(self._config.use_spring_refine)
+        self.progress.emit(
+            0.85,
+            f"Spring refinement ({total} persons, preset={preset}, pin={'on' if pin_enabled else 'off'})...",
+        )
 
         for i, person_dir in enumerate(person_dirs):
             if self._cancelled:
@@ -1511,8 +1580,18 @@ class MultiPersonWorker(QThread):
 
             try:
                 params = extract_gvhmr_params(str(pt_path))
+                baseline_params = dict(params)
+                baseline_transl = (
+                    np.asarray(params.get("transl")).copy()
+                    if params.get("transl") is not None
+                    else None
+                )
                 refined, ok = run_spring_refine(
-                    params, preset=preset, fps=float(self._fps)
+                    params,
+                    preset=preset,
+                    fps=float(self._fps),
+                    pin_feet=pin_enabled,
+                    filter_rotations=filter_enabled,
                 )
                 if not ok:
                     self.log_line.emit(
@@ -1591,7 +1670,15 @@ class MultiPersonWorker(QThread):
                     data["body_pose_world_baseline"] = baseline_bp
                 if baseline_tr is not None:
                     data["transl_world_baseline"] = baseline_tr
-                data["source"] = "spring_refined"
+                pinned = refined.get("source") == "spring_refined_pinned"
+                if pinned and baseline_transl is not None:
+                    data["transl_world_spring_unpin"] = torch.tensor(
+                        np.asarray(baseline_transl).reshape(n, -1),
+                        dtype=torch.float32,
+                    )
+                data["source"] = (
+                    "spring_refined_pinned" if pinned else "spring_refined"
+                )
                 torch.save(data, str(pt_path))
 
                 snapshot_path: Path | None = None
@@ -1604,9 +1691,37 @@ class MultiPersonWorker(QThread):
                         f"[Spring] Person {i}: snapshot write failed — {snap_exc}"
                     )
 
+                # Per-person metrics JSON (baseline vs refined foot skating).
+                try:
+                    metrics_path = person_dir / "spring_refine" / "metrics.json"
+                    payload = write_spring_metrics_json(
+                        baseline_params=baseline_params,
+                        refined_params=refined,
+                        fps=float(self._fps),
+                        preset=preset,
+                        pin_enabled=pin_enabled,
+                        out_path=metrics_path,
+                        pin_stats=refined.get("foot_pin_stats"),
+                    )
+                    verdict = payload.get("verdict", "unknown")
+                    delta = payload.get("foot_skating_delta_m")
+                    delta_str = (
+                        f"{delta * 100:.2f} cm"
+                        if isinstance(delta, (int, float)) and not np.isnan(delta)
+                        else "n/a"
+                    )
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: verdict={verdict.upper()} "
+                        f"(delta={delta_str}) -> {metrics_path.name}"
+                    )
+                except Exception as metrics_exc:
+                    self.log_line.emit(
+                        f"[Spring] Person {i}: metrics write failed — {metrics_exc}"
+                    )
+
                 self.log_line.emit(
                     f"[Spring] Person {i}: refined {n} frames "
-                    f"(preset={preset}) -> {pt_path.name}"
+                    f"(preset={preset}, pin={'on' if pin_enabled else 'off'}) -> {pt_path.name}"
                 )
                 if snapshot_path is not None:
                     self.log_line.emit(
@@ -1655,6 +1770,7 @@ class MultiPersonWorker(QThread):
             "global_orient_world_spring",
             "body_pose_world_spring",
             "transl_world_spring",
+            "transl_world_spring_unpin",
             "left_hand_pose",
             "right_hand_pose",
             "left_wrist_orient",
