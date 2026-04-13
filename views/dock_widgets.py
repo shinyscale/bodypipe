@@ -19,13 +19,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from theme import COLORS
 
 if TYPE_CHECKING:
@@ -193,6 +194,33 @@ class PersonPanelDock(QDockWidget):
         layout.setSpacing(0)
 
         layout.addWidget(person_bar)
+
+        # Keyframe navigation bar — always visible regardless of active tab
+        kf_bar = QHBoxLayout()
+        kf_bar.setContentsMargins(4, 2, 4, 2)
+        kf_bar.setSpacing(4)
+
+        self._prev_kf_btn = QPushButton("\u25c4 Prev KF")
+        self._prev_kf_btn.setToolTip("Navigate to previous keyframe")
+        self._prev_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        kf_bar.addWidget(self._prev_kf_btn)
+
+        self._add_kf_btn = QPushButton("+ Add KF")
+        self._add_kf_btn.setToolTip("Add keyframe at current frame")
+        self._add_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        kf_bar.addWidget(self._add_kf_btn)
+
+        self._next_kf_btn = QPushButton("Next KF \u25ba")
+        self._next_kf_btn.setToolTip("Navigate to next keyframe")
+        self._next_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        kf_bar.addWidget(self._next_kf_btn)
+
+        layout.addLayout(kf_bar)
+
+        # Wire buttons to identity inspector's existing logic
+        self._prev_kf_btn.clicked.connect(identity_inspector._on_prev_keyframe)
+        self._add_kf_btn.clicked.connect(identity_inspector._on_add_keyframe)
+        self._next_kf_btn.clicked.connect(identity_inspector._on_next_keyframe)
 
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)

@@ -335,19 +335,6 @@ class IdentityInspector(QWidget):
 
         kf_layout.addLayout(kf_buttons)
 
-        # Keyframe navigation buttons
-        kf_nav = QHBoxLayout()
-
-        self._prev_kf_btn = QPushButton("\u25c4 Prev KF")
-        self._prev_kf_btn.setToolTip("Navigate to previous keyframe")
-        kf_nav.addWidget(self._prev_kf_btn)
-
-        self._next_kf_btn = QPushButton("\u25ba Next KF")
-        self._next_kf_btn.setToolTip("Navigate to next keyframe")
-        kf_nav.addWidget(self._next_kf_btn)
-
-        kf_layout.addLayout(kf_nav)
-
         layout.addWidget(kf_group)
 
         # ---- BBox Editing ----
@@ -525,8 +512,6 @@ class IdentityInspector(QWidget):
         self._verify_btn.clicked.connect(self._on_verify)
         self._add_kf_btn.clicked.connect(self._on_add_keyframe)
         self._remove_kf_btn.clicked.connect(self._on_remove_keyframe)
-        self._prev_kf_btn.clicked.connect(self._on_prev_keyframe)
-        self._next_kf_btn.clicked.connect(self._on_next_keyframe)
         self._keyframe_table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self._edit_bbox_btn.clicked.connect(self._on_edit_bbox)
         self._cancel_edit_btn.clicked.connect(self._on_cancel_edit)

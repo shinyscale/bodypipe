@@ -133,11 +133,12 @@ class TestIdentityInspectorConstruction:
         panel = IdentityInspector(session)
         assert panel._remove_kf_btn is not None
 
-    def test_has_prev_next_buttons(self, qapp):
+    def test_has_prev_next_keyframe_methods(self, qapp):
+        """Prev/next KF nav methods exist (buttons moved to PersonPanelDock)."""
         session = Session()
         panel = IdentityInspector(session)
-        assert panel._prev_kf_btn is not None
-        assert panel._next_kf_btn is not None
+        assert callable(panel._on_prev_keyframe)
+        assert callable(panel._on_next_keyframe)
 
     def test_has_expected_signals(self, qapp):
         session = Session()
