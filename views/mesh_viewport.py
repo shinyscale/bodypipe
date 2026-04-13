@@ -1122,7 +1122,7 @@ class _ViewportHUD(QWidget):
         self._source_text = ""
         self._mesh_text = ""
 
-        self.setFixedSize(420, 140)
+        self.setFixedSize(200, 100)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -1386,7 +1386,7 @@ class MeshViewport(_BaseWidget):
         # HUD overlay (Phase 10) — positioned bottom-right
         self._hud = _ViewportHUD(self)
         self._hud.hide()
-        self._hud_enabled = True  # toggleable via View menu
+        self._hud_enabled = False  # off by default; toggle via View > Toggle HUD (Ctrl+H)
         self.setMouseTracking(True)  # enable mouseMoveEvent without button held
 
     def _setup_fallback(self):
@@ -2404,8 +2404,8 @@ class MeshViewport(_BaseWidget):
                 self.joint_clicked.emit(hit)
                 if _HAS_GL:
                     self.update()
-                # Shift+click on pelvis (joint 0) → root drag mode
-                if hit == 0 and event.modifiers() & Qt.ShiftModifier:
+                # Shift+click on any joint → root drag (position correction)
+                if event.modifiers() & Qt.ShiftModifier and 0 <= hit <= 21:
                     self._drag_mode = "root_drag"
                     self._drag_joint = 0
                     self._root_drag_offset = np.zeros(3, dtype=np.float32)
