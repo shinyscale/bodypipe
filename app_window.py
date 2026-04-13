@@ -933,7 +933,7 @@ class AppWindow(QMainWindow):
         self._toggle_hud_action = QAction("Toggle &HUD Overlay", self)
         self._toggle_hud_action.setShortcut("Ctrl+H")
         self._toggle_hud_action.setCheckable(True)
-        self._toggle_hud_action.setChecked(True)
+        self._toggle_hud_action.setChecked(False)
         self._toggle_hud_action.toggled.connect(self._on_toggle_hud)
         self._view_menu.addAction(self._toggle_hud_action)
 

@@ -210,6 +210,11 @@ class PersonPanelDock(QDockWidget):
         self._add_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         kf_bar.addWidget(self._add_kf_btn)
 
+        self._remove_kf_btn = QPushButton("- Remove KF")
+        self._remove_kf_btn.setToolTip("Remove keyframe at current frame")
+        self._remove_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        kf_bar.addWidget(self._remove_kf_btn)
+
         self._next_kf_btn = QPushButton("Next KF \u25ba")
         self._next_kf_btn.setToolTip("Navigate to next keyframe")
         self._next_kf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -220,6 +225,7 @@ class PersonPanelDock(QDockWidget):
         # Wire buttons to identity inspector's existing logic
         self._prev_kf_btn.clicked.connect(identity_inspector._on_prev_keyframe)
         self._add_kf_btn.clicked.connect(identity_inspector._on_add_keyframe)
+        self._remove_kf_btn.clicked.connect(identity_inspector._on_remove_keyframe)
         self._next_kf_btn.clicked.connect(identity_inspector._on_next_keyframe)
 
         self._tabs = QTabWidget()
