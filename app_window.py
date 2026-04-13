@@ -301,27 +301,105 @@ def _align_slam_to_world(slam_w2c, body_c2w, n_refs=10):
     return aligned
 
 
+def _convert_wrist_orient_to_local(
+    params: dict,
+    camera_global_orient: np.ndarray | None = None,
+) -> None:
+    """Convert global-frame wrist_orient to local (relative-to-elbow).
+
+    HaMeR's wrist_orient is MANO global_orient (absolute camera-space).
+    SMPL-X body_pose expects local rotations relative to parent joint.
+    Walk FK chain root->elbow per frame to get the parent's accumulated
+    rotation, then factor it out.
+
+    Parameters
+    ----------
+    params : dict
+        Must contain ``body_pose`` and either ``global_orient`` or the
+        caller must supply *camera_global_orient*.  ``left_wrist_orient``
+        and/or ``right_wrist_orient`` are converted in-place.
+    camera_global_orient : array, optional
+        Camera-space global_orient to use for the FK chain root.  Required
+        when *params* holds world-space ``global_orient`` (which would be
+        the wrong frame for camera-space wrist_orient).
+    """
+    from scipy.spatial.transform import Rotation
+
+    go = camera_global_orient if camera_global_orient is not None else params.get("global_orient")
+    bp = params.get("body_pose")
+    if go is None or bp is None:
+        return
+
+    go = np.asarray(go, dtype=np.float64)
+    bp = np.asarray(bp, dtype=np.float64)
+    if bp.ndim == 2 and bp.shape[-1] != 3:
+        bp = bp.reshape(bp.shape[0], -1, 3)
+
+    N = go.shape[0]
+
+    # Body-pose indices (0-based) for the chain from pelvis to each elbow.
+    # SMPL-X joint_id -> body_pose_index = joint_id - 1
+    _L_CHAIN = [2, 5, 8, 12, 15, 17]  # Spine1,Spine2,Spine3,L_Collar,L_Shoulder,L_Elbow
+    _R_CHAIN = [2, 5, 8, 13, 16, 18]  # Spine1,Spine2,Spine3,R_Collar,R_Shoulder,R_Elbow
+
+    for chain, key in [
+        (_L_CHAIN, "left_wrist_orient"),
+        (_R_CHAIN, "right_wrist_orient"),
+    ]:
+        wo = params.get(key)
+        if wo is None:
+            continue
+        wo = np.asarray(wo, dtype=np.float64)
+        if wo.ndim == 1:
+            wo = wo[np.newaxis]
+
+        n_use = min(N, wo.shape[0])
+        for t in range(n_use):
+            # Accumulate rotations: root global_orient, then each chain joint
+            R_acc = Rotation.from_rotvec(go[t].ravel()[:3])
+            for bp_idx in chain:
+                R_acc = R_acc * Rotation.from_rotvec(bp[t, bp_idx])
+            # R_acc is now the elbow's accumulated rotation
+            R_global_wrist = Rotation.from_rotvec(wo[t])
+            R_local = R_acc.inv() * R_global_wrist
+            wo[t] = R_local.as_rotvec()
+
+        params[key] = wo.astype(np.float32)
+
+
 def _smooth_hand_poses(params: dict, fps: float = 30.0) -> None:
-    """Apply One Euro filter to hand poses — same params as BVH export."""
+    """Apply One Euro filter to hand + wrist poses — same params as BVH export."""
     from smplx_to_bvh import _smooth_rotations_one_euro
 
     hand_keys = [k for k in ("left_hand_pose", "right_hand_pose") if k in params]
-    if not hand_keys:
+    wrist_keys = [k for k in ("left_wrist_orient", "right_wrist_orient") if k in params]
+
+    if not hand_keys and not wrist_keys:
         return
 
-    # Reshape flat (N, 45) → (N, 15, 3) so the filter sees proper rotvecs
-    orig_shapes = {}
-    for k in hand_keys:
-        v = params[k]
-        orig_shapes[k] = v.shape
-        if v.ndim == 2 and v.shape[-1] != 3:
-            params[k] = v.reshape(v.shape[0], -1, 3)
+    # --- Finger joints: min_cutoff=0.3, beta=0.007 ---
+    if hand_keys:
+        # Reshape flat (N, 45) → (N, 15, 3) so the filter sees proper rotvecs
+        orig_shapes = {}
+        for k in hand_keys:
+            v = params[k]
+            orig_shapes[k] = v.shape
+            if v.ndim == 2 and v.shape[-1] != 3:
+                params[k] = v.reshape(v.shape[0], -1, 3)
 
-    smoothed = _smooth_rotations_one_euro(
-        params, keys=hand_keys, fps=fps, min_cutoff=0.3, beta=0.007,
-    )
-    for k in hand_keys:
-        params[k] = smoothed[k].reshape(orig_shapes[k])
+        smoothed = _smooth_rotations_one_euro(
+            params, keys=hand_keys, fps=fps, min_cutoff=0.3, beta=0.007,
+        )
+        for k in hand_keys:
+            params[k] = smoothed[k].reshape(orig_shapes[k])
+
+    # --- Wrist orient: heavier smoothing (min_cutoff=0.15, beta=0.01) ---
+    if wrist_keys:
+        smoothed_w = _smooth_rotations_one_euro(
+            params, keys=wrist_keys, fps=fps, min_cutoff=0.15, beta=0.01,
+        )
+        for k in wrist_keys:
+            params[k] = smoothed_w[k]
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -2140,7 +2218,22 @@ class AppWindow(QMainWindow):
                     runner_up[2],
                     runner_up[0],
                 )
-            return chosen[3]
+            result = chosen[3]
+            # Convert HaMeR wrist_orient (camera-space global) → local for
+            # every motion source *and* the default smplx_params, using the
+            # camera_baseline FK chain.
+            smplx_params, _, _, motion_sources = result
+            cam = motion_sources.get("camera_baseline")
+            cam_go = (
+                np.asarray(cam["global_orient"], dtype=np.float32)
+                if cam is not None and "global_orient" in cam
+                else None
+            )
+            for src_params in motion_sources.values():
+                _convert_wrist_orient_to_local(src_params, camera_global_orient=cam_go)
+            if smplx_params is not None:
+                _convert_wrist_orient_to_local(smplx_params, camera_global_orient=cam_go)
+            return result
         return None, None, "smplx", {}
 
     def _motion_bundle_score(
@@ -2611,8 +2704,11 @@ class AppWindow(QMainWindow):
                     R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
                     R_world = Rotation.from_rotvec(go_world_0).as_matrix()
                     R_c2w = R_world @ R_incam.T
-                    offset_lateral = np.array([offset_cam[0], 0.0, 0.0], dtype=np.float32)
-                    off_w = R_c2w @ offset_lateral
+                    offset_3d = np.array(
+                        [offset_cam[0], 0.0, offset_cam[2] if len(offset_cam) > 2 else 0.0],
+                        dtype=np.float32,
+                    )
+                    off_w = R_c2w @ offset_3d
                     tr_world[:, 0] += off_w[0]
                     tr_world[:, 2] += off_w[2]
                 params["transl"] = tr_world.astype(np.float32)
