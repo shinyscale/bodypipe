@@ -2659,21 +2659,41 @@ class MeshViewport(_BaseWidget):
         self.joint_drag_updated.emit(self._drag_joint, euler_deg)
 
     def _handle_root_drag(self, dx: float, dy: float):
-        """Translate root in XZ ground plane from mouse delta."""
-        # Camera right/forward projected onto XZ plane
-        cam_right = self._view[0, :3].copy().astype(np.float64)
-        cam_fwd = -self._view[2, :3].copy().astype(np.float64)
-        cam_right[1] = 0.0
-        cam_fwd[1] = 0.0
-        rn = np.linalg.norm(cam_right)
-        fn = np.linalg.norm(cam_fwd)
-        if rn > 1e-8:
-            cam_right /= rn
-        if fn > 1e-8:
-            cam_fwd /= fn
+        """Translate root from mouse delta.
+
+        Default: XZ ground plane.  Hold Alt to drag vertically (Y axis)
+        instead of forward/back.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        modifiers = QApplication.keyboardModifiers()
+        alt_held = bool(modifiers & Qt.KeyboardModifier.AltModifier)
 
         speed = self._orbit_distance * _ROOT_DRAG_SENSITIVITY
-        delta = (cam_right * float(dx) + cam_fwd * float(-dy)) * speed
+
+        if alt_held:
+            # Vertical mode: mouse-up → Y+, mouse-right → camera-right on XZ
+            cam_right = self._view[0, :3].copy().astype(np.float64)
+            cam_right[1] = 0.0
+            rn = np.linalg.norm(cam_right)
+            if rn > 1e-8:
+                cam_right /= rn
+            delta = cam_right * float(dx) * speed
+            delta[1] = float(-dy) * speed  # mouse-up = Y+
+        else:
+            # XZ ground plane mode
+            cam_right = self._view[0, :3].copy().astype(np.float64)
+            cam_fwd = -self._view[2, :3].copy().astype(np.float64)
+            cam_right[1] = 0.0
+            cam_fwd[1] = 0.0
+            rn = np.linalg.norm(cam_right)
+            fn = np.linalg.norm(cam_fwd)
+            if rn > 1e-8:
+                cam_right /= rn
+            if fn > 1e-8:
+                cam_fwd /= fn
+            delta = (cam_right * float(dx) + cam_fwd * float(-dy)) * speed
+
         self._root_drag_offset += delta.astype(np.float32)
 
         # Live preview via pose_override

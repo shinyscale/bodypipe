@@ -1537,6 +1537,24 @@ class PoseCorrectorPanel(QWidget):
         self._pos_anchor_table.setMaximumHeight(140)
         lay.addWidget(self._pos_anchor_table)
 
+        # Options row: include Y + apply to all
+        opts_row = QHBoxLayout()
+        self._pos_include_y = QCheckBox("Include Y (vertical)")
+        self._pos_include_y.setChecked(False)
+        self._pos_include_y.setToolTip(
+            "When checked, vertical (Y-axis) corrections are preserved.\n"
+            "When unchecked, only horizontal XZ corrections are applied."
+        )
+        opts_row.addWidget(self._pos_include_y)
+        self._pos_apply_all = QCheckBox("Apply to all persons")
+        self._pos_apply_all.setChecked(False)
+        self._pos_apply_all.setToolTip(
+            "Apply the same position offset to every person in the scene.\n"
+            "Useful for correcting uniform world drift that affects all tracks."
+        )
+        opts_row.addWidget(self._pos_apply_all)
+        lay.addLayout(opts_row)
+
         # Manual position lock buttons
         pos_btn_row = QHBoxLayout()
         self._apply_pos_btn = QPushButton("Apply Position Lock")
@@ -4247,6 +4265,9 @@ class PoseCorrectorPanel(QWidget):
         # drift actually accumulates (proportional to XZ displacement).
         drift_curve = compute_drift_weight_curve(np.asarray(tw, dtype=np.float64))
 
+        xz_only = not self._pos_include_y.isChecked()
+        apply_all = self._pos_apply_all.isChecked()
+
         offsets = compute_position_offsets(
             transl=tw,
             anchors=anchors_list,
@@ -4255,6 +4276,7 @@ class PoseCorrectorPanel(QWidget):
             blend_frames=blend,
             propagate=True,
             drift_curve=drift_curve,
+            xz_only=xz_only,
         )
 
         if not offsets:
@@ -4271,35 +4293,51 @@ class PoseCorrectorPanel(QWidget):
             sum(offset_mags) / len(offset_mags) if offset_mags else 0,
         )
 
-        # Snapshot for undo (from f_start through end of track)
+        # Determine which tracks to apply offsets to
+        if apply_all and self._session is not None:
+            target_pids = sorted(self._session.person_tracks.keys())
+            log.info("Position lock: applying to ALL %d persons: %s",
+                     len(target_pids), target_pids)
+        else:
+            target_pids = [pid]
+
+        # Collect all transl arrays across all target persons
+        all_tw_arrays: list[np.ndarray] = []
+        undo_snapshots: list[tuple[np.ndarray, np.ndarray]] = []
         num_frames = tw.shape[0]
 
-        # Collect all transl_world arrays that need updating:
-        # smplx_params + every motion_source that has transl_world
-        all_tw_arrays = [tw]
-        undo_snapshots: list[tuple[np.ndarray, np.ndarray]] = [
-            (tw, tw[f_start:].copy())
-        ]
-        # Motion sources use "transl" (not "transl_world") for world-space
-        # sources built by _copy_motion_dict / _normalize_world_source.
-        # Also check "transl_world" for camera_baseline sources.
-        ms = getattr(track, "motion_sources", {}) or {}
-        for src_name, src_params in ms.items():
-            if not isinstance(src_params, dict):
+        for tpid in target_pids:
+            t = self._session.person_tracks.get(tpid)
+            if t is None or t.smplx_params is None:
                 continue
-            for key in ("transl_world", "transl"):
-                if key not in src_params:
+            t_tw = t.smplx_params.get("transl_world")
+            if t_tw is None or not hasattr(t_tw, "shape"):
+                continue
+
+            # Primary transl_world
+            if not any(t_tw is a for a in all_tw_arrays):
+                all_tw_arrays.append(t_tw)
+                undo_snapshots.append((t_tw, t_tw[f_start:].copy()))
+
+            # Motion source variants
+            ms = getattr(t, "motion_sources", {}) or {}
+            for src_name, src_params in ms.items():
+                if not isinstance(src_params, dict):
                     continue
-                src_tw = src_params[key]
-                if not hasattr(src_tw, "shape") or src_tw.shape != tw.shape:
-                    continue
-                if any(src_tw is a for a in all_tw_arrays):
-                    continue  # already tracked
-                all_tw_arrays.append(src_tw)
-                undo_snapshots.append((src_tw, src_tw[f_start:].copy()))
+                for key in ("transl_world", "transl"):
+                    if key not in src_params:
+                        continue
+                    src_tw = src_params[key]
+                    if not hasattr(src_tw, "shape") or src_tw.shape != t_tw.shape:
+                        continue
+                    if any(src_tw is a for a in all_tw_arrays):
+                        continue
+                    all_tw_arrays.append(src_tw)
+                    undo_snapshots.append((src_tw, src_tw[f_start:].copy()))
+
         log.info(
-            "Position lock: updating %d transl arrays across smplx_params + %d motion sources",
-            len(all_tw_arrays), len(all_tw_arrays) - 1,
+            "Position lock: updating %d transl arrays across %d person(s)",
+            len(all_tw_arrays), len(target_pids),
         )
 
         # Extract tail offset for propagation beyond f_end
@@ -4307,10 +4345,11 @@ class PoseCorrectorPanel(QWidget):
 
         # Apply offsets to all transl_world arrays
         for atw in all_tw_arrays:
+            n = atw.shape[0]
             for f, offset in offsets.items():
-                if 0 <= f < num_frames:
+                if 0 <= f < n:
                     atw[f] += offset
-            if f_end + 1 < num_frames:
+            if f_end + 1 < n:
                 atw[f_end + 1:] += tail_offset
 
         # Undo/redo closures
@@ -4320,14 +4359,15 @@ class PoseCorrectorPanel(QWidget):
             self._viewport.refresh()
 
         def redo(
-            _arrays=all_tw_arrays, _num=num_frames,
-            _offsets=offsets, _tail=tail_offset, _fend=f_end,
+            _arrays=all_tw_arrays, _offsets=offsets,
+            _tail=tail_offset, _fend=f_end,
         ):
             for _atw in _arrays:
+                _n = _atw.shape[0]
                 for _f, _off in _offsets.items():
-                    if 0 <= _f < _num:
+                    if 0 <= _f < _n:
                         _atw[_f] += _off
-                if _fend + 1 < _num:
+                if _fend + 1 < _n:
                     _atw[_fend + 1:] += _tail
             self._viewport.refresh()
 
@@ -4337,25 +4377,30 @@ class PoseCorrectorPanel(QWidget):
 
         # Track the corrected span for timeline markers
         self._pos_applied_spans.append((f_start, num_frames - 1))
-        if self._track_overview is not None:
-            self._track_overview.set_track_markers(
-                pid,
-                position_correction_frames=list(
-                    range(f_start, min(f_end + 1, num_frames))
-                ),
-            )
+        for tpid in target_pids:
+            if self._track_overview is not None:
+                self._track_overview.set_track_markers(
+                    tpid,
+                    position_correction_frames=list(
+                        range(f_start, min(f_end + 1, num_frames))
+                    ),
+                )
 
         self._viewport.refresh()
 
         n_anchors = len(self._pos_anchors)
         n_frames_corrected = len(offsets) + max(0, num_frames - 1 - f_end)
+        persons_label = (
+            f"{len(target_pids)} persons" if apply_all and len(target_pids) > 1
+            else f"person {pid}"
+        )
         self._pos_correction_status.setText(
-            f"Applied {n_anchors} anchor{'s' if n_anchors != 1 else ''} — "
+            f"Applied {n_anchors} anchor{'s' if n_anchors != 1 else ''} to {persons_label} — "
             f"{n_frames_corrected} frames corrected ({f_start}–{num_frames - 1})"
         )
         log.info(
-            "Position lock: pid=%d, %d anchors, range=%d-%d, %d offsets applied",
-            pid, n_anchors, f_start, f_end, n_frames_corrected,
+            "Position lock: pid=%d, %d anchors, range=%d-%d, %d offsets applied to %s",
+            pid, n_anchors, f_start, f_end, n_frames_corrected, persons_label,
         )
 
         # Clear anchors (consumed) and reset pin state

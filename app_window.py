@@ -2919,6 +2919,50 @@ class AppWindow(QMainWindow):
         except Exception:
             pass
 
+        # Auto-load drift severity spans from drift_corrections.json
+        self._load_drift_spans_if_available()
+
+    def _load_drift_spans_if_available(self):
+        """Auto-load drift severity spans from drift_corrections.json."""
+        if self._session.output_dir is None:
+            return
+        corr_path = self._session.output_dir / "drift_corrections.json"
+        if not corr_path.is_file():
+            return
+        try:
+            import json as _json
+
+            with open(corr_path) as fh:
+                corr_data = _json.load(fh)
+            drift_spans = corr_data.get("drift_spans", {})
+            if not drift_spans:
+                return
+
+            # Remap person_index → track_id via session_manifest
+            manifest_path = self._session.output_dir / "session_manifest.json"
+            bindings = []
+            if manifest_path.is_file():
+                with open(manifest_path) as mf:
+                    bindings = _json.load(mf).get("person_bindings", [])
+
+            for pidx_str, spans in drift_spans.items():
+                pidx = int(pidx_str)
+                tid = (
+                    bindings[pidx]["track_id"]
+                    if bindings and pidx < len(bindings)
+                    else pidx
+                )
+                frame_spans = [(int(s[0]), int(s[1])) for s in spans]
+                self._track_overview.set_track_markers(
+                    tid, drift_correction_spans=frame_spans,
+                )
+            log.info(
+                "Auto-loaded drift spans for %d persons from %s",
+                len(drift_spans), corr_path.name,
+            )
+        except Exception:
+            log.debug("Failed to auto-load drift spans", exc_info=True)
+
     # ------------------------------------------------------------------
     # Open video
     # ------------------------------------------------------------------

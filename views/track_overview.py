@@ -67,7 +67,7 @@ _COLOR_INTERP.setAlpha(100)
 _COLOR_FOOT_SLIDE = QColor("#00b894")  # teal, foot-slide correction spans
 _COLOR_FOOT_SLIDE.setAlpha(80)
 _COLOR_DRIFT = QColor("#6c5ce7")  # purple, drift correction spans
-_COLOR_DRIFT.setAlpha(80)
+_COLOR_DRIFT.setAlpha(140)
 _COLOR_POSITION = QColor("#e17055")  # coral, position correction markers
 
 
