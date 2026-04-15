@@ -2919,8 +2919,53 @@ class AppWindow(QMainWindow):
         except Exception:
             pass
 
-        # Auto-load drift severity spans from drift_corrections.json
-        self._load_drift_spans_if_available()
+        # Drift severity spans — compute live from world translations when
+        # available (multi-person), otherwise fall back to drift_corrections.json.
+        self._compute_or_load_drift_spans()
+
+    def _compute_or_load_drift_spans(self):
+        """Compute drift severity spans from world translations, or load from JSON."""
+        if len(self._session.person_tracks) < 2:
+            self._load_drift_spans_if_available()
+            return
+
+        # Gather world translations from motion sources
+        per_person_transl: dict[int, np.ndarray] = {}
+        for pid, track in self._session.person_tracks.items():
+            ms = getattr(track, "motion_sources", None) or {}
+            # Prefer world_physics > world_baseline > camera_baseline
+            for src_key in ("world_physics", "world_baseline", "camera_baseline"):
+                src = ms.get(src_key)
+                if src is not None and "transl" in src:
+                    tr = np.asarray(src["transl"], dtype=np.float32)
+                    if tr.ndim == 2 and tr.shape[1] >= 3:
+                        per_person_transl[pid] = tr
+                        break
+
+        if len(per_person_transl) < 2:
+            self._load_drift_spans_if_available()
+            return
+
+        try:
+            from workers.drift_correct import compute_drift_severity
+
+            drift_spans = compute_drift_severity(per_person_transl)
+            n_spans = 0
+            for pid, spans in drift_spans.items():
+                frame_spans = [(s, e) for s, e, _sev in spans]
+                if frame_spans:
+                    self._track_overview.set_track_markers(
+                        pid, drift_correction_spans=frame_spans,
+                    )
+                    n_spans += len(frame_spans)
+            if n_spans:
+                log.info("Computed %d drift spans from world translations", n_spans)
+            else:
+                # No spans from live data — try JSON fallback
+                self._load_drift_spans_if_available()
+        except Exception:
+            log.debug("Live drift computation failed, trying JSON", exc_info=True)
+            self._load_drift_spans_if_available()
 
     def _load_drift_spans_if_available(self):
         """Auto-load drift severity spans from drift_corrections.json."""
