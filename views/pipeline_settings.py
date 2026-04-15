@@ -708,9 +708,10 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_spring = QCheckBox("Enable spring-based refinement")
         self._use_spring.setChecked(False)
         self._use_spring.setToolTip(
-            "Per-joint critically-damped spring filter applied to body motion in\n"
-            "quaternion log space. Adds weight and follow-through (Lieberman-style)\n"
-            "without rigid-body simulation. CPU-only, deterministic, fast."
+            "Underdamped spring filter applied to body motion in quaternion\n"
+            "log space. Injects weight, inertia, and follow-through into\n"
+            "floaty mocap input. CPU-only, deterministic, fast.\n"
+            "Auto-enables foot pinning when checked."
         )
         motion_layout.addWidget(self._use_spring)
 
@@ -718,16 +719,16 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._spring_preset = QComboBox()
         self._spring_preset.addItems(
             [
-                "Light (snappier)",
-                "Moderate (balanced)",
-                "Heavy (loose follow-through)",
+                "Light (subtle weight)",
+                "Moderate (visible momentum)",
+                "Heavy (exaggerated weight)",
             ]
         )
         self._spring_preset.setCurrentIndex(1)
         self._spring_preset.setToolTip(
-            "Light: higher stiffness, less filtering, snappier response.\n"
-            "Moderate: baseline gains from the per-joint proximal->distal table.\n"
-            "Heavy: softer stiffness, more follow-through, ghost/puppet aesthetic."
+            "Light: high stiffness, barely perceptible follow-through.\n"
+            "Moderate: clear weight — visible momentum on fast moves.\n"
+            "Heavy: slow, heavy, deliberate motion."
         )
         motion_layout.addWidget(self._spring_preset)
 
@@ -746,6 +747,9 @@ class PerfPipelineSettings(SinglePipelineSettings):
             "detection — works independently of the spring filter, so can\n"
             "be enabled alone."
         )
+
+        # Auto-enable foot pinning when spring refine is toggled on.
+        self._use_spring.toggled.connect(self._on_spring_toggled)
         motion_layout.addWidget(self._use_foot_pin)
 
         # Contact sensitivity
@@ -946,6 +950,14 @@ class PerfPipelineSettings(SinglePipelineSettings):
             f"  Backend: {be} | Body model: {config.body_model} | Worker: {type(self._worker).__name__}",
             "info",
         )
+
+    # ------------------------------------------------------------------
+    # Auto-enable foot pinning when spring refine toggled on
+    # ------------------------------------------------------------------
+
+    def _on_spring_toggled(self, checked: bool):
+        if checked:
+            self._use_foot_pin.setChecked(True)
 
     # ------------------------------------------------------------------
     # Multi-stage progress display
@@ -1319,9 +1331,10 @@ class MultiPipelineSettings(QWidget):
         self._use_spring = QCheckBox("Enable spring-based refinement")
         self._use_spring.setChecked(False)
         self._use_spring.setToolTip(
-            "Per-joint critically-damped spring filter applied to body motion in\n"
-            "quaternion log space. Adds weight and follow-through (Lieberman-style)\n"
-            "without rigid-body simulation. CPU-only, deterministic, fast."
+            "Underdamped spring filter applied to body motion in quaternion\n"
+            "log space. Injects weight, inertia, and follow-through into\n"
+            "floaty mocap input. CPU-only, deterministic, fast.\n"
+            "Auto-enables foot pinning when checked."
         )
         mp_layout.addWidget(self._use_spring)
 
@@ -1329,16 +1342,16 @@ class MultiPipelineSettings(QWidget):
         self._spring_preset = QComboBox()
         self._spring_preset.addItems(
             [
-                "Light (snappier)",
-                "Moderate (balanced)",
-                "Heavy (loose follow-through)",
+                "Light (subtle weight)",
+                "Moderate (visible momentum)",
+                "Heavy (exaggerated weight)",
             ]
         )
         self._spring_preset.setCurrentIndex(1)
         self._spring_preset.setToolTip(
-            "Light: higher stiffness, less filtering, snappier response.\n"
-            "Moderate: baseline gains from the per-joint proximal->distal table.\n"
-            "Heavy: softer stiffness, more follow-through, ghost/puppet aesthetic."
+            "Light: high stiffness, barely perceptible follow-through.\n"
+            "Moderate: clear weight — visible momentum on fast moves.\n"
+            "Heavy: slow, heavy, deliberate motion."
         )
         mp_layout.addWidget(self._spring_preset)
 
@@ -1355,6 +1368,9 @@ class MultiPipelineSettings(QWidget):
             "detection — works independently of the spring filter, so can\n"
             "be enabled alone."
         )
+
+        # Auto-enable foot pinning when spring refine is toggled on.
+        self._use_spring.toggled.connect(self._on_spring_toggled)
         mp_layout.addWidget(self._use_foot_pin)
 
         # Contact sensitivity
@@ -1577,6 +1593,10 @@ class MultiPipelineSettings(QWidget):
             self._set_running(False)
             self.status_message.emit("Pipeline cancelled")
             self.log_message.emit("Pipeline cancelled by user", "warning")
+
+    def _on_spring_toggled(self, checked: bool):
+        if checked:
+            self._use_foot_pin.setChecked(True)
 
     def _set_running(self, running: bool):
         self._running = running

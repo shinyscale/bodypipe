@@ -19,6 +19,7 @@ Phase 3.6: Space overrides table + BVH/FBX export.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -882,6 +883,10 @@ class PoseCorrectorPanel(QWidget):
         self._controls_tabs.addTab(self._build_feet_tab(), "Feet")
         layout.addWidget(self._controls_tabs, stretch=1)
 
+        # Position correction tab — built here (handlers live on this panel)
+        # but reparented as a top-level tab in PersonPanelDock.
+        self._position_tab = self._build_position_tab()
+
         # Preview playback timer (not a visual widget)
         self._preview_timer = QTimer(self)
         self._preview_timer.setInterval(33)  # ~30fps
@@ -1463,17 +1468,57 @@ class PoseCorrectorPanel(QWidget):
         drift_section.content_layout.addWidget(self._drift_status)
         lay.addWidget(drift_section)
 
-        # Collapsible position correction section (expanded for discoverability)
-        pos_section = _CollapsibleSection("Position Corrections", collapsed=False)
-        pos_hint = QLabel("Shift + drag pelvis to set position anchor")
+        lay.addStretch()
+        scroll.setWidget(container)
+        return scroll
+
+    def _build_position_tab(self) -> QWidget:
+        """Build the Position Correction tab: manual anchors + VLM drift."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        # Hint
+        pos_hint = QLabel("Shift + drag pelvis in 3D viewport to set position anchors")
         pos_hint.setStyleSheet(
             f"color: {COLORS['text_secondary']}; font-size: 12px;"
         )
         pos_hint.setWordWrap(True)
-        pos_section.content_layout.addWidget(pos_hint)
+        lay.addWidget(pos_hint)
 
-        # Anchor table — Frame, Position (XZ), Del
-        pos_section.content_layout.addWidget(QLabel("Anchors:"))
+        # Blend + range controls (position-specific)
+        grid = QGridLayout()
+        grid.setColumnMinimumWidth(0, _LABEL_MIN_WIDTH)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("Blend:"), 0, 0)
+        self._pos_blend_spin = QSpinBox()
+        self._pos_blend_spin.setRange(0, 30)
+        self._pos_blend_spin.setValue(5)
+        self._pos_blend_spin.setSuffix(" frames")
+        self._style_spinbox(self._pos_blend_spin)
+        grid.addWidget(self._pos_blend_spin, 0, 1)
+
+        grid.addWidget(QLabel("Range start:"), 1, 0)
+        self._pos_range_start = QSpinBox()
+        self._pos_range_start.setRange(0, 999999)
+        self._style_spinbox(self._pos_range_start)
+        grid.addWidget(self._pos_range_start, 1, 1)
+
+        grid.addWidget(QLabel("Range end:"), 2, 0)
+        self._pos_range_end = QSpinBox()
+        self._pos_range_end.setRange(0, 999999)
+        self._style_spinbox(self._pos_range_end)
+        grid.addWidget(self._pos_range_end, 2, 1)
+
+        lay.addLayout(grid)
+
+        # Anchor table
+        lay.addWidget(QLabel("Anchors:"))
         self._pos_anchor_table = QTableWidget(0, 3)
         self._pos_anchor_table.setHorizontalHeaderLabels(
             ["Frame", "Position", "Del"]
@@ -1490,15 +1535,15 @@ class PoseCorrectorPanel(QWidget):
         self._pos_anchor_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._pos_anchor_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._pos_anchor_table.setMaximumHeight(140)
-        pos_section.content_layout.addWidget(self._pos_anchor_table)
+        lay.addWidget(self._pos_anchor_table)
 
-        # Action buttons
+        # Manual position lock buttons
         pos_btn_row = QHBoxLayout()
         self._apply_pos_btn = QPushButton("Apply Position Lock")
         pos_btn_row.addWidget(self._apply_pos_btn)
         self._clear_pos_anchors_btn = QPushButton("Clear Position Anchors")
         pos_btn_row.addWidget(self._clear_pos_anchors_btn)
-        pos_section.content_layout.addLayout(pos_btn_row)
+        lay.addLayout(pos_btn_row)
 
         # Status
         self._pos_correction_status = QLabel("No anchors set — Shift+drag pelvis")
@@ -1506,8 +1551,31 @@ class PoseCorrectorPanel(QWidget):
             f"color: {COLORS['text_secondary']}; font-size: 11px;"
         )
         self._pos_correction_status.setWordWrap(True)
-        pos_section.content_layout.addWidget(self._pos_correction_status)
-        lay.addWidget(pos_section)
+        lay.addWidget(self._pos_correction_status)
+
+        # --- VLM Drift Correction section ---
+        vlm_section = _CollapsibleSection("VLM Drift Correction", collapsed=False)
+        vlm_hint = QLabel(
+            "Run auto_drift_correct CLI first, then click Apply to load "
+            "corrections for all persons."
+        )
+        vlm_hint.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        vlm_hint.setWordWrap(True)
+        vlm_section.content_layout.addWidget(vlm_hint)
+
+        self._apply_vlm_drift_btn = QPushButton("Apply VLM Drift Correction")
+        vlm_section.content_layout.addWidget(self._apply_vlm_drift_btn)
+
+        self._vlm_drift_status = QLabel("No corrections loaded")
+        self._vlm_drift_status.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 11px;"
+        )
+        self._vlm_drift_status.setWordWrap(True)
+        vlm_section.content_layout.addWidget(self._vlm_drift_status)
+
+        lay.addWidget(vlm_section)
 
         lay.addStretch()
         scroll.setWidget(container)
@@ -1646,10 +1714,16 @@ class PoseCorrectorPanel(QWidget):
         self._viewport.root_drag_committed.connect(self._on_root_drag_committed)
         self._apply_pos_btn.clicked.connect(self._on_apply_position_lock)
         self._clear_pos_anchors_btn.clicked.connect(self._on_clear_pos_anchors)
+        self._apply_vlm_drift_btn.clicked.connect(self._on_apply_vlm_drift_correction)
 
     # ------------------------------------------------------------------
     # Public API (used by MultiPersonTab)
     # ------------------------------------------------------------------
+
+    @property
+    def position_tab(self) -> QWidget:
+        """The position correction tab widget, for reparenting into top-level tabs."""
+        return self._position_tab
 
     def set_session(self, session: Session):
         """Bind session data source."""
@@ -4086,13 +4160,19 @@ class PoseCorrectorPanel(QWidget):
         self._pos_pinned = True
         self._pos_pin_frame = frame
 
-        # Auto-set range from anchor extent + blend
-        blend = self._blend_spin.value()
+        # Auto-set range from anchor extent + blend.
+        # Single anchor: extend to full clip so auto-bookend can insert an
+        # identity anchor at frame 0 and smart-interpolate the correction.
+        blend = self._pos_blend_spin.value()
         n_frames = tw.shape[0]
         first_anchor_frame = self._pos_anchors[0][0]
         last_anchor_frame = self._pos_anchors[-1][0]
-        self._foot_range_start.setValue(max(0, first_anchor_frame - blend))
-        self._foot_range_end.setValue(min(n_frames - 1, last_anchor_frame + blend))
+        if len(self._pos_anchors) == 1:
+            self._pos_range_start.setValue(0)
+            self._pos_range_end.setValue(n_frames - 1)
+        else:
+            self._pos_range_start.setValue(max(0, first_anchor_frame - blend))
+            self._pos_range_end.setValue(min(n_frames - 1, last_anchor_frame + blend))
 
         # Refresh UI
         self._refresh_pos_anchor_table()
@@ -4127,65 +4207,128 @@ class PoseCorrectorPanel(QWidget):
             return
 
         try:
-            from pose_correction import compute_position_offsets
+            from pose_correction import (
+                compute_drift_weight_curve,
+                compute_position_offsets,
+            )
         except ImportError:
             self._pos_correction_status.setText("Backend unavailable (pose_correction)")
             return
 
         tw = track.smplx_params["transl_world"]
-        f_start = self._foot_range_start.value()
-        f_end = self._foot_range_end.value()
-        blend = self._blend_spin.value()
+        f_start = self._pos_range_start.value()
+        f_end = self._pos_range_end.value()
+        blend = self._pos_blend_spin.value()
 
         if f_start >= f_end:
             self._pos_correction_status.setText("Invalid range: start must be < end")
             return
 
+        anchors_list = [(f, pos) for f, pos in self._pos_anchors]
+
+        # Auto-bookend: if no anchor near frame_start, insert an identity
+        # anchor (target = current position) so the correction ramps from
+        # zero at the start instead of applying a flat offset everywhere.
+        anchors_list.sort(key=lambda a: a[0])
+        if anchors_list[0][0] > f_start + blend:
+            identity_target = tw[f_start].copy().astype(np.float64)
+            anchors_list.insert(0, (f_start, identity_target))
+            log.info("Position lock: auto-added identity anchor at frame %d", f_start)
+
+        log.info(
+            "Position lock: pid=%d, %d anchors, range=%d-%d, blend=%d, "
+            "tw[0]=(%.3f,%.3f,%.3f), anchor[0] target=(%.3f,%.3f,%.3f)",
+            pid, len(anchors_list), f_start, f_end, blend,
+            tw[0][0], tw[0][1], tw[0][2],
+            anchors_list[0][1][0], anchors_list[0][1][1], anchors_list[0][1][2],
+        )
+
+        # Motion-proportional interpolation: distribute correction where
+        # drift actually accumulates (proportional to XZ displacement).
+        drift_curve = compute_drift_weight_curve(np.asarray(tw, dtype=np.float64))
+
         offsets = compute_position_offsets(
             transl=tw,
-            anchors=[(f, pos) for f, pos in self._pos_anchors],
+            anchors=anchors_list,
             frame_start=f_start,
             frame_end=f_end,
             blend_frames=blend,
             propagate=True,
+            drift_curve=drift_curve,
         )
 
         if not offsets:
             self._pos_correction_status.setText("No offsets computed")
             return
 
+        # Log offset stats
+        offset_mags = [float(np.linalg.norm(v)) for v in offsets.values()]
+        log.info(
+            "Position lock: %d offsets, mag range %.4f–%.4f m, mean %.4f m",
+            len(offsets),
+            min(offset_mags) if offset_mags else 0,
+            max(offset_mags) if offset_mags else 0,
+            sum(offset_mags) / len(offset_mags) if offset_mags else 0,
+        )
+
         # Snapshot for undo (from f_start through end of track)
         num_frames = tw.shape[0]
-        old_tw = tw[f_start:].copy()
+
+        # Collect all transl_world arrays that need updating:
+        # smplx_params + every motion_source that has transl_world
+        all_tw_arrays = [tw]
+        undo_snapshots: list[tuple[np.ndarray, np.ndarray]] = [
+            (tw, tw[f_start:].copy())
+        ]
+        # Motion sources use "transl" (not "transl_world") for world-space
+        # sources built by _copy_motion_dict / _normalize_world_source.
+        # Also check "transl_world" for camera_baseline sources.
+        ms = getattr(track, "motion_sources", {}) or {}
+        for src_name, src_params in ms.items():
+            if not isinstance(src_params, dict):
+                continue
+            for key in ("transl_world", "transl"):
+                if key not in src_params:
+                    continue
+                src_tw = src_params[key]
+                if not hasattr(src_tw, "shape") or src_tw.shape != tw.shape:
+                    continue
+                if any(src_tw is a for a in all_tw_arrays):
+                    continue  # already tracked
+                all_tw_arrays.append(src_tw)
+                undo_snapshots.append((src_tw, src_tw[f_start:].copy()))
+        log.info(
+            "Position lock: updating %d transl arrays across smplx_params + %d motion sources",
+            len(all_tw_arrays), len(all_tw_arrays) - 1,
+        )
 
         # Extract tail offset for propagation beyond f_end
         tail_offset = offsets.get(f_end, np.zeros(3, dtype=np.float32))
 
-        # Apply offsets within the corrected range
-        for f, offset in offsets.items():
-            if 0 <= f < num_frames:
-                tw[f] += offset
-
-        # Propagate tail offset to all frames beyond f_end
-        if f_end + 1 < num_frames:
-            tw[f_end + 1:] += tail_offset
+        # Apply offsets to all transl_world arrays
+        for atw in all_tw_arrays:
+            for f, offset in offsets.items():
+                if 0 <= f < num_frames:
+                    atw[f] += offset
+            if f_end + 1 < num_frames:
+                atw[f_end + 1:] += tail_offset
 
         # Undo/redo closures
-        def undo(
-            _tw=tw, _start=f_start, _old=old_tw,
-        ):
-            _tw[_start:] = _old
+        def undo(_snaps=undo_snapshots, _start=f_start):
+            for _tw_ref, _old in _snaps:
+                _tw_ref[_start:] = _old
             self._viewport.refresh()
 
         def redo(
-            _tw=tw, _start=f_start, _num=num_frames,
+            _arrays=all_tw_arrays, _num=num_frames,
             _offsets=offsets, _tail=tail_offset, _fend=f_end,
         ):
-            for _f, _off in _offsets.items():
-                if 0 <= _f < _num:
-                    _tw[_f] += _off
-            if _fend + 1 < _num:
-                _tw[_fend + 1:] += _tail
+            for _atw in _arrays:
+                for _f, _off in _offsets.items():
+                    if 0 <= _f < _num:
+                        _atw[_f] += _off
+                if _fend + 1 < _num:
+                    _atw[_fend + 1:] += _tail
             self._viewport.refresh()
 
         self._session.undo_stack.push(
@@ -4240,6 +4383,137 @@ class PoseCorrectorPanel(QWidget):
                 position_correction_frames=[],
             )
         self._pos_correction_status.setText("No anchors set — Shift+drag pelvis")
+
+    def _on_apply_vlm_drift_correction(self):
+        """Load drift_corrections.json and populate position anchors for current person.
+
+        Loads anchors into ``_pos_anchors`` and refreshes the anchor table so
+        the user can inspect them, then apply via "Apply Position Lock".
+        """
+        if self._session is None or self._session.output_dir is None:
+            self._vlm_drift_status.setText("No session output directory")
+            return
+
+        corr_path = self._session.output_dir / "drift_corrections.json"
+        if not corr_path.is_file():
+            self._vlm_drift_status.setText(
+                f"No drift_corrections.json in {self._session.output_dir.name}"
+            )
+            return
+
+        with open(corr_path) as fh:
+            corr_data = json.load(fh)
+
+        # Parse anchors — multi-person or single-person format
+        # Keys are person_index (0, 1, ...) from the CLI tool
+        if "persons" in corr_data:
+            person_anchors_by_idx: dict[int, list[tuple[int, np.ndarray]]] = {}
+            for p in corr_data["persons"]:
+                pidx = p["person_id"]
+                person_anchors_by_idx[pidx] = [
+                    (a["frame"], np.array(a["target"], dtype=np.float64))
+                    for a in p["anchors"]
+                ]
+        elif "anchors" in corr_data:
+            pidx = corr_data.get("person_id", 0)
+            person_anchors_by_idx = {
+                pidx: [
+                    (a["frame"], np.array(a["target"], dtype=np.float64))
+                    for a in corr_data["anchors"]
+                ]
+            }
+        else:
+            self._vlm_drift_status.setText("Invalid drift_corrections.json format")
+            return
+
+        # Remap person_index → track_id via session_manifest
+        person_anchors: dict[int, list[tuple[int, np.ndarray]]] = {}
+        manifest_path = self._session.output_dir / "session_manifest.json"
+        if manifest_path.is_file():
+            with open(manifest_path) as mf:
+                manifest = json.load(mf)
+            bindings = manifest.get("person_bindings", [])
+            for pidx, anchors in person_anchors_by_idx.items():
+                if bindings and pidx < len(bindings):
+                    tid = bindings[pidx]["track_id"]
+                    person_anchors[tid] = anchors
+                else:
+                    person_anchors[pidx] = anchors
+        else:
+            person_anchors = person_anchors_by_idx
+
+        if not person_anchors:
+            self._vlm_drift_status.setText("No anchors found in corrections file")
+            return
+
+        # --- Push drift severity spans to timeline ---
+        drift_spans_raw = corr_data.get("drift_spans", {})
+        if drift_spans_raw and self._track_overview is not None:
+            manifest_path2 = self._session.output_dir / "session_manifest.json"
+            bindings2 = []
+            if manifest_path2.is_file():
+                with open(manifest_path2) as mf2:
+                    bindings2 = json.load(mf2).get("person_bindings", [])
+            for pidx_str, spans in drift_spans_raw.items():
+                pidx = int(pidx_str)
+                # Remap person_index → track_id
+                tid = bindings2[pidx]["track_id"] if bindings2 and pidx < len(bindings2) else pidx
+                frame_spans = [(int(s[0]), int(s[1])) for s in spans]
+                self._track_overview.set_track_markers(
+                    tid,
+                    drift_correction_spans=frame_spans,
+                )
+            log.info("Pushed drift severity spans for %d persons to timeline",
+                     len(drift_spans_raw))
+
+        # Store all persons' VLM anchors for quick switching
+        self._vlm_anchors_by_person = person_anchors
+
+        # Load anchors for the currently selected person into the table
+        cur_pid = self._current_person
+        if cur_pid in person_anchors:
+            self._pos_anchors.clear()
+            self._pos_anchors.extend(person_anchors[cur_pid])
+
+            # Auto-set range
+            blend = self._pos_blend_spin.value()
+            f_start = self._pos_anchors[0][0]
+            f_end = self._pos_anchors[-1][0]
+            track = self._session.person_tracks.get(cur_pid)
+            n_frames = track.smplx_params["transl_world"].shape[0] if (
+                track and track.smplx_params and "transl_world" in track.smplx_params
+            ) else 999999
+            self._pos_range_start.setValue(max(0, f_start - blend))
+            self._pos_range_end.setValue(min(n_frames - 1, f_end + blend))
+
+            self._refresh_pos_anchor_table()
+            self._push_pos_anchor_markers()
+
+            n_anchors = len(self._pos_anchors)
+            available = sorted(person_anchors.keys())
+            self._vlm_drift_status.setText(
+                f"Loaded {n_anchors} anchors for person {cur_pid}. "
+                f"Available: {available}. Click Apply Position Lock."
+            )
+            self._pos_correction_status.setText(
+                f"{n_anchors} VLM anchors loaded — click Apply Position Lock"
+            )
+            log.info(
+                "VLM drift: loaded %d anchors for person %d (track_id), "
+                "available persons: %s",
+                n_anchors, cur_pid, available,
+            )
+        else:
+            available = sorted(person_anchors.keys())
+            self._vlm_drift_status.setText(
+                f"No anchors for person {cur_pid}. "
+                f"Available track IDs: {available}. Switch person and retry."
+            )
+            log.warning(
+                "VLM drift: no anchors for current person %d, "
+                "available: %s",
+                cur_pid, available,
+            )
 
     def _refresh_pos_anchor_table(self):
         """Refresh the position anchor table widget from internal state."""

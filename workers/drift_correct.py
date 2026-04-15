@@ -628,112 +628,55 @@ def _parse_person_positions(
 # ---------------------------------------------------------------------------
 
 
-def screen_to_world_positions(
-    person_positions: list[dict],
-    slam_w2c: np.ndarray,
-    per_person_incam: dict[int, np.ndarray],  # {pidx: (N,3) incam transl}
-    K: np.ndarray,                             # (N,3,3) or (3,3)
-) -> dict[int, dict[int, np.ndarray]]:
-    """Convert VLM screen-fraction positions to world-space XZ.
-
-    Returns ``{frame_idx: {person_idx: (3,) world_pos}}``.
-    """
-    result: dict[int, dict[int, np.ndarray]] = {}
-
-    for frame_data in person_positions:
-        fidx = frame_data["frame_idx"]
-        if fidx >= len(slam_w2c):
-            continue
-
-        # Camera pose at this frame
-        R_w2c = slam_w2c[fidx, :3, :3]
-        t_w2c = slam_w2c[fidx, :3, 3]
-        R_c2w = R_w2c.T
-        t_c2w = -R_c2w @ t_w2c
-
-        # Intrinsics at this frame
-        Kf = K[fidx] if K.ndim == 3 else K
-        K_inv = np.linalg.inv(Kf)
-        img_w = Kf[0, 2] * 2
-        img_h = Kf[1, 2] * 2
-
-        frame_positions: dict[int, np.ndarray] = {}
-        for p in frame_data["persons"]:
-            pidx = p["id"]
-            if pidx not in per_person_incam:
-                continue
-
-            incam = per_person_incam[pidx]
-            if fidx >= len(incam):
-                continue
-
-            # Screen fraction → pixel
-            px = p["x_frac"] * img_w
-            py = p["y_frac"] * img_h
-
-            # Pixel → camera ray
-            ray_cam = K_inv @ np.array([px, py, 1.0])
-
-            # Scale by person's depth
-            depth = float(incam[fidx, 2])
-            if depth < 0.1:
-                continue
-            pos_cam = ray_cam * depth
-
-            # Camera → world
-            pos_world = R_c2w @ pos_cam + t_c2w
-            pos_world[1] = 0.0  # Ground plane
-            frame_positions[pidx] = pos_world.astype(np.float64)
-
-        if frame_positions:
-            result[fidx] = frame_positions
-
-    return result
-
-
 def compute_multi_person_drift(
     per_person_transl: dict[int, np.ndarray],   # {pidx: (N,3) transl_world}
-    vlm_world_positions: dict[int, dict[int, np.ndarray]],  # {frame: {pidx: pos}}
-    reference_person: int = 0,
+    person_positions: list[dict],                # VLM output from estimate_person_positions
+    slam_w2c: np.ndarray,                        # (N,4,4) for camera orientation
+    scale_per_frame: np.ndarray | float = 3.0,   # meters per screen-fraction
+    reference_person: int | None = None,
 ) -> dict[int, list[tuple[int, np.ndarray]]]:
-    """Compute per-person correction anchors from VLM inter-person constraints.
+    """Compute per-person correction anchors from VLM inter-person spacing.
 
-    Uses *reference_person* as the anchor — applies single-person global drift
-    correction to them, then corrects all others relative to reference.
+    Uses relative screen-space distance between persons (from VLM) compared
+    against GVHMR's inter-person distance to compute corrections. Only the
+    **relative** spacing matters — no absolute world projection needed.
+
+    The reference person keeps their current trajectory. Other persons are
+    corrected so their distance from the reference matches what the VLM sees.
+
+    If *reference_person* is ``None``, the person with the smallest total
+    XZ displacement is chosen (most likely to be stationary / least drifted).
 
     Returns ``{person_idx: [(frame, target_pos), ...]}`` — each list is
     compatible with ``compute_position_offsets()``.
     """
     person_ids = sorted(per_person_transl.keys())
-    if reference_person not in person_ids:
-        reference_person = person_ids[0]
 
-    keyframes = sorted(vlm_world_positions.keys())
-    if not keyframes:
-        return {}
+    # Auto-select reference: person with least total XZ displacement
+    if reference_person is None or reference_person not in person_ids:
+        best_pid = person_ids[0]
+        best_drift = float("inf")
+        for pid in person_ids:
+            tw = per_person_transl[pid]
+            drift_xz = float(np.sqrt(
+                (tw[-1, 0] - tw[0, 0]) ** 2 + (tw[-1, 2] - tw[0, 2]) ** 2
+            ))
+            log.info("  Person %d total XZ displacement: %.3fm", pid, drift_xz)
+            if drift_xz < best_drift:
+                best_drift = drift_xz
+                best_pid = pid
+        reference_person = best_pid
+        log.info("Auto-selected person %d as reference (least drift: %.3fm)",
+                 reference_person, best_drift)
+
+    is_array = isinstance(scale_per_frame, np.ndarray)
+
+    # Reference person keeps their position — no anchors needed
+    all_anchors: dict[int, list[tuple[int, np.ndarray]]] = {
+        reference_person: [],
+    }
 
     ref_transl = per_person_transl[reference_person]
-
-    # Step 1: Global drift correction for reference person
-    # VLM positions give us scene-anchored estimates at each keyframe.
-    # Compute displacement of reference person: VLM vs GVHMR
-    ref_vision_disp: dict[int, np.ndarray] = {}
-    f0 = keyframes[0]
-    if f0 in vlm_world_positions and reference_person in vlm_world_positions[f0]:
-        vlm_ref_origin = vlm_world_positions[f0][reference_person]
-        for fidx in keyframes[1:]:
-            fp = vlm_world_positions.get(fidx, {})
-            if reference_person in fp:
-                disp = fp[reference_person] - vlm_ref_origin
-                disp[1] = 0.0
-                ref_vision_disp[fidx] = disp
-
-    ref_anchors = compute_drift_anchors(ref_transl, ref_vision_disp, frame_0=f0)
-
-    # Step 2: Relative corrections for other persons
-    all_anchors: dict[int, list[tuple[int, np.ndarray]]] = {
-        reference_person: ref_anchors,
-    }
 
     for pidx in person_ids:
         if pidx == reference_person:
@@ -742,37 +685,149 @@ def compute_multi_person_drift(
         p_transl = per_person_transl[pidx]
         anchors: list[tuple[int, np.ndarray]] = []
 
-        for fidx in keyframes:
-            fp = vlm_world_positions.get(fidx, {})
-            if reference_person not in fp or pidx not in fp:
+        for frame_data in person_positions:
+            fidx = frame_data["frame_idx"]
+            if fidx >= len(ref_transl) or fidx >= len(p_transl):
+                continue
+            if fidx >= len(slam_w2c):
                 continue
 
-            # VLM says the inter-person vector should be:
-            vlm_delta = fp[pidx] - fp[reference_person]
+            # Find both persons in this frame's VLM output
+            ref_pos = None
+            p_pos = None
+            for p in frame_data["persons"]:
+                if p["id"] == reference_person:
+                    ref_pos = p
+                elif p["id"] == pidx:
+                    p_pos = p
+            if ref_pos is None or p_pos is None:
+                continue
+
+            # VLM inter-person distance in screen fractions
+            dx_frac = p_pos["x_frac"] - ref_pos["x_frac"]
+
+            # Convert screen fraction to meters using per-frame scale
+            scale = float(scale_per_frame[fidx]) if is_array else float(scale_per_frame)
+            dx_meters = dx_frac * scale
+
+            # Map camera-right to world-space ground plane.
+            # SLAM W2C camera-X is inverted relative to image-X (OpenCV
+            # vs world convention), so negate to match screen left→right.
+            R_w2c = slam_w2c[fidx, :3, :3].copy()
+            R_c2w = R_w2c.T
+            cam_right = -R_c2w[:, 0].copy()  # negated: image-right in world
+            cam_right[1] = 0.0
+            norm = np.linalg.norm(cam_right)
+            if norm > 1e-6:
+                cam_right /= norm
+
+            # VLM says inter-person vector should be (in world XZ):
+            vlm_delta = cam_right * dx_meters
             vlm_delta[1] = 0.0
 
-            # GVHMR says the inter-person vector is:
-            gvhmr_delta = p_transl[fidx] - ref_transl[fidx]
-            gvhmr_delta = gvhmr_delta.astype(np.float64)
+            # GVHMR says inter-person vector is:
+            gvhmr_delta = p_transl[fidx].astype(np.float64) - ref_transl[fidx].astype(np.float64)
             gvhmr_delta[1] = 0.0
 
-            # Relative drift: how much this person has diverged from reference
-            rel_drift = gvhmr_delta - vlm_delta
-            rel_drift[1] = 0.0
+            # Correction: move this person so the inter-person gap matches VLM
+            correction = vlm_delta - gvhmr_delta
+            correction[1] = 0.0
 
-            # Also apply the global drift correction (from reference person)
-            # Find reference person's correction at this frame
-            ref_correction = np.zeros(3, dtype=np.float64)
-            for rf, rt in ref_anchors:
-                if rf == fidx:
-                    ref_correction = rt - ref_transl[fidx].astype(np.float64)
-                    ref_correction[1] = 0.0
-                    break
-
-            target = p_transl[fidx].astype(np.float64) - rel_drift + ref_correction
+            target = p_transl[fidx].astype(np.float64) + correction
             target[1] = p_transl[fidx][1]  # Preserve Y
             anchors.append((fidx, target))
+
+            log.debug(
+                "Multi-person drift: frame %d, person %d→%d: "
+                "vlm_dx=%.3f frac (%.3f m), gvhmr_gap=%.3f m, correction=%.3f m",
+                fidx, reference_person, pidx,
+                dx_frac, dx_meters,
+                np.linalg.norm(gvhmr_delta),
+                np.linalg.norm(correction),
+            )
 
         all_anchors[pidx] = anchors
 
     return all_anchors
+
+
+# ---------------------------------------------------------------------------
+# Drift severity computation (no VLM needed — pure trajectory comparison)
+# ---------------------------------------------------------------------------
+
+
+def compute_drift_severity(
+    per_person_transl: dict[int, np.ndarray],
+    reference_person: int | None = None,
+    threshold_m: float = 0.1,
+) -> dict[int, list[tuple[int, int, float]]]:
+    """Compute inter-person drift severity over time.
+
+    Compares each person's XZ distance from *reference_person* at each frame
+    against their distance at frame 0.  When the divergence exceeds
+    *threshold_m*, a span begins; when it drops below, the span ends.
+
+    Returns ``{person_idx: [(start_frame, end_frame, severity), ...]}``
+    where *severity* is the max divergence (metres) within that span.
+    """
+    person_ids = sorted(per_person_transl.keys())
+    if len(person_ids) < 2:
+        return {}
+
+    # Auto-select reference: person with least total XZ displacement
+    if reference_person is None or reference_person not in person_ids:
+        best_pid = person_ids[0]
+        best_drift = float("inf")
+        for pid in person_ids:
+            tw = per_person_transl[pid]
+            drift_xz = float(np.sqrt(
+                (tw[-1, 0] - tw[0, 0]) ** 2 + (tw[-1, 2] - tw[0, 2]) ** 2
+            ))
+            if drift_xz < best_drift:
+                best_drift = drift_xz
+                best_pid = pid
+        reference_person = best_pid
+
+    ref_transl = per_person_transl[reference_person]
+    result: dict[int, list[tuple[int, int, float]]] = {}
+
+    for pidx in person_ids:
+        if pidx == reference_person:
+            continue
+        p_transl = per_person_transl[pidx]
+        n = min(len(ref_transl), len(p_transl))
+        if n == 0:
+            continue
+
+        # XZ distance at each frame
+        dx = p_transl[:n, 0] - ref_transl[:n, 0]
+        dz = p_transl[:n, 2] - ref_transl[:n, 2]
+        dist = np.sqrt(dx ** 2 + dz ** 2)
+
+        # Divergence from frame-0 distance
+        dist0 = dist[0]
+        divergence = np.abs(dist - dist0)
+
+        # Extract contiguous spans where divergence > threshold
+        spans: list[tuple[int, int, float]] = []
+        in_span = False
+        span_start = 0
+        span_max = 0.0
+        for f in range(n):
+            if divergence[f] > threshold_m:
+                if not in_span:
+                    in_span = True
+                    span_start = f
+                    span_max = float(divergence[f])
+                else:
+                    span_max = max(span_max, float(divergence[f]))
+            else:
+                if in_span:
+                    spans.append((span_start, f - 1, round(span_max, 4)))
+                    in_span = False
+        if in_span:
+            spans.append((span_start, n - 1, round(span_max, 4)))
+
+        result[pidx] = spans
+
+    return result

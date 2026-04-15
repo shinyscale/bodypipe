@@ -99,22 +99,22 @@ def test_filter_identity_sequence():
     assert np.allclose(out, target, atol=1e-6)
 
 
-def test_filter_step_response_critically_damped():
+def test_filter_step_response_underdamped():
     T = 120
     fps = 30.0
     dt = 1.0 / fps
     target = np.zeros((T, 1, 3), dtype=np.float32)
     target[20:, 0, 0] = 1.0  # step
     kp = np.array([300.0], dtype=np.float32)
-    kv = np.array([40.0], dtype=np.float32)
-    # Zero-phase filter: use a short pad so the warm-up doesn't swamp
-    # the measurement, but disable pad-replication affecting the peak.
+    kv = np.array([15.0], dtype=np.float32)
+    # Single-pass (forward-only) filter — intentional underdamping for
+    # weight injection: the overshoot IS the follow-through.
     out = critically_damped_filter(
         target, kp, kv, dt=dt, zero_phase=False, pad_frames=0
     )
     x = out[:, 0, 0]
-    # No large overshoot (overshoot < 5% for critical damping; bounded here).
-    assert x.max() <= 1.05
+    # Underdamped overshoot should be visible but bounded (< 30%).
+    assert x.max() <= 1.30
     # Converges to ~95% of the target within ~0.3s after the step.
     steady_start = 20 + int(0.3 * fps)
     assert x[steady_start] > 0.9
@@ -140,9 +140,8 @@ def test_gain_table_shape():
     kp = _BASE_BODY_GAINS[:, 0]
     kv = _BASE_BODY_GAINS[:, 1]
     zeta = kv / (2.0 * np.sqrt(kp))
-    # Damping ratio is in the neighborhood of critically damped. Allow
-    # 0.8..1.3 to accommodate the slightly under-damped extremities.
-    assert (zeta > 0.7).all() and (zeta < 1.4).all()
+    # Underdamped for weight injection: zeta ~0.33–0.50 across all joints.
+    assert (zeta > 0.30).all() and (zeta < 0.55).all()
 
 
 def test_preset_scaling_preserves_damping_ratio():

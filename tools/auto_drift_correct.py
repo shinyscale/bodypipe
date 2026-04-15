@@ -81,14 +81,15 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
     from workers.drift_correct import (
         annotate_frame_with_persons,
         check_ollama,
+        compute_drift_severity,
         compute_multi_person_drift,
         estimate_person_positions,
+        compute_per_frame_scale,
         extract_frames,
         find_slam,
         load_detection_bboxes,
         load_slam_w2c,
         sample_keyframe_indices,
-        screen_to_world_positions,
     )
 
     # --- Load session manifest ---
@@ -146,6 +147,55 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
     if len(per_person_transl) < 2:
         log.error("Need results for at least 2 persons, got %d", len(per_person_transl))
         return 1
+
+    # --- Apply world offsets + floor normalization ---
+    # Replicate bodypipe's _normalize_world_source so corrections match viewport.
+    offsets_raw = manifest.get("offsets", {})
+    for pidx, pdir in enumerate(person_dirs):
+        if pidx not in per_person_transl:
+            continue
+        tw = per_person_transl[pidx]
+
+        # Floor Y normalization: same as app_window (floor_y = tw[0,1] - 0.933)
+        if tw.shape[0] > 0:
+            floor_y = float(tw[0, 1]) - 0.933
+            tw[:, 1] -= floor_y
+
+        # World offset from person_offsets.json (via session_manifest)
+        tid = person_bindings[pidx]["track_id"]
+        offset_cam = offsets_raw.get(str(tid))
+        if offset_cam is not None:
+            # Transform camera-frame offset to world frame using frame-0 orientations
+            rdata = _load_results(
+                pdir / "demo" / "isolated_video" / "hmr4d_results.pt", 0
+            )
+            results_pt = torch.load(
+                str(pdir / "demo" / "isolated_video" / "hmr4d_results.pt"),
+                map_location="cpu", weights_only=False,
+            )
+            go_incam_0 = np.array(results_pt["smpl_params_incam"]["global_orient"][0])
+            go_world_key = "global_orient_world"
+            if go_world_key in results_pt:
+                go_world_0 = np.array(results_pt[go_world_key][0])
+            elif "smpl_params_global" in results_pt and "global_orient" in results_pt["smpl_params_global"]:
+                go_world_0 = np.array(results_pt["smpl_params_global"]["global_orient"][0])
+            else:
+                go_world_0 = go_incam_0  # fallback
+
+            from scipy.spatial.transform import Rotation
+            R_incam = Rotation.from_rotvec(go_incam_0).as_matrix()
+            R_world = Rotation.from_rotvec(go_world_0).as_matrix()
+            R_c2w = R_world @ R_incam.T
+
+            off_3d = np.array(
+                [offset_cam[0], 0.0, offset_cam[2] if len(offset_cam) > 2 else 0.0],
+                dtype=np.float64,
+            )
+            off_w = R_c2w @ off_3d
+            tw[:, 0] += off_w[0]
+            tw[:, 2] += off_w[2]
+            log.info("  Person %d (track %d): applied world offset (%.3f, %.3f)",
+                     pidx, tid, off_w[0], off_w[2])
 
     # --- Load SLAM ---
     slam_path = find_slam(output_dir)
@@ -232,20 +282,37 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
     )
     log.info("VLM inference done in %.1fs, got %d frame estimates", time.monotonic() - t0, len(person_positions))
 
-    # --- Screen → world conversion ---
-    if K_shared is None:
-        log.error("No camera intrinsics (K_fullimg) available")
-        return 1
+    # --- Compute per-frame scale from intrinsics ---
+    # Use reference person's depth for scale (all persons share similar depth)
+    ref_pid = sorted(per_person_incam.keys())[0] if per_person_incam else 0
+    if ref_pid in per_person_incam and K_shared is not None:
+        scale_per_frame = compute_per_frame_scale(per_person_incam[ref_pid], K_shared)
+        log.info(
+            "Per-frame scale: min=%.2f, max=%.2f, mean=%.2f m/frac",
+            scale_per_frame.min(), scale_per_frame.max(), scale_per_frame.mean(),
+        )
+    else:
+        log.warning("No incam/intrinsics — using fixed scale=%.1f", args.scale)
+        scale_per_frame = args.scale
 
-    vlm_world = screen_to_world_positions(
-        person_positions, slam_w2c, per_person_incam, K_shared,
-    )
-    log.info("Converted VLM positions to world-space for %d frames", len(vlm_world))
+    # Debug: verify per_person_transl has offsets applied
+    for pidx, tw in per_person_transl.items():
+        log.info("  per_person_transl[%d] frame 0: (%.3f, %.3f, %.3f)",
+                 pidx, tw[0][0], tw[0][1], tw[0][2])
 
-    # --- Compute per-person drift anchors ---
+    # --- Compute per-person drift anchors from relative spacing ---
     all_anchors = compute_multi_person_drift(
-        per_person_transl, vlm_world, reference_person=0,
+        per_person_transl, person_positions, slam_w2c,
+        scale_per_frame=scale_per_frame,
+        reference_person=None,  # auto-select least-drifted person
     )
+
+    # --- Compute drift severity spans (no VLM needed) ---
+    drift_spans = compute_drift_severity(per_person_transl)
+    for pidx, spans in sorted(drift_spans.items()):
+        log.info("  Person %d: %d drift spans", pidx, len(spans))
+        for s, e, sev in spans:
+            log.info("    frames %d–%d  severity %.3fm", s, e, sev)
 
     # --- Write output ---
     out_path = args.out or (output_dir / "drift_corrections.json")
@@ -275,6 +342,10 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
         "num_persons": n_persons,
         "model_used": args.model,
         "persons": persons_out,
+        "drift_spans": {
+            str(pidx): [[s, e, sev] for s, e, sev in spans]
+            for pidx, spans in drift_spans.items()
+        },
     }
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

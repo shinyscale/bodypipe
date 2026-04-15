@@ -2177,6 +2177,16 @@ class MeshViewport(_BaseWidget):
             parts.append("camera fallback")
         elif world_active and self._camera_mode == "incam" and world_reason == "missing derived camera alignment":
             parts.append("in-camera view missing alignment")
+
+        # Append file artifact name + modification timestamp for freshness
+        stamp = getattr(track, "_motion_file_stamp", (None, None))
+        if stamp[1] is not None:
+            from datetime import datetime
+            mtime = datetime.fromtimestamp(stamp[1] / 1e9)
+            time_str = mtime.strftime("%H:%M:%S")
+            artifact = stamp[0].rsplit("/", 1)[-1] if stamp[0] else "?"
+            parts.append(f"{artifact} @ {time_str}")
+
         return " | ".join(parts)
 
     def current_source_status_detail_text(self) -> str:
