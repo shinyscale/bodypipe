@@ -228,10 +228,15 @@ class PersonPanelDock(QDockWidget):
         self._remove_kf_btn.clicked.connect(identity_inspector._on_remove_keyframe)
         self._next_kf_btn.clicked.connect(identity_inspector._on_next_keyframe)
 
+        # Confidence timeline + breakdown — tab-agnostic (always visible)
+        layout.addWidget(identity_inspector.confidence_timeline)
+        layout.addWidget(identity_inspector.confidence_breakdown)
+
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
         self._tabs.addTab(identity_inspector, "Identity")
         self._tabs.addTab(pose_corrector, "Pose Corrector")
+        self._tabs.addTab(pose_corrector.position_tab, "Position Corrector")
         layout.addWidget(self._tabs, 1)
 
         self.setWidget(container)

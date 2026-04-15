@@ -268,17 +268,15 @@ class IdentityInspector(QWidget):
         header.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(header)
 
-        # ---- Confidence Timeline ----
+        # ---- Confidence Timeline + Breakdown (created here, parented by
+        #      PersonPanelDock so they stay visible across tabs) ----
         self._timeline = ConfidenceTimeline()
-        layout.addWidget(self._timeline)
 
-        # ---- Confidence Breakdown ----
         breakdown_group = QGroupBox("Confidence Breakdown")
         breakdown_layout = QVBoxLayout(breakdown_group)
 
         self._conf_labels: dict[str, QLabel] = {}
 
-        # Row 1: Detection, Visibility, Overlap
         row1 = QHBoxLayout()
         for metric in ["detection", "visibility", "overlap"]:
             lbl = QLabel(f"{CONFIDENCE_LABELS[metric]}: \u2014")
@@ -288,7 +286,6 @@ class IdentityInspector(QWidget):
         row1.addStretch()
         breakdown_layout.addLayout(row1)
 
-        # Row 2: Shape, Motion, Overall
         row2 = QHBoxLayout()
         for metric in ["shape", "motion", "overall"]:
             lbl = QLabel(f"{CONFIDENCE_LABELS[metric]}: \u2014")
@@ -298,7 +295,10 @@ class IdentityInspector(QWidget):
         row2.addStretch()
         breakdown_layout.addLayout(row2)
 
-        layout.addWidget(breakdown_group)
+        self._breakdown_group = breakdown_group
+        # NOTE: timeline and breakdown are NOT added to this layout —
+        # PersonPanelDock places them above the tab widget so they are
+        # visible on both Identity and Pose Corrector tabs.
 
         # ---- Keyframe Table ----
         kf_group = QGroupBox("Keyframes")
@@ -506,6 +506,18 @@ class IdentityInspector(QWidget):
         layout.addWidget(self._reprocess_btn)
 
         layout.addStretch()
+
+    # ------------------------------------------------------------------
+    # Widgets that PersonPanelDock parents above the tab bar
+    # ------------------------------------------------------------------
+
+    @property
+    def confidence_timeline(self) -> ConfidenceTimeline:
+        return self._timeline
+
+    @property
+    def confidence_breakdown(self) -> QGroupBox:
+        return self._breakdown_group
 
     def _connect_signals(self):
         self._timeline.frame_clicked.connect(self._on_timeline_clicked)
