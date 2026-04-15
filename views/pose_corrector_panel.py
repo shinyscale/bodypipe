@@ -3317,9 +3317,17 @@ class PoseCorrectorPanel(QWidget):
                         ref_params[rpid] = rp.smplx_params
 
         try:
+            # Ensure num_frames is set — loaded params may not have it
+            params = track.smplx_params
+            if "num_frames" not in params:
+                for k in ("body_pose", "global_orient", "transl_world", "transl"):
+                    if k in params and hasattr(params[k], "shape"):
+                        params["num_frames"] = int(params[k].shape[0])
+                        break
+
             self._export_status.setText("Exporting BVH...")
             result = convert_fn(
-                track.smplx_params,
+                params,
                 out_path,
                 fps=self._session.fps,
                 skip_world_grounding=True,
@@ -3380,9 +3388,17 @@ class PoseCorrectorPanel(QWidget):
                         ref_params[rpid] = rp.smplx_params
 
         try:
+            # Ensure num_frames is set — loaded params may not have it
+            params = track.smplx_params
+            if "num_frames" not in params:
+                for k in ("body_pose", "global_orient", "transl_world", "transl"):
+                    if k in params and hasattr(params[k], "shape"):
+                        params["num_frames"] = int(params[k].shape[0])
+                        break
+
             self._export_status.setText("Exporting BVH...")
             bvh_result = convert_bvh(
-                track.smplx_params,
+                params,
                 bvh_path,
                 fps=self._session.fps,
                 skip_world_grounding=True,
