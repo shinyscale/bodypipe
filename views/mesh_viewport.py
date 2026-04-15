@@ -2672,14 +2672,9 @@ class MeshViewport(_BaseWidget):
         speed = self._orbit_distance * _ROOT_DRAG_SENSITIVITY
 
         if alt_held:
-            # Vertical mode: mouse-up → Y+, mouse-right → camera-right on XZ
-            cam_right = self._view[0, :3].copy().astype(np.float64)
-            cam_right[1] = 0.0
-            rn = np.linalg.norm(cam_right)
-            if rn > 1e-8:
-                cam_right /= rn
-            delta = cam_right * float(dx) * speed
-            delta[1] = float(-dy) * speed  # mouse-up = Y+
+            # Vertical-only mode: mouse-up → Y+, ignore mouse-X
+            delta = np.zeros(3, dtype=np.float64)
+            delta[1] = float(-dy) * speed
         else:
             # XZ ground plane mode
             cam_right = self._view[0, :3].copy().astype(np.float64)
