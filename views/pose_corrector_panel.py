@@ -1537,15 +1537,8 @@ class PoseCorrectorPanel(QWidget):
         self._pos_anchor_table.setMaximumHeight(140)
         lay.addWidget(self._pos_anchor_table)
 
-        # Options row: include Y + apply to all
+        # Options row
         opts_row = QHBoxLayout()
-        self._pos_include_y = QCheckBox("Include Y (vertical)")
-        self._pos_include_y.setChecked(False)
-        self._pos_include_y.setToolTip(
-            "When checked, vertical (Y-axis) corrections are preserved.\n"
-            "When unchecked, only horizontal XZ corrections are applied."
-        )
-        opts_row.addWidget(self._pos_include_y)
         self._pos_apply_all = QCheckBox("Apply to all persons")
         self._pos_apply_all.setChecked(False)
         self._pos_apply_all.setToolTip(
@@ -4265,7 +4258,6 @@ class PoseCorrectorPanel(QWidget):
         # drift actually accumulates (proportional to XZ displacement).
         drift_curve = compute_drift_weight_curve(np.asarray(tw, dtype=np.float64))
 
-        xz_only = not self._pos_include_y.isChecked()
         apply_all = self._pos_apply_all.isChecked()
 
         offsets = compute_position_offsets(
@@ -4276,7 +4268,6 @@ class PoseCorrectorPanel(QWidget):
             blend_frames=blend,
             propagate=True,
             drift_curve=drift_curve,
-            xz_only=xz_only,
         )
 
         if not offsets:
