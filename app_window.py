@@ -2919,56 +2919,17 @@ class AppWindow(QMainWindow):
         except Exception:
             pass
 
-        # Drift severity spans — compute live from world translations when
-        # available (multi-person), otherwise fall back to drift_corrections.json.
-        self._compute_or_load_drift_spans()
-
-    def _compute_or_load_drift_spans(self):
-        """Compute drift severity spans from world translations, or load from JSON."""
-        if len(self._session.person_tracks) < 2:
-            self._load_drift_spans_if_available()
-            return
-
-        # Gather world translations from motion sources
-        per_person_transl: dict[int, np.ndarray] = {}
-        for pid, track in self._session.person_tracks.items():
-            ms = getattr(track, "motion_sources", None) or {}
-            # Prefer world_physics > world_baseline > camera_baseline
-            for src_key in ("world_physics", "world_baseline", "camera_baseline"):
-                src = ms.get(src_key)
-                if src is not None and "transl" in src:
-                    tr = np.asarray(src["transl"], dtype=np.float32)
-                    if tr.ndim == 2 and tr.shape[1] >= 3:
-                        per_person_transl[pid] = tr
-                        break
-
-        if len(per_person_transl) < 2:
-            self._load_drift_spans_if_available()
-            return
-
-        try:
-            from workers.drift_correct import compute_drift_severity
-
-            drift_spans = compute_drift_severity(per_person_transl)
-            n_spans = 0
-            for pid, spans in drift_spans.items():
-                frame_spans = [(s, e) for s, e, _sev in spans]
-                if frame_spans:
-                    self._track_overview.set_track_markers(
-                        pid, drift_correction_spans=frame_spans,
-                    )
-                    n_spans += len(frame_spans)
-            if n_spans:
-                log.info("Computed %d drift spans from world translations", n_spans)
-            else:
-                # No spans from live data — try JSON fallback
-                self._load_drift_spans_if_available()
-        except Exception:
-            log.debug("Live drift computation failed, trying JSON", exc_info=True)
-            self._load_drift_spans_if_available()
+        # Drift severity spans from VLM drift corrections
+        self._load_drift_spans_if_available()
 
     def _load_drift_spans_if_available(self):
-        """Auto-load drift severity spans from drift_corrections.json."""
+        """Auto-load drift spans from drift_corrections.json.
+
+        Supports two JSON layouts:
+        - **drift_spans** dict (keyed by person index): explicit frame ranges.
+        - **persons** list with ``anchors``: derive spans between consecutive
+          anchors whose XZ correction magnitude exceeds *threshold*.
+        """
         if self._session.output_dir is None:
             return
         corr_path = self._session.output_dir / "drift_corrections.json"
@@ -2979,34 +2940,60 @@ class AppWindow(QMainWindow):
 
             with open(corr_path) as fh:
                 corr_data = _json.load(fh)
-            drift_spans = corr_data.get("drift_spans", {})
-            if not drift_spans:
-                return
 
             # Remap person_index → track_id via session_manifest
             manifest_path = self._session.output_dir / "session_manifest.json"
-            bindings = []
+            bindings: list[dict] = []
             if manifest_path.is_file():
                 with open(manifest_path) as mf:
                     bindings = _json.load(mf).get("person_bindings", [])
 
-            for pidx_str, spans in drift_spans.items():
-                pidx = int(pidx_str)
-                tid = (
-                    bindings[pidx]["track_id"]
-                    if bindings and pidx < len(bindings)
-                    else pidx
+            def _pid_to_tid(pidx: int) -> int:
+                if bindings and pidx < len(bindings):
+                    return int(bindings[pidx]["track_id"])
+                return pidx
+
+            n_loaded = 0
+
+            # --- Format 1: explicit drift_spans dict ---
+            explicit = corr_data.get("drift_spans", {})
+            if explicit:
+                for pidx_str, spans in explicit.items():
+                    tid = _pid_to_tid(int(pidx_str))
+                    frame_spans = [(int(s[0]), int(s[1])) for s in spans]
+                    self._track_overview.set_track_markers(
+                        tid, drift_correction_spans=frame_spans,
+                    )
+                    n_loaded += len(frame_spans)
+
+            # --- Format 2: derive from VLM anchors ---
+            threshold_m = 0.15
+            for person in corr_data.get("persons", []):
+                anchors = person.get("anchors", [])
+                if len(anchors) < 2:
+                    continue
+                pidx = int(person.get("person_id", 0))
+                tid = _pid_to_tid(pidx)
+                spans: list[tuple[int, int]] = []
+                for i in range(len(anchors) - 1):
+                    a_cur = anchors[i]
+                    a_nxt = anchors[i + 1]
+                    t = a_nxt["target"]
+                    mag_xz = (t[0] ** 2 + t[2] ** 2) ** 0.5
+                    if mag_xz >= threshold_m:
+                        spans.append((int(a_cur["frame"]), int(a_nxt["frame"])))
+                if spans:
+                    self._track_overview.set_track_markers(
+                        tid, drift_correction_spans=spans,
+                    )
+                    n_loaded += len(spans)
+
+            if n_loaded:
+                log.info(
+                    "Loaded %d drift spans from %s", n_loaded, corr_path.name,
                 )
-                frame_spans = [(int(s[0]), int(s[1])) for s in spans]
-                self._track_overview.set_track_markers(
-                    tid, drift_correction_spans=frame_spans,
-                )
-            log.info(
-                "Auto-loaded drift spans for %d persons from %s",
-                len(drift_spans), corr_path.name,
-            )
         except Exception:
-            log.debug("Failed to auto-load drift spans", exc_info=True)
+            log.debug("Failed to load drift spans", exc_info=True)
 
     # ------------------------------------------------------------------
     # Open video
