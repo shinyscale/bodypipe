@@ -64,12 +64,7 @@ try:
 except ImportError:
     pass
 
-import platform as _platform
-_IS_WSL = False
-try:
-    _IS_WSL = "microsoft" in _platform.uname().release.lower()
-except Exception:
-    pass
+from platform_info import IS_WSL as _IS_WSL
 
 # ---------------------------------------------------------------------------
 # Shader sources — embedded copies of shaders/mesh.vert and mesh.frag.

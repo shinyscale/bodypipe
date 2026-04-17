@@ -884,15 +884,11 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         smplestx_dir = str(self._gvhmr_root)
 
-        candidates = [
-            Path.home() / "miniconda3" / "envs" / "smplestx" / "bin" / "python",
-            Path.home() / "anaconda3" / "envs" / "smplestx" / "bin" / "python",
-            Path.home() / ".conda" / "envs" / "smplestx" / "bin" / "python",
-        ]
-        for c in candidates:
-            if c.is_file():
+        from platform_info import conda_python
+        for c in conda_python("smplestx"):
+            if Path(c).is_file():
                 self.log_message.emit(f"SMPLest-X env: {c}", "info")
-                return str(c), smplestx_dir
+                return c, smplestx_dir
 
         self.log_message.emit(
             "SMPLest-X: script found but no smplestx conda env — hands disabled",

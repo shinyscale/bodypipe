@@ -5,7 +5,6 @@ creates the QApplication, and launches the main window.
 """
 
 import os
-import platform
 import sys
 from pathlib import Path
 
@@ -14,15 +13,15 @@ GVHMR_ROOT = Path(__file__).resolve().parent.parent / "GVHMR"
 if str(GVHMR_ROOT) not in sys.path:
     sys.path.insert(0, str(GVHMR_ROOT))
 
+from platform_info import IS_WSL
+
 # On WSL2, force llvmpipe (GL 4.5) since MESA's hardware backends often
 # fail under WSL2, leaving only swrast (GL ≤2.1).  PYOPENGL_PLATFORM=egl
 # tells PyOpenGL to query the EGL context (Wayland uses EGL, not GLX).
-try:
-    if "microsoft" in platform.uname().release.lower():
-        os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
-except Exception:
-    pass
+# Native Windows and native Linux don't need these overrides.
+if IS_WSL:
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 from PySide6.QtWidgets import QApplication, QComboBox
 from PySide6.QtCore import QTimer
@@ -66,11 +65,8 @@ def main():
     app.setOrganizationName("GVHMR")
 
     # Fix WSL2/Wayland combo box popup persistence
-    try:
-        if "microsoft" in platform.uname().release.lower():
-            _patch_combobox_for_wayland()
-    except Exception:
-        pass
+    if IS_WSL:
+        _patch_combobox_for_wayland()
 
     window = AppWindow()
     window.show()

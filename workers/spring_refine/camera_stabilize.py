@@ -285,7 +285,7 @@ def _compute_cam_angvel(R_w2c):
     cam_angvel : torch.Tensor of shape ``(N, 6)``
     """
     import torch
-    from pytorch3d.transforms import matrix_to_rotation_6d
+    from rotation_utils import matrix_to_rotation_6d
 
     # R @ R0 = R1, so R = R1 @ R0^T
     rel = R_w2c[1:] @ R_w2c[:-1].transpose(-1, -2)  # (N-1, 3, 3)

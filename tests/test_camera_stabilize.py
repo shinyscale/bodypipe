@@ -83,7 +83,7 @@ def test_smooth_c2w_short_sequence():
 def test_cam_angvel_identity_rotations():
     """Identity W2C rotations should produce (near-)identity 6D cam_angvel."""
     from workers.spring_refine.camera_stabilize import _compute_cam_angvel
-    from pytorch3d.transforms import rotation_6d_to_matrix
+    from rotation_utils import rotation_6d_to_matrix
 
     R = torch.eye(3).unsqueeze(0).expand(20, -1, -1)
     angvel = _compute_cam_angvel(R)

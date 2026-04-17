@@ -135,7 +135,7 @@ def analyze_and_correct_drift(
     slam_w2c = _load_slam(pt_path, None)
     if slam_w2c is None:
         # Fallback: identity cam_angvel (static camera assumption)
-        from pytorch3d.transforms import matrix_to_rotation_6d
+        from rotation_utils import matrix_to_rotation_6d
 
         identity_6d = matrix_to_rotation_6d(torch.eye(3).unsqueeze(0))  # (1, 6)
         cam_angvel = identity_6d.expand(N, -1).float()

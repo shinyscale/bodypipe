@@ -21,14 +21,11 @@ class PhcResult:
 
 def _find_phc_python(phc_root: Path) -> str:
     """Find the Python binary for the PHC conda environment."""
-    candidates = [
-        Path.home() / "miniconda3" / "envs" / "phc" / "bin" / "python",
-        Path.home() / "anaconda3" / "envs" / "phc" / "bin" / "python",
-        Path.home() / ".conda" / "envs" / "phc" / "bin" / "python",
-    ]
-    for c in candidates:
-        if c.is_file():
-            return str(c)
+    from platform_info import conda_python
+
+    for c in conda_python("phc"):
+        if Path(c).is_file():
+            return c
     return "python"  # Fall back to system python
 
 
