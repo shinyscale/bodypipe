@@ -1629,6 +1629,42 @@ class MultiPersonWorker(QThread):
                             f"[Spring] Person {i}: camera stabilization failed: {stab_exc}"
                         )
 
+                # Drift analysis (after cam stabilize, before spring refine)
+                drift_diag: dict = {}
+                effective_pin_strength = float(self._config.foot_pin_strength)
+                if self._config.use_drift_analysis:
+                    try:
+                        from workers.spring_refine.drift_analysis import (
+                            analyze_and_correct_drift,
+                            write_drift_diagnostics,
+                        )
+
+                        corrected, drift_diag = analyze_and_correct_drift(
+                            pt_path,
+                            params,
+                            fps=float(self._fps),
+                            cam_smooth_preset=self._config.cam_smooth_preset,
+                        )
+                        if corrected is not None:
+                            params["global_orient"] = corrected["global_orient"]
+                            params["transl"] = corrected["transl"]
+                            self.log_line.emit(
+                                f"[Spring] Person {i}: drift analysis corrected "
+                                f"({drift_diag.get('pre_correction_drift_xz_cm', '?')} → "
+                                f"{drift_diag.get('post_correction_drift_xz_cm', '?')} cm XZ)"
+                            )
+                        effective_pin_strength = min(
+                            effective_pin_strength,
+                            drift_diag.get("recommended_pin_strength", 1.0),
+                        )
+                        # Write diagnostics JSON
+                        diag_path = person_dir / "spring_refine" / "drift_analysis.json"
+                        write_drift_diagnostics(drift_diag, diag_path)
+                    except Exception as drift_exc:
+                        self.log_line.emit(
+                            f"[Spring] Person {i}: drift analysis failed: {drift_exc}"
+                        )
+
                 baseline_params = dict(params)
                 baseline_transl = (
                     np.asarray(params.get("transl")).copy()
@@ -1642,13 +1678,23 @@ class MultiPersonWorker(QThread):
                     pin_feet=pin_enabled,
                     filter_rotations=filter_enabled,
                     foot_pin_sensitivity=self._config.foot_pin_sensitivity,
-                    foot_pin_strength=float(self._config.foot_pin_strength),
+                    foot_pin_strength=effective_pin_strength,
                 )
-                if not ok:
+                drift_corrected = drift_diag.get("correction_applied", False)
+                if not ok and not drift_corrected:
                     self.log_line.emit(
-                        f"[Spring] Person {i}: filter returned no data, skipping."
+                        f"[Spring] Person {i}: no refinement applied, skipping."
                     )
                     continue
+                if not ok:
+                    # Spring filter/pin were no-ops but drift analysis
+                    # corrected params — use the drift-corrected params
+                    # as the "refined" output so they get persisted.
+                    refined = dict(params)
+                    refined["num_frames"] = int(
+                        np.asarray(params["body_pose"]).reshape(-1, 63).shape[0]
+                    )
+                    refined["source"] = "drift_corrected"
 
                 # Capture baseline with the same fall-through chain as
                 # _run_physics_multi. Freshly-solved hmr4d_results.pt stores
@@ -1727,9 +1773,12 @@ class MultiPersonWorker(QThread):
                         np.asarray(baseline_transl).reshape(n, -1),
                         dtype=torch.float32,
                     )
-                data["source"] = (
-                    "spring_refined_pinned" if pinned else "spring_refined"
-                )
+                if pinned:
+                    data["source"] = "spring_refined_pinned"
+                elif refined.get("source") == "drift_corrected":
+                    data["source"] = "drift_corrected"
+                else:
+                    data["source"] = "spring_refined"
                 torch.save(data, str(pt_path))
 
                 snapshot_path: Path | None = None

@@ -2059,6 +2059,7 @@ class AppWindow(QMainWindow):
             # Clear stale params so _hydrate reloads from new output
             track.smplx_params = None
             track.soma_params = None
+            track.motion_sources = None
             track.confidences = None
             track.confidence_breakdown = None
         self._hydrate_person_tracks()
@@ -2358,6 +2359,18 @@ class AppWindow(QMainWindow):
         hybrid_pts = list(person_dir.glob("*_hybrid_smplx.pt"))
         if not hybrid_pts:
             return None
+
+        # Read current pipeline settings to avoid loading stale refined files
+        # when those refinement features are now disabled.
+        want_spring = False
+        want_pin = False
+        try:
+            cfg = self._pipeline_dock.current_settings.get_config()
+            want_spring = cfg.use_spring_refine
+            want_pin = cfg.use_foot_pin
+        except Exception:
+            pass
+
         try:
             import torch
 
@@ -2366,13 +2379,16 @@ class AppWindow(QMainWindow):
                 score = 0
                 try:
                     data = torch.load(str(path), map_location="cpu", weights_only=False)
-                    source_tag = data.get("source")
-                    if source_tag in (
-                        "phc_refined",
-                        "spring_refined",
-                        "spring_refined_pinned",
-                    ):
+                    source_tag = data.get("source", "")
+
+                    # Only boost refined files when those features are enabled
+                    if source_tag == "spring_refined_pinned" and want_spring and want_pin:
                         score += 100
+                    elif source_tag == "spring_refined" and want_spring:
+                        score += 100
+                    elif source_tag == "phc_refined":
+                        score += 100
+
                     if all(
                         key in data
                         for key in (
