@@ -124,8 +124,14 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                 # Prefer GVHMR's body_params_global (well-calibrated world-grounding)
                 # over GEM-X's (insufficient for large orbits).
                 bp_global = data.get("body_params_global", {})
+                gemx_global_present = bool(
+                    bp_global
+                    and "transl" in bp_global
+                    and "global_orient" in bp_global
+                )
                 go_world = np.array(bp_global.get("global_orient", global_orient)).astype(np.float32)
                 tr_world = np.array(bp_global.get("transl", transl)).astype(np.float32)
+                world_source = "gemx_global" if gemx_global_present else "camera_fallback"
 
                 gvhmr_world = _load_gvhmr_world_params(f)
                 if gvhmr_world is not None:
@@ -135,6 +141,7 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                         # matching the orbit camera's world_up = [0, 1, 0].
                         go_world = gvhmr_go_global
                         tr_world = gvhmr_tr_global
+                        world_source = "gvhmr"
                     else:
                         logger.warning(
                             "GVHMR frames %d != GEM-X %d — using GEM-X global",
@@ -148,6 +155,19 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                     floor_y = float(tr_world[0, 1]) - _LEG_LENGTH
                     tr_world = tr_world.copy()
                     tr_world[:, 1] -= floor_y
+
+                has_world_grounding = world_source != "camera_fallback"
+
+                # Diagnostic: incam vs world path lengths so world-grounding
+                # regressions surface in the worker log instead of silently
+                # producing camera-space data labelled as world.
+                if tr_world.shape[0] > 1 and transl.shape[0] > 1:
+                    incam_path = float(np.linalg.norm(np.diff(transl, axis=0), axis=1).sum())
+                    world_path = float(np.linalg.norm(np.diff(tr_world, axis=0), axis=1).sum())
+                    logger.info(
+                        "GEM-X translation: source=%s, incam path=%.2fm, world path=%.2fm",
+                        world_source, incam_path, world_path,
+                    )
 
                 if n_pose_joints <= 21:
                     # SMPL-X format (21 body joints) — use smplx_params path
@@ -186,7 +206,12 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
 
                 result["identity_model_type"] = "gemx"
                 result["source_file"] = str(f)
-                logger.info("Loaded GEM-X output from %s: %d frames", f, n_frames)
+                result["has_world_grounding"] = has_world_grounding
+                result["world_source"] = world_source
+                logger.info(
+                    "Loaded GEM-X output from %s: %d frames, world_source=%s",
+                    f, n_frames, world_source,
+                )
                 return result
             except Exception as exc:
                 logger.debug("Failed to load %s: %s", f, exc)
