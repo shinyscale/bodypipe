@@ -75,10 +75,37 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
                     conf_probs = 1.0 / (1.0 + np.exp(-conf_logits.astype(np.float64)))
                     confidences = conf_probs.max(axis=1).astype(np.float32)
 
-                # Also load global-space orient/transl for orbit mode
-                bp_global = data.get("body_params_global", {})
-                go_world = np.asarray(bp_global.get("global_orient", global_orient)).astype(np.float32)
-                tr_world = np.asarray(bp_global.get("transl", transl)).astype(np.float32)
+                # Also load global-space orient/transl for orbit mode.
+                # Falls back to camera values if body_params_global is absent —
+                # has_world_grounding (below) tells downstream whether the
+                # world fields are real world data or a fallback copy of camera.
+                bp_global = data.get("body_params_global")
+                has_world_grounding = bool(
+                    bp_global
+                    and "transl" in bp_global
+                    and "global_orient" in bp_global
+                )
+                if has_world_grounding:
+                    go_world = np.asarray(bp_global["global_orient"]).astype(np.float32)
+                    tr_world = np.asarray(bp_global["transl"]).astype(np.float32)
+                    # Diagnostic: incam vs global drift, so world-grounding
+                    # regressions are visible at load time instead of silent.
+                    incam_path = float(np.linalg.norm(np.diff(transl, axis=0), axis=1).sum())
+                    world_path = float(np.linalg.norm(np.diff(tr_world, axis=0), axis=1).sum())
+                    logger.info(
+                        "GEM-X translation: incam path=%.2fm, world path=%.2fm, "
+                        "max|incam-world|=%.2fm",
+                        incam_path,
+                        world_path,
+                        float(np.abs(transl - tr_world).max()),
+                    )
+                else:
+                    go_world = global_orient.astype(np.float32)
+                    tr_world = transl.astype(np.float32)
+                    logger.warning(
+                        "GEM-X output missing body_params_global — "
+                        "transl_world will be a copy of camera-space transl"
+                    )
 
                 if n_pose_joints <= 21:
                     # SMPL-X format (21 body joints) — use smplx_params path
@@ -131,7 +158,11 @@ def load_gemx_soma_output(output_dir: Path) -> dict | None:
 
                 result["identity_model_type"] = "gemx"
                 result["source_file"] = str(f)
-                logger.info("Loaded GEM-X output from %s: %d frames", f, n_frames)
+                result["has_world_grounding"] = has_world_grounding
+                logger.info(
+                    "Loaded GEM-X output from %s: %d frames, world_grounding=%s",
+                    f, n_frames, has_world_grounding,
+                )
                 return result
             except Exception as exc:
                 logger.debug("Failed to load %s: %s", f, exc)
@@ -229,10 +260,15 @@ class GEMXWorker(SubprocessWorkerBase):
                         )
                         self.log_line.emit(f"[GEM-X] SimpleVO camera.pt saved: {camera_pt}")
                     except Exception as e:
+                        # GEM-X still produces body_params_global from the
+                        # network alone, so this is a refinement failure —
+                        # not fatal. Surface it prominently so regressions
+                        # don't hide behind a quiet log line.
                         self.log_line.emit(
-                            f"[GEM-X] WARNING: SimpleVO failed ({e}), "
-                            "world grounding may be inaccurate"
+                            f"[GEM-X] SimpleVO FAILED ({e}); world grounding "
+                            "will use GEM-X's network output without VO refinement"
                         )
+                        logger.error("SimpleVO failed: %s", e, exc_info=True)
                 else:
                     self.log_line.emit(f"[GEM-X] Using existing camera.pt: {camera_pt}")
 
