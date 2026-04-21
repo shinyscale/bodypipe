@@ -19,6 +19,7 @@ class ReprocessWorker(QThread):
     person_done = Signal(int)
     finished = Signal(dict)
     error = Signal(str)
+    log_line = Signal(str)
 
     def __init__(self, session: Session, person_ids: list[int], parent=None):
         super().__init__(parent)

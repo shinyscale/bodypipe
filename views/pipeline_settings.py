@@ -667,6 +667,22 @@ class PerfPipelineSettings(SinglePipelineSettings):
 
         self._insert_before_stretch(hand_section)
 
+        # Person isolation group — SAM2 + ProPainter for removing other
+        # people from the frame before solving.
+        isolation_section = CollapsibleSection("Person Isolation", collapsed=True)
+        iso_layout = isolation_section.content_layout
+
+        self._use_inpainting = QCheckBox("SAM2 + ProPainter inpainting")
+        self._use_inpainting.setChecked(True)
+        self._use_inpainting.setToolTip(
+            "Segment other people with SAM2 and inpaint them out with ProPainter\n"
+            "before running the body solver. Prevents solver confusion when\n"
+            "people overlap or cross. Adds ~3 min per person to pipeline time."
+        )
+        iso_layout.addWidget(self._use_inpainting)
+
+        self._insert_before_stretch(isolation_section)
+
         # Face capture group — collapsed by default (most users don't touch it).
         face_section = CollapsibleSection("Face Capture", collapsed=True)
         face_layout = face_section.content_layout
@@ -699,6 +715,15 @@ class PerfPipelineSettings(SinglePipelineSettings):
             "Camera Smoothing preset to control smoothing strength."
         )
         motion_layout.addWidget(self._use_camera_stabilize)
+
+        self._use_drift_analysis = QCheckBox("Correct subject drift")
+        self._use_drift_analysis.setChecked(True)
+        self._use_drift_analysis.setToolTip(
+            "Detect and correct accumulated translation drift in the subject's\n"
+            "world-space position. Independent of camera motion — applies even\n"
+            "to static-camera footage where the subject's transl drifts over time."
+        )
+        motion_layout.addWidget(self._use_drift_analysis)
 
         _stab_sep = QFrame()
         _stab_sep.setFrameShape(QFrame.HLine)
@@ -999,6 +1024,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
         self._use_camera_stabilize.setEnabled(not running)
+        self._use_drift_analysis.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
         self._foot_pin_sensitivity.setEnabled(not running)
         self._foot_pin_strength.setEnabled(not running)
@@ -1065,6 +1091,7 @@ class PerfPipelineSettings(SinglePipelineSettings):
             estimation_backend=be,
             body_model=bm,
             use_camera_stabilize=self._use_camera_stabilize.isChecked(),
+            use_drift_analysis=self._use_drift_analysis.isChecked(),
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
@@ -1072,14 +1099,17 @@ class PerfPipelineSettings(SinglePipelineSettings):
                 self._foot_pin_sensitivity.currentIndex()
             ),
             foot_pin_strength=float(self._foot_pin_strength.value()),
+            use_inpainting=self._use_inpainting.isChecked(),
         )
 
     def set_config(self, config: PipelineConfig):
         """Apply settings including hand/face/pipeline options."""
         super().set_config(config)
+        self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
         self._use_face.setChecked(config.use_face)
         self._use_camera_stabilize.setChecked(config.use_camera_stabilize)
+        self._use_drift_analysis.setChecked(config.use_drift_analysis)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
         self._foot_pin_sensitivity.setCurrentIndex(
@@ -1318,6 +1348,15 @@ class MultiPipelineSettings(QWidget):
             "Camera Smoothing preset to control smoothing strength."
         )
         mp_layout.addWidget(self._use_camera_stabilize)
+
+        self._use_drift_analysis = QCheckBox("Correct subject drift")
+        self._use_drift_analysis.setChecked(True)
+        self._use_drift_analysis.setToolTip(
+            "Detect and correct accumulated translation drift in the subject's\n"
+            "world-space position. Independent of camera motion — applies even\n"
+            "to static-camera footage where the subject's transl drifts over time."
+        )
+        mp_layout.addWidget(self._use_drift_analysis)
 
         _mp_stab_sep = QFrame()
         _mp_stab_sep.setFrameShape(QFrame.HLine)
@@ -1614,6 +1653,7 @@ class MultiPipelineSettings(QWidget):
         self._use_inpainting.setEnabled(not running)
         self._use_hands.setEnabled(not running)
         self._use_camera_stabilize.setEnabled(not running)
+        self._use_drift_analysis.setEnabled(not running)
         self._use_spring.setEnabled(not running)
         self._spring_preset.setEnabled(not running)
         self._use_foot_pin.setEnabled(not running)
@@ -1681,6 +1721,7 @@ class MultiPipelineSettings(QWidget):
             use_hands=self._use_hands.isChecked(),
             hand_source="hamer" if self._hand_src_hamer.isChecked() else "smplestx",
             use_camera_stabilize=self._use_camera_stabilize.isChecked(),
+            use_drift_analysis=self._use_drift_analysis.isChecked(),
             use_spring_refine=self._use_spring.isChecked(),
             spring_refine_preset=spring_key,
             use_foot_pin=self._use_foot_pin.isChecked(),
@@ -1704,6 +1745,7 @@ class MultiPipelineSettings(QWidget):
         self._use_inpainting.setChecked(config.use_inpainting)
         self._use_hands.setChecked(config.use_hands)
         self._use_camera_stabilize.setChecked(config.use_camera_stabilize)
+        self._use_drift_analysis.setChecked(config.use_drift_analysis)
         self._use_spring.setChecked(config.use_spring_refine)
         self._use_foot_pin.setChecked(config.use_foot_pin)
         self._foot_pin_sensitivity.setCurrentIndex(

@@ -2020,6 +2020,9 @@ class AppWindow(QMainWindow):
         self._reprocess_worker.person_done.connect(self._on_reprocess_person_done)
         self._reprocess_worker.finished.connect(self._on_reprocess_finished)
         self._reprocess_worker.error.connect(self._on_reprocess_error)
+        self._reprocess_worker.log_line.connect(
+            lambda msg: self._log_panel.append_line(msg, "info")
+        )
         self._reprocess_worker.start()
 
         self._multi_settings._progress_bar.show()

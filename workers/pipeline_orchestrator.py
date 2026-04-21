@@ -1017,18 +1017,24 @@ class FullPipelineWorker(SubprocessWorkerBase):
         return callback
 
     def _gvhmr_command(self) -> list[str]:
-        cmd = [
-            sys.executable,
-            "tools/demo/demo.py",
-            f"--video={self._video_path}",
-        ]
+        args = [f"--video={self._video_path}"]
         if self._config.static_cam:
-            cmd.append("--static_cam")
+            args.append("--static_cam")
         if self._config.use_dpvo:
-            cmd.append("--use_dpvo")
+            args.append("--use_dpvo")
         if self._config.focal_mm != 24.0:
-            cmd.append(f"--f_mm={self._config.focal_mm}")
-        return cmd
+            args.append(f"--f_mm={self._config.focal_mm}")
+
+        # On native Windows, delegate to WSL2's gvhmr conda env
+        if sys.platform == "win32":
+            from platform_info import wsl_solve_command
+            return wsl_solve_command(
+                conda_env="gvhmr",
+                script=str(self._gvhmr_root / "tools" / "demo" / "demo.py"),
+                args=args,
+                cwd=str(self._gvhmr_root),
+            )
+        return [sys.executable, "tools/demo/demo.py"] + args
 
     def _smplestx_command(self) -> list[str]:
         return [
@@ -1607,6 +1613,83 @@ class MultiPersonWorker(QThread):
 
             try:
                 params = extract_gvhmr_params(str(pt_path))
+
+                # IK death detection: GVHMR's process_ik uses a recursive
+                # exponential average of static confidence to blend joint
+                # targets.  Even low confidence (0.05) accumulates over
+                # hundreds of frames, killing the pose signal.  Detect
+                # spans where the post-processed body_pose is frozen but
+                # the raw network output is alive, and substitute the raw
+                # poses for those frames.
+                #
+                # Gated on use_spring_refine: this is a destructive data
+                # substitution and belongs under the "Enable spring-based
+                # refinement" toggle. When that toggle is off, we leave
+                # GVHMR's body_pose untouched.
+                if self._config.use_spring_refine:
+                    try:
+                        ik_data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+                        raw_bp = ik_data.get("raw_body_pose")
+                        if raw_bp is not None:
+                            raw_bp = np.asarray(raw_bp, dtype=np.float32).reshape(-1, 63)
+                            final_bp = np.asarray(params["body_pose"], dtype=np.float32).reshape(-1, 63)
+                            n = min(len(raw_bp), len(final_bp))
+                            # Per-frame delta ratio: raw motion / post-processed motion
+                            raw_delta = np.linalg.norm(np.diff(raw_bp[:n], axis=0), axis=1)
+                            fin_delta = np.linalg.norm(np.diff(final_bp[:n], axis=0), axis=1)
+                            dead = (raw_delta > 0.08) & (fin_delta < 0.02)
+                            n_dead = int(dead.sum())
+                            if n_dead > 0:
+                                # Build contiguous spans for logging
+                                dead_padded = np.concatenate([[False], dead, [False]])
+                                edges = np.diff(dead_padded.astype(int))
+                                starts = np.where(edges == 1)[0]
+                                ends = np.where(edges == -1)[0] - 1
+                                spans = list(zip(starts.tolist(), ends.tolist()))
+                                # Substitute raw body_pose for dead frames.
+                                # +1 offset because dead is computed on diff (frame pairs)
+                                for s, e in spans:
+                                    # dead[s] means frames s and s+1 pair is dead
+                                    fs, fe = s + 1, min(e + 2, n)
+                                    final_bp[fs:fe] = raw_bp[fs:fe]
+                                params["body_pose"] = final_bp
+                                # Also fix global_orient if similarly frozen
+                                spg = ik_data.get("smpl_params_global", {})
+                                net_out = ik_data.get("net_outputs", {})
+                                raw_go = None
+                                if isinstance(net_out, dict):
+                                    psg = net_out.get("pred_smpl_params_global", {})
+                                    if isinstance(psg, dict) and "global_orient" in psg:
+                                        raw_go = np.asarray(psg["global_orient"], dtype=np.float32)
+                                        if raw_go.ndim == 3:
+                                            raw_go = raw_go[0]  # remove batch dim
+                                        raw_go = raw_go.reshape(-1, 3)
+                                if raw_go is not None:
+                                    final_go = np.asarray(params["global_orient"], dtype=np.float32).reshape(-1, 3)
+                                    for s, e in spans:
+                                        fs, fe = s + 1, min(e + 2, n)
+                                        final_go[fs:fe] = raw_go[fs:fe]
+                                    params["global_orient"] = final_go
+                                # Save IK death spans to disk for UI markers
+                                ik_spans_path = person_dir / "ik_death_spans.json"
+                                import json as _json
+                                ik_spans_path.write_text(_json.dumps({
+                                    "spans": [[int(s + 1), int(min(e + 2, n) - 1)] for s, e in spans],
+                                    "total_dead_frames": n_dead,
+                                    "total_frames": n,
+                                }, indent=2))
+                                span_desc = ", ".join(f"{s+1}-{min(e+2,n)-1}" for s, e in spans[:5])
+                                if len(spans) > 5:
+                                    span_desc += f" (+{len(spans)-5} more)"
+                                self.log_line.emit(
+                                    f"[Spring] Person {i}: IK death bypass — {n_dead} frames "
+                                    f"substituted with raw network poses [{span_desc}]"
+                                )
+                        del ik_data
+                    except Exception as ik_exc:
+                        self.log_line.emit(
+                            f"[Spring] Person {i}: IK death detection skipped: {ik_exc}"
+                        )
 
                 # Camera stabilization (per-person)
                 if self._config.use_camera_stabilize:

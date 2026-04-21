@@ -207,11 +207,17 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
 
     # --- Load detection bboxes ---
     try:
-        all_bboxes = load_detection_bboxes(output_dir, manifest)
+        all_bboxes, detection_masks = load_detection_bboxes(output_dir, manifest)
     except FileNotFoundError as e:
         log.error("%s", e)
         return 1
     log.info("Loaded detection bboxes for %d persons", len(all_bboxes))
+    for pidx, mask in sorted(detection_masks.items()):
+        detected = int(mask.sum())
+        total = len(mask)
+        if detected < total:
+            log.info("  Person %d: %d/%d frames detected (%.0f%%)",
+                     pidx, detected, total, 100 * detected / total)
 
     # --- Video info + frame sampling ---
     cap = cv2.VideoCapture(str(video_path))
@@ -231,6 +237,40 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
         interval_sec=args.interval,
         max_samples=args.max_samples,
     )
+
+    # Nudge keyframes away from undetected spans — prefer frames where all
+    # persons have real detections.  Search within ±half-step for a frame
+    # where every person is detected; keep the original if none found.
+    step = max(1, int(round(fps * args.interval)))
+    half_step = step // 2
+    nudged = 0
+    for ki, gvi in enumerate(gvhmr_indices):
+        all_detected = all(
+            detection_masks.get(pidx, np.ones(1, dtype=bool))[min(gvi, len(detection_masks.get(pidx, np.ones(1, dtype=bool))) - 1)]
+            for pidx in range(n_persons)
+        )
+        if all_detected:
+            continue
+        # Search outward from gvi for a nearby frame with full detection
+        best = None
+        for offset in range(1, half_step + 1):
+            for candidate in [gvi + offset, gvi - offset]:
+                if candidate < 0 or candidate >= det_frame_count:
+                    continue
+                if all(
+                    detection_masks.get(pidx, np.ones(1, dtype=bool))[min(candidate, len(detection_masks.get(pidx, np.ones(1, dtype=bool))) - 1)]
+                    for pidx in range(n_persons)
+                ):
+                    best = candidate
+                    break
+            if best is not None:
+                break
+        if best is not None:
+            gvhmr_indices[ki] = best
+            nudged += 1
+    if nudged:
+        log.info("Nudged %d keyframes to frames with full detection coverage", nudged)
+
     video_indices = [min(int(round(i * frame_ratio)), video_frame_count - 1) for i in gvhmr_indices]
     log.info("Sampled %d keyframes (GVHMR): %s", len(gvhmr_indices), gvhmr_indices)
 
@@ -239,6 +279,7 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
     vid_to_gvhmr = dict(zip(video_indices, gvhmr_indices))
 
     frames: dict[int, np.ndarray] = {}
+    visible_persons_per_frame: dict[int, list[int]] = {}
     for vi, gvi in vid_to_gvhmr.items():
         if vi not in raw_frames:
             continue
@@ -256,10 +297,15 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
         frame_bboxes: dict[int, tuple] = {}
         for pidx, bbox_arr in all_bboxes.items():
             if gvi < len(bbox_arr):
+                # Skip persons not actually detected at this frame
+                mask = detection_masks.get(pidx)
+                if mask is not None and gvi < len(mask) and not mask[gvi]:
+                    continue
                 x1, y1, x2, y2 = bbox_arr[gvi]
                 frame_bboxes[pidx] = (x1 * sx, y1 * sy, x2 * sx, y2 * sy)
 
         frames[gvi] = annotate_frame_with_persons(frame, frame_bboxes)
+        visible_persons_per_frame[gvi] = sorted(frame_bboxes.keys())
 
     log.info("Annotated %d frames with person bboxes", len(frames))
     if len(frames) < 2:
@@ -279,6 +325,7 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
         interval_sec=args.interval,
         model=args.model,
         ollama_url=ollama_url,
+        visible_persons_per_frame=visible_persons_per_frame,
     )
     log.info("VLM inference done in %.1fs, got %d frame estimates", time.monotonic() - t0, len(person_positions))
 
@@ -305,10 +352,13 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
         per_person_transl, person_positions, slam_w2c,
         scale_per_frame=scale_per_frame,
         reference_person=None,  # auto-select least-drifted person
+        detection_masks=detection_masks,
     )
 
     # --- Compute drift severity spans (no VLM needed) ---
-    drift_spans = compute_drift_severity(per_person_transl)
+    drift_spans = compute_drift_severity(
+        per_person_transl, detection_masks=detection_masks,
+    )
     for pidx, spans in sorted(drift_spans.items()):
         log.info("  Person %d: %d drift spans", pidx, len(spans))
         for s, e, sev in spans:
@@ -326,6 +376,20 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
             if last_f < len(tw):
                 drift_m = float(np.linalg.norm(tw[last_f].astype(np.float64) - last_t))
 
+        # Detection range: first/last frame where this person was actually detected
+        det_range = None
+        mask = detection_masks.get(pidx)
+        if mask is not None and mask.any():
+            first_det = int(np.argmax(mask))
+            last_det = int(len(mask) - 1 - np.argmax(mask[::-1]))
+            detected_count = int(mask.sum())
+            det_range = {
+                "first_frame": first_det,
+                "last_frame": last_det,
+                "detected_frames": detected_count,
+                "total_frames": len(mask),
+            }
+
         persons_out.append({
             "person_id": pidx,
             "person_dir": str(person_dirs[pidx]) if pidx < len(person_dirs) else None,
@@ -334,6 +398,7 @@ def _run_multi_person(args, output_dir: Path, video_path: Path) -> int:
                 for f, t in anchors
             ],
             "estimated_drift_m": round(drift_m, 4),
+            "detection_range": det_range,
         })
 
     out_data = {

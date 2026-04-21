@@ -437,11 +437,16 @@ _PERSON_COLORS = [
 def load_detection_bboxes(
     output_dir: Path,
     session_manifest: dict,
-) -> dict[int, np.ndarray]:
-    """Load per-person bboxes from ``detection/all_tracks.pt``.
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+    """Load per-person bboxes and detection masks from ``detection/all_tracks.pt``.
 
-    Returns ``{person_idx: (N_frames, 4) xyxy}`` keyed by person index
-    (0, 1, ...) matching the order in ``session_manifest["person_bindings"]``.
+    Returns ``(bboxes, masks)`` where:
+    - *bboxes*: ``{person_idx: (N_frames, 4) xyxy}``
+    - *masks*: ``{person_idx: (N_frames,) bool}`` — True where the detector
+      actually found the person, False where the bbox is interpolated/missing.
+
+    Both are keyed by person index (0, 1, ...) matching the order in
+    ``session_manifest["person_bindings"]``.
     """
     tracks_path = output_dir / "detection" / "all_tracks.pt"
     if not tracks_path.is_file():
@@ -450,22 +455,31 @@ def load_detection_bboxes(
     data = torch.load(str(tracks_path), map_location="cpu", weights_only=False)
     tracks_list = data["tracks"]
 
-    # Build track_id → bbox array mapping
+    # Build track_id → (bbox, mask) mapping
     tid_to_bbox: dict[int, np.ndarray] = {}
+    tid_to_mask: dict[int, np.ndarray] = {}
     for t in tracks_list:
         tid = int(t["track_id"])
         tid_to_bbox[tid] = np.array(t["bbx_xyxy"], dtype=np.float32)
+        if "detection_mask" in t:
+            tid_to_mask[tid] = np.array(t["detection_mask"], dtype=bool)
 
     # Map person_idx → track_id via person_bindings
-    result: dict[int, np.ndarray] = {}
+    bboxes: dict[int, np.ndarray] = {}
+    masks: dict[int, np.ndarray] = {}
     for pidx, pb in enumerate(session_manifest["person_bindings"]):
         tid = pb["track_id"]
         if tid in tid_to_bbox:
-            result[pidx] = tid_to_bbox[tid]
+            bboxes[pidx] = tid_to_bbox[tid]
+            if tid in tid_to_mask:
+                masks[pidx] = tid_to_mask[tid]
+            else:
+                # No mask available — assume all detected
+                masks[pidx] = np.ones(len(tid_to_bbox[tid]), dtype=bool)
         else:
             log.warning("Track %d for person %d not found in all_tracks.pt", tid, pidx)
 
-    return result
+    return bboxes, masks
 
 
 def annotate_frame_with_persons(
@@ -516,14 +530,18 @@ def annotate_frame_with_persons(
 
 _MULTI_PERSON_PROMPT = """\
 You are analyzing a multi-person motion capture video. Each frame has colored \
-bounding boxes labeling {n_persons} people (Person 0, Person 1, etc.).
+bounding boxes labeling people (Person 0, Person 1, etc.).
 
 These {n} frames are sampled at regular intervals ({interval:.1f}s apart).
 
-For EACH frame, estimate where each labeled person's feet touch the ground, \
+For EACH frame, estimate where each LABELED person's feet touch the ground, \
 as fractions of the image dimensions:
 - x_frac: 0.0 = left edge, 1.0 = right edge
 - y_frac: 0.0 = top edge, 1.0 = bottom edge
+
+IMPORTANT: Only include persons whose bounding box is drawn on that frame. \
+If a person has no bounding box in a frame, OMIT them from that frame's list \
+— do NOT guess their position.
 
 Reply with ONLY a JSON array:
 [
@@ -533,7 +551,7 @@ Reply with ONLY a JSON array:
   ]}},
   ...
 ]
-Frame numbers are 1-indexed. Include ALL frames and ALL persons.\
+Frame numbers are 1-indexed. Include ALL frames.\
 """
 
 
@@ -544,8 +562,13 @@ def estimate_person_positions(
     interval_sec: float = 2.0,
     model: str = OLLAMA_DEFAULT_MODEL,
     ollama_url: str = OLLAMA_DEFAULT_URL,
+    visible_persons_per_frame: dict[int, list[int]] | None = None,
 ) -> list[dict]:
     """Send annotated multi-person frames to VLM, get per-person positions.
+
+    *visible_persons_per_frame* maps ``{frame_idx: [person_ids_with_bboxes]}``
+    to tell the VLM which persons are actually labeled in each frame.  If
+    ``None``, all persons are assumed visible in every frame.
 
     Returns list of ``{"frame_idx": int, "persons": [{"id": int, "x_frac": float, "y_frac": float}, ...]}``
     where *frame_idx* is in GVHMR frame space.
@@ -558,9 +581,26 @@ def estimate_person_positions(
     images_b64 = [_frame_to_base64(frames[i]) for i in ordered_indices]
 
     frame_labels = "\n".join(f"Image {i}: Frame {i}" for i in range(1, n + 1))
+
+    # Add per-frame visibility notes if some persons are missing
+    visibility_note = ""
+    if visible_persons_per_frame is not None:
+        missing_notes = []
+        for seq_i, fidx in enumerate(ordered_indices, 1):
+            visible = visible_persons_per_frame.get(fidx)
+            if visible is not None and len(visible) < n_persons:
+                present = ", ".join(f"Person {p}" for p in sorted(visible))
+                missing_notes.append(f"Frame {seq_i}: only {present} labeled")
+        if missing_notes:
+            visibility_note = (
+                "\n\nDetection notes (some persons not visible in all frames):\n"
+                + "\n".join(missing_notes)
+            )
+
     prompt_text = (
         frame_labels + "\n\n"
         + _MULTI_PERSON_PROMPT.format(n=n, n_persons=n_persons, interval=interval_sec)
+        + visibility_note
     )
 
     payload = {
@@ -634,6 +674,7 @@ def compute_multi_person_drift(
     slam_w2c: np.ndarray,                        # (N,4,4) for camera orientation
     scale_per_frame: np.ndarray | float = 3.0,   # meters per screen-fraction
     reference_person: int | None = None,
+    detection_masks: dict[int, np.ndarray] | None = None,
 ) -> dict[int, list[tuple[int, np.ndarray]]]:
     """Compute per-person correction anchors from VLM inter-person spacing.
 
@@ -646,6 +687,10 @@ def compute_multi_person_drift(
 
     If *reference_person* is ``None``, the person with the smallest total
     XZ displacement is chosen (most likely to be stationary / least drifted).
+
+    *detection_masks* (optional) maps ``{person_idx: (N,) bool}`` — when
+    provided, anchors are only generated at frames where **both** the
+    reference and target person have real detections (not interpolated).
 
     Returns ``{person_idx: [(frame, target_pos), ...]}`` — each list is
     compatible with ``compute_position_offsets()``.
@@ -691,6 +736,15 @@ def compute_multi_person_drift(
                 continue
             if fidx >= len(slam_w2c):
                 continue
+
+            # Skip frames where either person lacks a real detection
+            if detection_masks is not None:
+                ref_mask = detection_masks.get(reference_person)
+                p_mask = detection_masks.get(pidx)
+                if ref_mask is not None and fidx < len(ref_mask) and not ref_mask[fidx]:
+                    continue
+                if p_mask is not None and fidx < len(p_mask) and not p_mask[fidx]:
+                    continue
 
             # Find both persons in this frame's VLM output
             ref_pos = None
@@ -760,12 +814,17 @@ def compute_drift_severity(
     per_person_transl: dict[int, np.ndarray],
     reference_person: int | None = None,
     threshold_m: float = 0.1,
+    detection_masks: dict[int, np.ndarray] | None = None,
 ) -> dict[int, list[tuple[int, int, float]]]:
     """Compute inter-person drift severity over time.
 
     Compares each person's XZ distance from *reference_person* at each frame
     against their distance at frame 0.  When the divergence exceeds
     *threshold_m*, a span begins; when it drops below, the span ends.
+
+    *detection_masks* (optional) — frames where either person lacks a real
+    detection are treated as unknown (divergence forced to 0) so phantom
+    trajectories from offscreen persons don't produce false drift spans.
 
     Returns ``{person_idx: [(start_frame, end_frame, severity), ...]}``
     where *severity* is the max divergence (metres) within that span.
@@ -799,14 +858,29 @@ def compute_drift_severity(
         if n == 0:
             continue
 
+        # Build a per-frame validity mask: both persons must be detected
+        valid = np.ones(n, dtype=bool)
+        if detection_masks is not None:
+            ref_mask = detection_masks.get(reference_person)
+            p_mask = detection_masks.get(pidx)
+            if ref_mask is not None:
+                valid[:min(n, len(ref_mask))] &= ref_mask[:min(n, len(ref_mask))]
+            if p_mask is not None:
+                valid[:min(n, len(p_mask))] &= p_mask[:min(n, len(p_mask))]
+
         # XZ distance at each frame
         dx = p_transl[:n, 0] - ref_transl[:n, 0]
         dz = p_transl[:n, 2] - ref_transl[:n, 2]
         dist = np.sqrt(dx ** 2 + dz ** 2)
 
-        # Divergence from frame-0 distance
-        dist0 = dist[0]
+        # Use first mutually-detected frame as baseline (not frame 0,
+        # which may be before one person enters the shot)
+        first_valid = np.argmax(valid) if valid.any() else 0
+        dist0 = dist[first_valid]
         divergence = np.abs(dist - dist0)
+
+        # Zero out divergence at frames where either person is undetected
+        divergence[~valid] = 0.0
 
         # Extract contiguous spans where divergence > threshold
         spans: list[tuple[int, int, float]] = []

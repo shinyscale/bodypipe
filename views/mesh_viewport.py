@@ -840,7 +840,7 @@ _PAN_SENSITIVITY = 0.003       # fraction of distance per pixel
 _ZOOM_FACTOR = 0.1             # fraction of distance per wheel step
 _ORBIT_DEFAULT_FOV = 45.0      # vertical FOV in degrees
 _ORBIT_DEFAULT_DISTANCE = 3.0  # meters from orbit center
-_ORBIT_DEFAULT_YAW = 0.0       # look from +Z
+_ORBIT_DEFAULT_YAW = 180.0     # look from -Z (facing the character's front)
 _ORBIT_DEFAULT_PITCH = 10.0    # slight tilt from above
 _PITCH_LIMIT = 89.0            # clamp to avoid gimbal lock
 _ORBIT_DEFAULT_CENTER = np.array([0.0, 0.0, -2.5], dtype=np.float32)
@@ -1400,12 +1400,20 @@ class MeshViewport(_BaseWidget):
         self._position_hud()
 
     def _recompute_letterbox(self):
-        """Recompute the letterbox rect from widget size and video aspect ratio."""
+        """Recompute the letterbox rect from widget size and video aspect ratio.
+
+        In orbit (world-space) camera mode, use the full widget area — the 3D
+        scene is not tied to the video frame.  Letterboxing only applies in
+        incam mode where the mesh overlays the video.
+        """
         w, h = max(self.width(), 1), max(self.height(), 1)
-        if self._session and self._session.img_width > 0 and self._session.img_height > 0:
-            self._letterbox = compute_letterbox(w, h, self._session.img_width, self._session.img_height)
-        else:
+        if (self._camera_mode == "orbit"
+                or not self._session
+                or self._session.img_width <= 0
+                or self._session.img_height <= 0):
             self._letterbox = (0, 0, w, h)
+        else:
+            self._letterbox = compute_letterbox(w, h, self._session.img_width, self._session.img_height)
 
     def _widget_to_viewport(self, wx: float, wy: float) -> tuple[float, float] | None:
         """Convert widget-space mouse coords to viewport-space. None if outside letterbox."""
@@ -1567,6 +1575,7 @@ class MeshViewport(_BaseWidget):
             return
         self._camera_mode = mode
         self._incam_offset = np.zeros(3, dtype=np.float32)  # reset stale offset
+        self._recompute_letterbox()  # orbit uses full widget; incam letterboxes to video
         self._invalidate_cache()  # vertices depend on camera mode (incam vs world params)
         if mode == "orbit":
             self._orbit_auto_centered = False  # force re-center on mode switch
