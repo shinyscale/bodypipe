@@ -1,0 +1,2094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bodypipe — SAM2 falling sand</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; overflow: hidden; font-family: monospace; display: flex; align-items: center; justify-content: center; height: 100vh; }
+canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+#info { position: fixed; top: 8px; left: 8px; color: #555; font-size: 11px; z-index: 10; pointer-events: none; }
+#tuner {
+  position: fixed; top: 8px; right: 8px; z-index: 30;
+  background: rgba(0,0,0,0.85); color: #ccc; font-family: monospace;
+  font-size: 11px; padding: 10px 14px; border-radius: 6px;
+  display: none; min-width: 240px; max-height: 90vh; overflow-y: auto;
+}
+#tuner h3 { margin: 0 0 8px; color: #eee; font-size: 12px; }
+#tuner label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+#tuner input[type=range] { flex: 1; height: 14px; accent-color: #888; }
+#tuner .val { min-width: 42px; text-align: right; color: #aaa; font-size: 10px; }
+#tuner .section { margin-top: 8px; padding-top: 6px; border-top: 1px solid #333; color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+#loading {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #666; font-family: monospace; font-size: 14px; z-index: 100;
+  background: #111;
+}
+#controls {
+  position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 6px; z-index: 20; flex-wrap: wrap; justify-content: center;
+}
+#controls button {
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px; padding: 6px 12px; font-family: monospace; font-size: 12px;
+  cursor: pointer; touch-action: manipulation;
+}
+#controls button:active { background: rgba(255,255,255,0.25); }
+#controls button.mode-active { background: rgba(100,180,140,0.3); border-color: rgba(100,180,140,0.5); }
+
+#tuner .mat-row {
+  display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 4px 0;
+}
+#tuner .mat-row.dim button { opacity: 0.35; }
+#tuner .mat-row button {
+  background: rgba(255,255,255,0.08); color: #999; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px; padding: 4px 8px; font-family: monospace; font-size: 11px;
+  cursor: pointer; touch-action: manipulation; display: inline-flex; align-items: center; gap: 5px;
+}
+#tuner .mat-row button:active { background: rgba(255,255,255,0.2); }
+#tuner .mat-row button.mat-active { color: #eee; border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.15); }
+#tuner .mat-row button.fill-active { color: #eee; border-color: rgba(100,180,140,0.5); background: rgba(100,180,140,0.25); }
+#tuner .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* ── Gallery ── */
+#gallery {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: #111; z-index: 200; overflow-y: auto;
+  padding: 20px; display: none;
+}
+#gallery.active { display: block; }
+body.gallery-mode { overflow: auto; }
+#gallery-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 20px; padding: 0 4px;
+}
+#gallery-header h1 { color: #ddd; font-size: 18px; font-weight: normal; }
+#upload-btn {
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 6px; padding: 10px 18px; font-family: monospace; font-size: 13px;
+  cursor: pointer; touch-action: manipulation;
+}
+#upload-btn:active { background: rgba(255,255,255,0.25); }
+#gallery-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+}
+.gallery-card {
+  background: #1a1a1a; border-radius: 8px; overflow: hidden;
+  cursor: pointer; transition: transform 0.15s;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.gallery-card:active { transform: scale(0.97); }
+.gallery-card .thumb {
+  width: 100%; aspect-ratio: 3/4; object-fit: cover;
+  display: block; background: #222;
+}
+.gallery-card .thumb-placeholder {
+  width: 100%; aspect-ratio: 3/4; background: #222;
+  display: flex; align-items: center; justify-content: center;
+  color: #555; font-size: 11px;
+}
+.gallery-card .card-info {
+  padding: 8px 10px; color: #aaa; font-size: 12px;
+}
+.gallery-card .card-info .name { color: #ddd; margin-bottom: 3px; }
+.gallery-card .card-info .meta { color: #666; font-size: 10px; }
+.gallery-card.processing { cursor: default; opacity: 0.8; }
+.gallery-card.processing .thumb-placeholder {
+  background: #1a1a2a;
+}
+
+/* Progress bar inside card */
+.card-progress {
+  height: 3px; background: #333; margin: 6px 10px 0;
+  border-radius: 2px; overflow: hidden;
+}
+.card-progress-fill {
+  height: 100%; background: #5a8; border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Back button in sim mode */
+#back-btn {
+  position: fixed; top: 10px; right: 8px; z-index: 25;
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px; padding: 6px 12px; font-family: monospace; font-size: 12px;
+  cursor: pointer; touch-action: manipulation; display: none;
+}
+#back-btn:active { background: rgba(255,255,255,0.25); }
+
+/* ── Upload modal ── */
+#upload-modal {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.92); z-index: 300;
+  display: none; align-items: center; justify-content: center;
+  padding: 20px;
+}
+#upload-modal.active { display: flex; }
+#upload-box {
+  background: #1a1a1a; border-radius: 12px; padding: 24px;
+  max-width: 400px; width: 100%; border: 1px solid rgba(255,255,255,0.1);
+}
+#upload-box h2 { color: #ddd; font-size: 15px; font-weight: normal; margin-bottom: 16px; }
+#drop-zone {
+  border: 2px dashed rgba(255,255,255,0.2); border-radius: 8px;
+  padding: 32px 16px; text-align: center; color: #666;
+  font-size: 13px; margin-bottom: 14px; transition: border-color 0.2s;
+}
+#drop-zone.dragover { border-color: #5a8; color: #5a8; }
+#drop-zone input[type=file] { display: none; }
+#drop-zone .browse-link { color: #7ab; text-decoration: underline; cursor: pointer; }
+#upload-name {
+  width: 100%; background: #222; border: 1px solid rgba(255,255,255,0.15);
+  color: #ccc; font-family: monospace; font-size: 13px;
+  padding: 8px 10px; border-radius: 6px; margin-bottom: 14px;
+}
+#upload-name::placeholder { color: #555; }
+#upload-actions { display: flex; gap: 10px; justify-content: flex-end; }
+#upload-actions button {
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 6px; padding: 10px 18px; font-family: monospace; font-size: 13px;
+  cursor: pointer;
+}
+#upload-actions .submit-btn { background: #2a4a3a; border-color: #3a6a4a; color: #8d8; }
+#upload-actions .submit-btn:disabled { opacity: 0.4; cursor: default; }
+#upload-status { color: #888; font-size: 12px; margin-top: 10px; display: none; }
+#upload-progress-bar {
+  height: 3px; background: #333; border-radius: 2px;
+  margin-top: 8px; overflow: hidden; display: none;
+}
+#upload-progress-fill {
+  height: 100%; background: #5a8; border-radius: 2px;
+  transition: width 0.2s ease; width: 0%;
+}
+</style>
+</head>
+<body>
+<!-- Gallery view -->
+<div id="gallery">
+  <div id="gallery-header">
+    <h1>bodypipe</h1>
+    <button id="upload-btn" onclick="openUpload()">+ upload</button>
+  </div>
+  <div id="gallery-grid"></div>
+</div>
+
+<!-- Upload modal -->
+<div id="upload-modal">
+  <div id="upload-box">
+    <h2>upload video</h2>
+    <div id="drop-zone">
+      <div>drop a video here</div>
+      <div style="margin-top:8px">or <span class="browse-link" onclick="document.getElementById('file-input').click()">browse files</span></div>
+      <input type="file" id="file-input" accept="video/*">
+    </div>
+    <div id="selected-file" style="color:#888;font-size:12px;margin-bottom:10px;display:none"></div>
+    <input type="text" id="upload-name" placeholder="name (optional, derived from filename)">
+    <div id="upload-actions">
+      <button onclick="closeUpload()">cancel</button>
+      <button class="submit-btn" id="submit-upload-btn" onclick="submitUpload()" disabled>upload + process</button>
+    </div>
+    <div id="upload-status"></div>
+    <div id="upload-progress-bar"><div id="upload-progress-fill"></div></div>
+  </div>
+</div>
+
+<!-- Simulation view -->
+<div id="loading" style="display:none">loading masks...</div>
+<div id="info"></div>
+<div id="tuner"><h3>tuner</h3></div>
+<canvas id="canvas" tabindex="0"></canvas>
+<button id="back-btn" onclick="goToGallery()">gallery</button>
+<div id="controls" style="display:none">
+  <button onclick="playing=!playing">play/pause</button>
+  <button onclick="stepFrame(-1)">&laquo;</button>
+  <button onclick="stepFrame(1)">&raquo;</button>
+  <button id="mode-in-btn" class="mode-active" onclick="toggleInside()">inside</button>
+  <button id="mode-out-btn" onclick="toggleOutside()">outside</button>
+  <button id="interact-btn" onclick="toggleInteract()">interact</button>
+  <button onclick="toggleP('showMask')">mask</button>
+  <button onclick="cycleVideoOpacity()">video</button>
+  <button onclick="respawn()">respawn</button>
+  <button onclick="toggleTuner()">tuner</button>
+</div>
+
+<script>
+// ── Mode: gallery (no ?video=) or simulation (?video=X) ──
+const VIDEOS_BASE = '../research/videos/';
+const API_BASE = '/api';
+const params = new URLSearchParams(location.search);
+const videoName = params.get('video');
+const isGalleryMode = !videoName;
+
+let MASK_DIR, VIDEO_DIR, TOTAL_FRAMES, FPS, MASK_W, MASK_H, CELL, GW, GH;
+
+function setDefaults() {
+  MASK_DIR = '../research/lieberman_masks/';
+  VIDEO_DIR = '../research/lieberman_video_frames/';
+  TOTAL_FRAMES = 300;
+  FPS = 30;
+  MASK_W = 720; MASK_H = 900;
+  CELL = 4;
+  GW = Math.floor(MASK_W / CELL);
+  GH = Math.floor(MASK_H / CELL);
+}
+
+async function loadConfig() {
+  const configUrl = VIDEOS_BASE + videoName + '/config.json';
+  try {
+    const resp = await fetch(configUrl);
+    if (!resp.ok) throw new Error(resp.status);
+    const cfg = await resp.json();
+    MASK_DIR = VIDEOS_BASE + videoName + '/' + (cfg.maskDir || 'masks/');
+    VIDEO_DIR = VIDEOS_BASE + videoName + '/' + (cfg.frameDir || 'frames/');
+    TOTAL_FRAMES = cfg.totalFrames || 300;
+    FPS = cfg.fps || 30;
+    MASK_W = cfg.width || 720;
+    MASK_H = cfg.height || 900;
+    CELL = 4;
+    GW = Math.floor(MASK_W / CELL);
+    GH = Math.floor(MASK_H / CELL);
+    document.title = `bodypipe — ${cfg.name || videoName}`;
+  } catch (e) {
+    console.warn('No config.json found, using defaults:', e);
+    setDefaults();
+  }
+}
+setDefaults();
+
+// ── Material types ──
+const MAT = { EMPTY: 0, SAND: 1, WATER: 2, SMOKE: 3, FIRE: 4, LAVA: 5 };
+let insideMat = MAT.SAND;
+let outsideMat = MAT.SAND;
+
+const MAT_NAMES = { 1: 'sand', 2: 'water', 3: 'smoke', 4: 'fire', 5: 'lava' };
+
+// ── Fill mode (per side) ──
+// 'static' — spawn once at fillPct, no new particles after (default)
+// 'rain'   — spawn at fillPct, keep raining from top
+// 'empty'  — start empty, rain fills scene over time
+let fillModeIn = 'static';
+let fillModeOut = 'static';
+
+// ── Container mode (outside only) ──
+// true  — ground plane acts as floor, particles collect
+// false — no floor, particles fall through bottom of screen
+let containerOut = true;
+
+// ── Material interaction (steam etc.) ──
+let interactMaterials = false;
+
+// Color palettes: [material][inside/outside][variant 0-3] → [r,g,b]
+const MAT_COLORS = {
+  [MAT.SAND]: {
+    inside:  [[232,220,200], [212,196,168], [221,208,184], [240,228,208]],
+    outside: [[180,200,225], [160,178,205], [200,215,230], [145,168,200]],
+  },
+  [MAT.WATER]: {
+    inside:  [[40,110,230], [30,85,210], [55,130,250], [70,150,255]],
+    outside: [[25,55,175], [18,42,155], [35,70,195], [45,65,185]],
+  },
+  [MAT.SMOKE]: {
+    inside:  [[145,140,155], [125,120,135], [165,160,175], [110,105,120]],
+    outside: [[105,105,120], [85,85,100], [125,125,140], [95,95,110]],
+  },
+  [MAT.FIRE]: {
+    inside:  [[255,130,25], [255,90,12], [255,170,45], [255,210,65]],
+    outside: [[255,110,18], [255,70,8], [255,150,35], [245,190,55]],
+  },
+  [MAT.LAVA]: {
+    inside:  [[205,65,12], [225,85,22], [185,45,8], [255,125,35]],
+    outside: [[185,55,12], [205,75,18], [165,40,8], [235,105,28]],
+  },
+};
+
+// ── Sand mode (independent toggles) ──
+let insideOn = true;
+let outsideOn = false;
+let mode = 'inside';
+
+function deriveMode() {
+  if (insideOn && outsideOn) return 'both';
+  if (insideOn) return 'inside';
+  if (outsideOn) return 'outside';
+  return 'none';
+}
+
+function toggleInside() {
+  insideOn = !insideOn;
+  mode = deriveMode();
+  updateModeButtons();
+  respawn();
+  updateMatButtons();
+}
+
+function toggleOutside() {
+  outsideOn = !outsideOn;
+  mode = deriveMode();
+  updateModeButtons();
+  respawn();
+  updateMatButtons();
+}
+
+function updateModeButtons() {
+  const inBtn = document.getElementById('mode-in-btn');
+  const outBtn = document.getElementById('mode-out-btn');
+  if (inBtn) inBtn.classList.toggle('mode-active', insideOn);
+  if (outBtn) outBtn.classList.toggle('mode-active', outsideOn);
+}
+
+function cycleMode() {
+  if (insideOn && !outsideOn) { insideOn = false; outsideOn = true; }
+  else if (!insideOn && outsideOn) { insideOn = true; outsideOn = true; }
+  else if (insideOn && outsideOn) { insideOn = true; outsideOn = false; }
+  else { insideOn = true; outsideOn = false; }
+  mode = deriveMode();
+  updateModeButtons();
+  respawn();
+}
+
+// ── Material picker ──
+function selectMat(side, mat) {
+  if (side === 'inside') {
+    insideMat = mat;
+    mutateGridMaterial('inside', mat);
+  } else {
+    outsideMat = mat;
+    mutateGridMaterial('outside', mat);
+  }
+  updateMatButtons();
+}
+
+function mutateGridMaterial(side, mat) {
+  const grid = side === 'inside' ? gridIn : gridOut;
+  const color = side === 'inside' ? colorIn : colorOut;
+  const life = side === 'inside' ? lifeIn : lifeOut;
+  if (!grid) return;
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i]) {
+      grid[i] = mat;
+      color[i] = (Math.random() * 4) | 0;
+      if (mat === MAT.FIRE) life[i] = (Math.random() * 15) | 0;
+      else if (mat === MAT.SMOKE) life[i] = (Math.random() * 20) | 0;
+      else life[i] = 0;
+    }
+  }
+}
+
+function updateMatButtons() {
+  const inRow = document.getElementById('mat-row-inside');
+  const outRow = document.getElementById('mat-row-outside');
+  if (!inRow || !outRow) return;
+  inRow.querySelectorAll('button[data-mat]').forEach(b => {
+    b.classList.toggle('mat-active', parseInt(b.dataset.mat) === insideMat);
+  });
+  outRow.querySelectorAll('button[data-mat]').forEach(b => {
+    b.classList.toggle('mat-active', parseInt(b.dataset.mat) === outsideMat);
+  });
+  inRow.classList.toggle('dim', !insideOn);
+  outRow.classList.toggle('dim', !outsideOn);
+  const fillInRow = document.getElementById('fill-row-inside');
+  const fillOutRow = document.getElementById('fill-row-outside');
+  if (fillInRow) {
+    fillInRow.querySelectorAll('button[data-fill]').forEach(b => {
+      b.classList.toggle('fill-active', b.dataset.fill === fillModeIn);
+    });
+    fillInRow.classList.toggle('dim', !insideOn);
+  }
+  if (fillOutRow) {
+    fillOutRow.querySelectorAll('button[data-fill]').forEach(b => {
+      b.classList.toggle('fill-active', b.dataset.fill === fillModeOut);
+    });
+    fillOutRow.classList.toggle('dim', !outsideOn);
+  }
+  const containerBtn = document.getElementById('container-out-btn');
+  if (containerBtn) {
+    containerBtn.classList.toggle('fill-active', containerOut);
+    containerBtn.classList.toggle('dim', !outsideOn);
+  }
+}
+
+// ── Fill mode (per side) ──
+function setFillMode(side, m) {
+  if (side === 'inside') fillModeIn = m;
+  else fillModeOut = m;
+  respawn();
+}
+
+// ── Container toggle (outside only) ──
+function toggleContainer() {
+  containerOut = !containerOut;
+  updateMatButtons();
+  respawn();
+}
+
+// ── Interaction toggle ──
+function toggleInteract() {
+  interactMaterials = !interactMaterials;
+  const btn = document.getElementById('interact-btn');
+  if (btn) btn.classList.toggle('mode-active', interactMaterials);
+}
+
+// ── Tunable params ──
+const P = {
+  fillPctIn:    { val: 0.70, min: 0.0,  max: 1.0,  step: 0.05, label: 'inside fill %' },
+  fillPctOut:   { val: 0.70, min: 0.0,  max: 1.0,  step: 0.05, label: 'outside fill %' },
+  rainRate:     { val: 0.30, min: 0.0,  max: 1.0,  step: 0.02, label: 'rain rate' },
+  cellSize:     { val: 4,    min: 1,    max: 8,    step: 1,    label: 'grain size' },
+  iters:        { val: 4,    min: 1,    max: 12,   step: 1,    label: 'physics iters' },
+  playSpeed:    { val: 1.0,  min: 0.1,  max: 3.0,  step: 0.1,  label: 'play speed' },
+  inertia:      { val: 0.8,  min: 0.0,  max: 2.0,  step: 0.05, label: 'inertia' },
+  inertiaDamp:  { val: 0.85, min: 0.5,  max: 0.99, step: 0.01, label: 'inertia damp' },
+  trailLen:     { val: 0.0,  min: 0.0,  max: 0.98, step: 0.02, label: 'trail length' },
+  groundPlane:  { val: 0.95, min: 0.3,  max: 1.0,  step: 0.01, label: 'ground plane' },
+  spin:         { val: 1.0,  min: 0.0,  max: 3.0,  step: 0.1,  label: 'spin force' },
+  reactRate:    { val: 0.40, min: 0.0,  max: 1.0,  step: 0.02, label: 'react rate' },
+  showMask:     { val: 0,    min: 0,    max: 1,    step: 1,    label: 'show mask' },
+  videoOpacity: { val: 0.0,  min: 0.0,  max: 1.0,  step: 0.05, label: 'video opacity' },
+};
+
+// ── State ──
+let fullMasks = [];
+let gridMasks = [];
+let videoFrames = [];
+
+// Dual grids — values are material IDs (0 = empty, 1-5 = material)
+let gridIn = null, colorIn = null, lifeIn = null;
+let gridOut = null, colorOut = null, lifeOut = null;
+
+let currentFrame = 0;
+let prevFrame = -1;
+let playing = true;
+let frameAccum = 0;
+let lastTime = 0;
+let showTuner = false;
+
+// Inertia tracking
+let bodyVelX = 0, bodyVelY = 0;
+
+// Angular velocity tracking (spin/centrifugal)
+let bodyAngularVel = 0;
+let prevOrientation = null;
+let bodyCx = 0, bodyCy = 0; // current body centroid for physics steps
+
+// Reusable step flag for rising particles
+let stepFlag = null;
+
+// Remember last non-zero video opacity for quick toggle button
+let lastVideoOpacity = 0.5;
+
+// ── Canvas ──
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const pCanvas = document.createElement('canvas');
+let pctx;
+const trailCanvas = document.createElement('canvas');
+let trailCtx;
+
+function initCanvases() {
+  pCanvas.width = GW;
+  pCanvas.height = GH;
+  pctx = pCanvas.getContext('2d');
+  trailCanvas.width = GW;
+  trailCanvas.height = GH;
+  trailCtx = trailCanvas.getContext('2d');
+  stepFlag = new Uint8Array(GW * GH);
+}
+
+function resize() {
+  const UI_BOTTOM = 60;
+  const TOP_PAD = 8;
+  const scaleX = window.innerWidth / MASK_W;
+  const scaleY = (window.innerHeight - UI_BOTTOM - TOP_PAD) / MASK_H;
+  const scale = Math.min(scaleX, scaleY);
+  canvas.width = Math.floor(MASK_W * scale);
+  canvas.height = Math.floor(MASK_H * scale);
+  canvas.style.width = canvas.width + 'px';
+  canvas.style.height = canvas.height + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Re-init grid when cell size changes ──
+let cellSizeChangeTimeout = null;
+function onCellSizeChange(newCell) {
+  clearTimeout(cellSizeChangeTimeout);
+  cellSizeChangeTimeout = setTimeout(() => {
+    CELL = Math.max(1, Math.min(8, Math.round(newCell)));
+    GW = Math.floor(MASK_W / CELL);
+    GH = Math.floor(MASK_H / CELL);
+    initCanvases();
+    gridMasks = fullMasks.map(m => downsample(m));
+    respawn();
+  }, 200);
+}
+
+// ── Downsample full mask to grid resolution ──
+function downsample(mask) {
+  const gm = new Uint8Array(GW * GH);
+  const thresh = Math.floor(CELL * CELL * 0.4);
+  for (let gy = 0; gy < GH; gy++) {
+    for (let gx = 0; gx < GW; gx++) {
+      let count = 0;
+      const mx0 = gx * CELL, my0 = gy * CELL;
+      for (let dy = 0; dy < CELL; dy++) {
+        for (let dx = 0; dx < CELL; dx++) {
+          const mx = mx0 + dx, my = my0 + dy;
+          if (mx < MASK_W && my < MASK_H && mask[my * MASK_W + mx]) count++;
+        }
+      }
+      gm[gy * GW + gx] = count >= thresh ? 1 : 0;
+    }
+  }
+  return gm;
+}
+
+// ── Load masks ──
+async function loadMasks() {
+  const offscreen = document.createElement('canvas');
+  offscreen.width = MASK_W;
+  offscreen.height = MASK_H;
+  const octx = offscreen.getContext('2d', { willReadFrequently: true });
+  const loadingEl = document.getElementById('loading');
+
+  for (let i = 0; i < TOTAL_FRAMES; i++) {
+    const img = new Image();
+    img.src = MASK_DIR + String(i).padStart(5, '0') + '.png?v=' + Date.now();
+    await new Promise(r => { img.onload = r; img.onerror = r; });
+
+    octx.clearRect(0, 0, MASK_W, MASK_H);
+    octx.drawImage(img, 0, 0, MASK_W, MASK_H);
+    const imgData = octx.getImageData(0, 0, MASK_W, MASK_H);
+
+    const binary = new Uint8Array(MASK_W * MASK_H);
+    for (let j = 0; j < binary.length; j++) {
+      binary[j] = imgData.data[j * 4] > 128 ? 1 : 0;
+    }
+    fullMasks.push(binary);
+    gridMasks.push(downsample(binary));
+
+    if (i % 30 === 0) loadingEl.textContent = `loading masks... ${i}/${TOTAL_FRAMES}`;
+  }
+
+  // Load video frames (non-blocking, for overlay)
+  for (let i = 0; i < TOTAL_FRAMES; i++) {
+    const img = new Image();
+    img.src = VIDEO_DIR + String(i).padStart(5, '0') + '.jpg';
+    videoFrames.push(img);
+  }
+
+  loadingEl.style.display = 'none';
+  canvas.focus();
+}
+
+// ── Compute grid centroid ──
+function gridCentroid(gmask) {
+  let cx = 0, cy = 0, cnt = 0;
+  for (let y = 0; y < GH; y += 2) {
+    for (let x = 0; x < GW; x += 2) {
+      if (gmask[y * GW + x]) { cx += x; cy += y; cnt++; }
+    }
+  }
+  return cnt > 0 ? { x: cx / cnt, y: cy / cnt } : null;
+}
+
+// ── Compute mask orientation angle via second-order central moments ──
+function maskOrientation(gmask, cx, cy) {
+  let mu20 = 0, mu02 = 0, mu11 = 0;
+  for (let y = 0; y < GH; y += 2) {
+    for (let x = 0; x < GW; x += 2) {
+      if (gmask[y * GW + x]) {
+        const dx = x - cx, dy = y - cy;
+        mu20 += dx * dx;
+        mu02 += dy * dy;
+        mu11 += dx * dy;
+      }
+    }
+  }
+  // Principal axis angle — ranges [-π/2, π/2]
+  return 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
+}
+
+// ── Ground plane row ──
+function groundRow() {
+  return Math.floor(GH * P.groundPlane.val);
+}
+
+// ── Spawn particles ──
+function respawn() {
+  const N = GW * GH;
+  gridIn = new Uint8Array(N);
+  colorIn = new Uint8Array(N);
+  lifeIn = new Uint16Array(N);
+  gridOut = new Uint8Array(N);
+  colorOut = new Uint8Array(N);
+  lifeOut = new Uint16Array(N);
+
+  const gmask = gridMasks[currentFrame];
+  if (!gmask) return;
+
+  const gpRow = groundRow();
+  const startFillIn = fillModeIn === 'empty' ? 0 : P.fillPctIn.val;
+  const startFillOut = fillModeOut === 'empty' ? 0 : P.fillPctOut.val;
+
+  if ((mode === 'inside' || mode === 'both') && startFillIn > 0) {
+    const inside = [];
+    for (let i = 0; i < gmask.length; i++) {
+      if (gmask[i]) inside.push(i);
+    }
+    shuffle(inside);
+    const fill = Math.floor(inside.length * startFillIn);
+    for (let i = 0; i < fill; i++) {
+      gridIn[inside[i]] = insideMat;
+      colorIn[inside[i]] = (Math.random() * 4) | 0;
+      if (insideMat === MAT.FIRE) lifeIn[inside[i]] = (Math.random() * 15) | 0;
+      else if (insideMat === MAT.SMOKE) lifeIn[inside[i]] = (Math.random() * 20) | 0;
+    }
+  }
+
+  if ((mode === 'outside' || mode === 'both') && startFillOut > 0) {
+    const effectiveGP = containerOut ? gpRow : GH;
+    const outside = [];
+    for (let y = 0; y < GH; y++) {
+      if (y >= effectiveGP) continue;
+      for (let x = 0; x < GW; x++) {
+        const i = y * GW + x;
+        if (!gmask[i]) outside.push(i);
+      }
+    }
+    shuffle(outside);
+    const fill = Math.floor(outside.length * startFillOut);
+    for (let i = 0; i < fill; i++) {
+      gridOut[outside[i]] = outsideMat;
+      colorOut[outside[i]] = (Math.random() * 4) | 0;
+      if (outsideMat === MAT.FIRE) lifeOut[outside[i]] = (Math.random() * 15) | 0;
+      else if (outsideMat === MAT.SMOKE) lifeOut[outside[i]] = (Math.random() * 20) | 0;
+    }
+  }
+
+  prevFrame = currentFrame;
+  bodyVelX = 0;
+  bodyVelY = 0;
+  bodyAngularVel = 0;
+  prevOrientation = null;
+  updateMatButtons();
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+}
+
+// ── Find nearest empty cell satisfying a test function ──
+function nearestEmpty(x, y, grid, test) {
+  for (let r = 1; r < Math.max(GW, GH); r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue; // perimeter only
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) continue;
+        const ni = ny * GW + nx;
+        if (!grid[ni] && test(ni, nx, ny)) return ni;
+      }
+    }
+  }
+  return -1;
+}
+
+// ── Move a grain ──
+function moveGrain(grid, color, life, from, to) {
+  grid[to] = grid[from];
+  grid[from] = 0;
+  color[to] = color[from];
+  color[from] = 0;
+  life[to] = life[from];
+  life[from] = 0;
+}
+
+// ── Handle frame transition ──
+function onFrameChange() {
+  if (prevFrame < 0 || !gridMasks[prevFrame]) {
+    prevFrame = currentFrame;
+    return;
+  }
+
+  const oldGM = gridMasks[prevFrame];
+  const newGM = gridMasks[currentFrame];
+  const gpRow = groundRow();
+
+  // Compute centroid shift
+  const c0 = gridCentroid(oldGM);
+  const c1 = gridCentroid(newGM);
+
+  let sx = 0, sy = 0, rawDx = 0, rawDy = 0;
+  if (c0 && c1) {
+    rawDx = c1.x - c0.x;
+    rawDy = c1.y - c0.y;
+    sx = Math.round(rawDx);
+    sy = Math.round(rawDy);
+
+    bodyVelX = bodyVelX * P.inertiaDamp.val + (-rawDx) * P.inertia.val;
+    bodyVelY = bodyVelY * P.inertiaDamp.val + (-rawDy) * P.inertia.val * 0.3;
+  }
+
+  // ── Angular velocity from mask orientation change ──
+  if (c1) {
+    bodyCx = c1.x;
+    bodyCy = c1.y;
+    const theta = maskOrientation(newGM, c1.x, c1.y);
+    if (prevOrientation !== null) {
+      let dTheta = theta - prevOrientation;
+      // Normalize to [-π/2, π/2] — principal axis has π ambiguity
+      while (dTheta > Math.PI / 2) dTheta -= Math.PI;
+      while (dTheta < -Math.PI / 2) dTheta += Math.PI;
+      bodyAngularVel = bodyAngularVel * P.inertiaDamp.val + dTheta * P.spin.val;
+    }
+    prevOrientation = theta;
+  }
+
+  // ── Inside grid: shift with body, teleport escapees ──
+  if (mode === 'inside' || mode === 'both') {
+    if (sx !== 0 || sy !== 0) {
+      const N = GW * GH;
+      const newGrid = new Uint8Array(N);
+      const newColor = new Uint8Array(N);
+      const newLife = new Uint16Array(N);
+      for (let y = 0; y < GH; y++) {
+        for (let x = 0; x < GW; x++) {
+          const idx = y * GW + x;
+          if (!gridIn[idx]) continue;
+          const nx = x + sx, ny = y + sy;
+          if (nx >= 0 && nx < GW && ny >= 0 && ny < GH) {
+            const nidx = ny * GW + nx;
+            if (!newGrid[nidx]) {
+              newGrid[nidx] = gridIn[idx];
+              newColor[nidx] = colorIn[idx];
+              newLife[nidx] = lifeIn[idx];
+            }
+          }
+        }
+      }
+      gridIn = newGrid;
+      colorIn = newColor;
+      lifeIn = newLife;
+    }
+
+    // Push particles outside new mask to nearest empty cell inside it
+    for (let i = 0; i < gridIn.length; i++) {
+      if (gridIn[i] && !newGM[i]) {
+        const x = i % GW, y = (i / GW) | 0;
+        const ni = nearestEmpty(x, y, gridIn, (idx) => newGM[idx]);
+        if (ni >= 0) {
+          moveGrain(gridIn, colorIn, lifeIn, i, ni);
+        } else {
+          gridIn[i] = 0; colorIn[i] = 0; lifeIn[i] = 0;
+        }
+      }
+    }
+  }
+
+  // ── Outside grid: body moves through it, push grains out of new mask ──
+  if (mode === 'outside' || mode === 'both') {
+    const effectiveGP = containerOut ? gpRow : GH;
+    for (let i = 0; i < gridOut.length; i++) {
+      if (gridOut[i] && newGM[i]) {
+        const x = i % GW, y = (i / GW) | 0;
+        const ni = nearestEmpty(x, y, gridOut, (idx, nx, ny) => !newGM[idx] && ny < effectiveGP);
+        if (ni >= 0) {
+          moveGrain(gridOut, colorOut, lifeOut, i, ni);
+        } else {
+          gridOut[i] = 0; colorOut[i] = 0; lifeOut[i] = 0;
+        }
+      }
+    }
+  }
+
+  prevFrame = currentFrame;
+}
+
+// ── Physics: inside mask ──
+function physicsStepInside() {
+  const gmask = gridMasks[currentFrame];
+  if (!gmask || !gridIn) return;
+
+  const absVx = Math.abs(bodyVelX);
+  const dir = absVx > 0.3 ? (bodyVelX > 0 ? 1 : -1) : 0;
+
+  // Clear step flag
+  stepFlag.fill(0);
+
+  // ── Lateral inertia (all materials) ──
+  if (absVx > 0.3) {
+    const driftProb = Math.min(absVx * 0.15, 0.7);
+    const xStart = dir > 0 ? GW - 2 : 1;
+    const xEnd   = dir > 0 ? -1 : GW;
+    const xStep  = dir > 0 ? -1 : 1;
+
+    for (let y = GH - 1; y >= 0; y--) {
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const idx = y * GW + x;
+        if (!gridIn[idx]) continue;
+        if (Math.random() > driftProb) continue;
+        const nx = x + dir;
+        if (nx < 0 || nx >= GW) continue;
+        const nidx = y * GW + nx;
+        if (gmask[nidx] && !gridIn[nidx]) {
+          moveGrain(gridIn, colorIn, lifeIn, idx, nidx);
+        }
+      }
+    }
+  }
+
+  // ── Centrifugal force from body spin (inside only) ──
+  const absAv = Math.abs(bodyAngularVel);
+  if (absAv > 0.05) {
+    const coeff = absAv * absAv * 0.08;
+    const coeff2 = coeff * coeff; // for squared comparison (avoids sqrt)
+    for (let y = 0; y < GH; y++) {
+      for (let x = 0; x < GW; x++) {
+        const idx = y * GW + x;
+        if (!gridIn[idx] || stepFlag[idx]) continue;
+
+        const dx = x - bodyCx, dy = y - bodyCy;
+        const r2 = dx * dx + dy * dy;
+        if (r2 < 4) continue;
+
+        // Centrifugal: probability of outward push ∝ ω² × r
+        // Use rand² > coeff² × r² to avoid sqrt for most particles
+        const rand = Math.random();
+        if (rand * rand > coeff2 * r2) continue;
+
+        // Only compute sqrt for particles that will actually move
+        const r = Math.sqrt(r2);
+        const rdx = dx / r, rdy = dy / r;
+        const nx = x + Math.round(rdx), ny = y + Math.round(rdy);
+        if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) continue;
+        const nidx = ny * GW + nx;
+        if (gmask[nidx] && !gridIn[nidx]) {
+          moveGrain(gridIn, colorIn, lifeIn, idx, nidx);
+          stepFlag[nidx] = 1;
+        }
+      }
+    }
+  }
+
+  // ── Falling pass (bottom to top): sand, water, lava ──
+  for (let y = GH - 2; y >= 0; y--) {
+    const ltr = Math.random() < 0.5;
+    const xS = ltr ? 0 : GW - 1, xE = ltr ? GW : -1, xSt = ltr ? 1 : -1;
+    for (let x = xS; x !== xE; x += xSt) {
+      const idx = y * GW + x;
+      const mat = gridIn[idx];
+      if (!mat) continue;
+
+      if (mat === MAT.SAND) {
+        const by = y + 1;
+        if (by >= GH) continue;
+        const below = by * GW + x;
+        if (gmask[below] && !gridIn[below]) {
+          moveGrain(gridIn, colorIn, lifeIn, idx, below);
+          continue;
+        }
+        let d1 = (absVx > 1.0 && Math.random() < 0.7) ? dir : (Math.random() < 0.5 ? -1 : 1);
+        const dx1 = x + d1;
+        if (dx1 >= 0 && dx1 < GW) {
+          const diag1 = by * GW + dx1;
+          if (gmask[diag1] && !gridIn[diag1]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, diag1);
+            continue;
+          }
+        }
+        const dx2 = x - d1;
+        if (dx2 >= 0 && dx2 < GW) {
+          const diag2 = by * GW + dx2;
+          if (gmask[diag2] && !gridIn[diag2]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, diag2);
+          }
+        }
+      }
+
+      else if (mat === MAT.WATER) {
+        const by = y + 1;
+        if (by < GH) {
+          const below = by * GW + x;
+          if (gmask[below] && !gridIn[below]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, below);
+            continue;
+          }
+          // Diagonal down
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1, dx2 = x - d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag1 = by * GW + dx1;
+            if (gmask[diag1] && !gridIn[diag1]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, diag1);
+              continue;
+            }
+          }
+          if (dx2 >= 0 && dx2 < GW) {
+            const diag2 = by * GW + dx2;
+            if (gmask[diag2] && !gridIn[diag2]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, diag2);
+              continue;
+            }
+          }
+        }
+        // Horizontal spread (key water behavior)
+        const hd = Math.random() < 0.5 ? -1 : 1;
+        const hx1 = x + hd;
+        if (hx1 >= 0 && hx1 < GW) {
+          const hi = y * GW + hx1;
+          if (gmask[hi] && !gridIn[hi]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, hi);
+            continue;
+          }
+        }
+        const hx2 = x - hd;
+        if (hx2 >= 0 && hx2 < GW) {
+          const hi = y * GW + hx2;
+          if (gmask[hi] && !gridIn[hi]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, hi);
+          }
+        }
+      }
+
+      else if (mat === MAT.LAVA) {
+        // Slow, viscous
+        if (Math.random() > 0.4) continue;
+        const by = y + 1;
+        if (by >= GH) continue;
+        const below = by * GW + x;
+        if (gmask[below] && !gridIn[below]) {
+          moveGrain(gridIn, colorIn, lifeIn, idx, below);
+          continue;
+        }
+        // Slight diagonal (viscous, less spread than sand)
+        if (Math.random() < 0.25) {
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag1 = by * GW + dx1;
+            if (gmask[diag1] && !gridIn[diag1]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, diag1);
+            }
+          }
+        }
+        // Very slow horizontal ooze
+        if (Math.random() < 0.08) {
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const hx = x + d1;
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (gmask[hi] && !gridIn[hi]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, hi);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Rising pass (top to bottom): smoke, fire ──
+  for (let y = 1; y < GH; y++) {
+    const ltr = Math.random() < 0.5;
+    const xS = ltr ? 0 : GW - 1, xE = ltr ? GW : -1, xSt = ltr ? 1 : -1;
+    for (let x = xS; x !== xE; x += xSt) {
+      const idx = y * GW + x;
+      const mat = gridIn[idx];
+      if (!mat || stepFlag[idx]) continue;
+
+      if (mat === MAT.SMOKE) {
+        const uy = y - 1;
+        const above = uy * GW + x;
+        if (gmask[above] && !gridIn[above]) {
+          moveGrain(gridIn, colorIn, lifeIn, idx, above);
+          stepFlag[above] = 1;
+          continue;
+        }
+        // Diagonal up
+        const d1 = Math.random() < 0.5 ? -1 : 1;
+        const dx1 = x + d1;
+        if (dx1 >= 0 && dx1 < GW) {
+          const diag = uy * GW + dx1;
+          if (gmask[diag] && !gridIn[diag]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, diag);
+            stepFlag[diag] = 1;
+            continue;
+          }
+        }
+        const dx2 = x - d1;
+        if (dx2 >= 0 && dx2 < GW) {
+          const diag = uy * GW + dx2;
+          if (gmask[diag] && !gridIn[diag]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, diag);
+            stepFlag[diag] = 1;
+            continue;
+          }
+        }
+        // Horizontal drift
+        if (Math.random() < 0.25) {
+          const hx = x + (Math.random() < 0.5 ? -1 : 1);
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (gmask[hi] && !gridIn[hi]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, hi);
+              stepFlag[hi] = 1;
+            }
+          }
+        }
+      }
+
+      else if (mat === MAT.FIRE) {
+        // Fire rises, with random horizontal flicker
+        if (Math.random() < 0.65) {
+          const uy = y - 1;
+          const above = uy * GW + x;
+          if (gmask[above] && !gridIn[above]) {
+            moveGrain(gridIn, colorIn, lifeIn, idx, above);
+            stepFlag[above] = 1;
+            continue;
+          }
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag = uy * GW + dx1;
+            if (gmask[diag] && !gridIn[diag]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, diag);
+              stepFlag[diag] = 1;
+              continue;
+            }
+          }
+        }
+        // Horizontal flicker
+        if (Math.random() < 0.2) {
+          const hx = x + (Math.random() < 0.5 ? -1 : 1);
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (gmask[hi] && !gridIn[hi]) {
+              moveGrain(gridIn, colorIn, lifeIn, idx, hi);
+              stepFlag[hi] = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Life/decay pass ──
+  for (let i = 0; i < gridIn.length; i++) {
+    const mat = gridIn[i];
+    if (mat === MAT.FIRE) {
+      lifeIn[i]++;
+      if (lifeIn[i] > 22 + (Math.random() * 28 | 0)) {
+        if (Math.random() < 0.35) {
+          // Fire → smoke
+          gridIn[i] = MAT.SMOKE;
+          lifeIn[i] = 0;
+          colorIn[i] = (Math.random() * 4) | 0;
+        } else {
+          gridIn[i] = 0;
+          lifeIn[i] = 0;
+        }
+      } else {
+        // Flicker color
+        colorIn[i] = (Math.random() * 4) | 0;
+      }
+    } else if (mat === MAT.SMOKE) {
+      lifeIn[i]++;
+      if (lifeIn[i] > 55 + (Math.random() * 35 | 0)) {
+        gridIn[i] = 0;
+        lifeIn[i] = 0;
+      }
+    }
+  }
+}
+
+// ── Physics: outside mask ──
+function physicsStepOutside() {
+  const gmask = gridMasks[currentFrame];
+  if (!gmask || !gridOut) return;
+
+  const gpRow = containerOut ? groundRow() : GH;
+  const absVx = Math.abs(bodyVelX);
+  const dir = absVx > 0.3 ? (bodyVelX > 0 ? 1 : -1) : 0;
+
+  stepFlag.fill(0);
+
+  // ── Lateral push from body motion ──
+  if (absVx > 0.3) {
+    const pushDir = -dir;
+    const driftProb = Math.min(absVx * 0.1, 0.5);
+    const xStart = pushDir > 0 ? GW - 2 : 1;
+    const xEnd   = pushDir > 0 ? -1 : GW;
+    const xStep  = pushDir > 0 ? -1 : 1;
+
+    for (let y = GH - 1; y >= 0; y--) {
+      if (y >= gpRow) continue;
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const idx = y * GW + x;
+        if (!gridOut[idx]) continue;
+        if (Math.random() > driftProb) continue;
+        const nx = x + pushDir;
+        if (nx < 0 || nx >= GW) continue;
+        const nidx = y * GW + nx;
+        if (!gmask[nidx] && !gridOut[nidx] && y < gpRow) {
+          moveGrain(gridOut, colorOut, lifeOut, idx, nidx);
+        }
+      }
+    }
+  }
+
+  // ── Falling pass (bottom to top): sand, water, lava ──
+  for (let y = GH - 2; y >= 0; y--) {
+    const ltr = Math.random() < 0.5;
+    const xS = ltr ? 0 : GW - 1, xE = ltr ? GW : -1, xSt = ltr ? 1 : -1;
+    for (let x = xS; x !== xE; x += xSt) {
+      const idx = y * GW + x;
+      const mat = gridOut[idx];
+      if (!mat) continue;
+
+      if (mat === MAT.SAND) {
+        const by = y + 1;
+        if (by >= gpRow) continue;
+        const below = by * GW + x;
+        if (!gmask[below] && !gridOut[below]) {
+          moveGrain(gridOut, colorOut, lifeOut, idx, below);
+          continue;
+        }
+        const d1 = Math.random() < 0.5 ? -1 : 1;
+        const dx1 = x + d1;
+        if (dx1 >= 0 && dx1 < GW) {
+          const diag1 = by * GW + dx1;
+          if (!gmask[diag1] && !gridOut[diag1] && by < gpRow) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, diag1);
+            continue;
+          }
+        }
+        const dx2 = x - d1;
+        if (dx2 >= 0 && dx2 < GW) {
+          const diag2 = by * GW + dx2;
+          if (!gmask[diag2] && !gridOut[diag2] && by < gpRow) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, diag2);
+          }
+        }
+      }
+
+      else if (mat === MAT.WATER) {
+        const by = y + 1;
+        if (by < gpRow) {
+          const below = by * GW + x;
+          if (!gmask[below] && !gridOut[below]) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, below);
+            continue;
+          }
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1, dx2 = x - d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag1 = by * GW + dx1;
+            if (!gmask[diag1] && !gridOut[diag1]) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, diag1);
+              continue;
+            }
+          }
+          if (dx2 >= 0 && dx2 < GW) {
+            const diag2 = by * GW + dx2;
+            if (!gmask[diag2] && !gridOut[diag2]) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, diag2);
+              continue;
+            }
+          }
+        }
+        // Horizontal spread
+        const hd = Math.random() < 0.5 ? -1 : 1;
+        const hx1 = x + hd;
+        if (hx1 >= 0 && hx1 < GW) {
+          const hi = y * GW + hx1;
+          if (!gmask[hi] && !gridOut[hi] && y < gpRow) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, hi);
+            continue;
+          }
+        }
+        const hx2 = x - hd;
+        if (hx2 >= 0 && hx2 < GW) {
+          const hi = y * GW + hx2;
+          if (!gmask[hi] && !gridOut[hi] && y < gpRow) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, hi);
+          }
+        }
+      }
+
+      else if (mat === MAT.LAVA) {
+        if (Math.random() > 0.4) continue;
+        const by = y + 1;
+        if (by >= gpRow) continue;
+        const below = by * GW + x;
+        if (!gmask[below] && !gridOut[below]) {
+          moveGrain(gridOut, colorOut, lifeOut, idx, below);
+          continue;
+        }
+        if (Math.random() < 0.25) {
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag = by * GW + dx1;
+            if (!gmask[diag] && !gridOut[diag] && by < gpRow) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, diag);
+            }
+          }
+        }
+        if (Math.random() < 0.08) {
+          const hx = x + (Math.random() < 0.5 ? -1 : 1);
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (!gmask[hi] && !gridOut[hi] && y < gpRow) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, hi);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Rising pass (top to bottom): smoke, fire ──
+  for (let y = 1; y < GH; y++) {
+    if (y >= gpRow) continue;
+    const ltr = Math.random() < 0.5;
+    const xS = ltr ? 0 : GW - 1, xE = ltr ? GW : -1, xSt = ltr ? 1 : -1;
+    for (let x = xS; x !== xE; x += xSt) {
+      const idx = y * GW + x;
+      const mat = gridOut[idx];
+      if (!mat || stepFlag[idx]) continue;
+
+      if (mat === MAT.SMOKE) {
+        const uy = y - 1;
+        if (uy < 0) continue;
+        const above = uy * GW + x;
+        if (!gmask[above] && !gridOut[above]) {
+          moveGrain(gridOut, colorOut, lifeOut, idx, above);
+          stepFlag[above] = 1;
+          continue;
+        }
+        const d1 = Math.random() < 0.5 ? -1 : 1;
+        const dx1 = x + d1;
+        if (dx1 >= 0 && dx1 < GW) {
+          const diag = uy * GW + dx1;
+          if (!gmask[diag] && !gridOut[diag]) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, diag);
+            stepFlag[diag] = 1;
+            continue;
+          }
+        }
+        const dx2 = x - d1;
+        if (dx2 >= 0 && dx2 < GW) {
+          const diag = uy * GW + dx2;
+          if (!gmask[diag] && !gridOut[diag]) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, diag);
+            stepFlag[diag] = 1;
+            continue;
+          }
+        }
+        if (Math.random() < 0.25) {
+          const hx = x + (Math.random() < 0.5 ? -1 : 1);
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (!gmask[hi] && !gridOut[hi]) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, hi);
+              stepFlag[hi] = 1;
+            }
+          }
+        }
+      }
+
+      else if (mat === MAT.FIRE) {
+        if (Math.random() < 0.65) {
+          const uy = y - 1;
+          if (uy < 0) continue;
+          const above = uy * GW + x;
+          if (!gmask[above] && !gridOut[above]) {
+            moveGrain(gridOut, colorOut, lifeOut, idx, above);
+            stepFlag[above] = 1;
+            continue;
+          }
+          const d1 = Math.random() < 0.5 ? -1 : 1;
+          const dx1 = x + d1;
+          if (dx1 >= 0 && dx1 < GW) {
+            const diag = uy * GW + dx1;
+            if (!gmask[diag] && !gridOut[diag]) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, diag);
+              stepFlag[diag] = 1;
+              continue;
+            }
+          }
+        }
+        if (Math.random() < 0.2) {
+          const hx = x + (Math.random() < 0.5 ? -1 : 1);
+          if (hx >= 0 && hx < GW) {
+            const hi = y * GW + hx;
+            if (!gmask[hi] && !gridOut[hi]) {
+              moveGrain(gridOut, colorOut, lifeOut, idx, hi);
+              stepFlag[hi] = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Life/decay pass ──
+  for (let i = 0; i < gridOut.length; i++) {
+    const mat = gridOut[i];
+    if (mat === MAT.FIRE) {
+      lifeOut[i]++;
+      if (lifeOut[i] > 22 + (Math.random() * 28 | 0)) {
+        if (Math.random() < 0.35) {
+          gridOut[i] = MAT.SMOKE;
+          lifeOut[i] = 0;
+          colorOut[i] = (Math.random() * 4) | 0;
+        } else {
+          gridOut[i] = 0;
+          lifeOut[i] = 0;
+        }
+      } else {
+        colorOut[i] = (Math.random() * 4) | 0;
+      }
+    } else if (mat === MAT.SMOKE) {
+      lifeOut[i]++;
+      if (lifeOut[i] > 55 + (Math.random() * 35 | 0)) {
+        gridOut[i] = 0;
+        lifeOut[i] = 0;
+      }
+    }
+  }
+}
+
+// ── Rain pass: spawn new particles at top while fillMode is rain/empty ──
+function rainPass() {
+  const gmask = gridMasks[currentFrame];
+  if (!gmask) return;
+  const rate = P.rainRate.val;
+  if (rate <= 0) return;
+
+  // Inside: spawn near top of mask (top 20% of rows)
+  if (fillModeIn !== 'static' && (mode === 'inside' || mode === 'both') && gridIn) {
+    const topEnd = Math.max(4, Math.floor(GH * 0.2));
+    // Pick cells stochastically instead of building a candidate list every frame
+    const rowArea = topEnd * GW;
+    const count = Math.max(1, Math.floor(rowArea * rate * 0.01));
+    for (let k = 0; k < count; k++) {
+      const rx = (Math.random() * GW) | 0;
+      const ry = (Math.random() * topEnd) | 0;
+      const i = ry * GW + rx;
+      if (gmask[i] && !gridIn[i]) {
+        gridIn[i] = insideMat;
+        colorIn[i] = (Math.random() * 4) | 0;
+        if (insideMat === MAT.FIRE) lifeIn[i] = (Math.random() * 15) | 0;
+        else if (insideMat === MAT.SMOKE) lifeIn[i] = (Math.random() * 20) | 0;
+        else lifeIn[i] = 0;
+      }
+    }
+  }
+
+  // Outside: spawn at y=0 rows across non-mask cells
+  if (fillModeOut !== 'static' && (mode === 'outside' || mode === 'both') && gridOut) {
+    const topEnd = Math.max(3, Math.floor(GH * 0.1));
+    const rowArea = topEnd * GW;
+    const count = Math.max(1, Math.floor(rowArea * rate * 0.02));
+    for (let k = 0; k < count; k++) {
+      const rx = (Math.random() * GW) | 0;
+      const ry = (Math.random() * topEnd) | 0;
+      const i = ry * GW + rx;
+      if (!gmask[i] && !gridOut[i]) {
+        gridOut[i] = outsideMat;
+        colorOut[i] = (Math.random() * 4) | 0;
+        if (outsideMat === MAT.FIRE) lifeOut[i] = (Math.random() * 15) | 0;
+        else if (outsideMat === MAT.SMOKE) lifeOut[i] = (Math.random() * 20) | 0;
+        else lifeOut[i] = 0;
+      }
+    }
+  }
+}
+
+// ── Rain cap: keep particle count at fill% for rain/empty modes ──
+function enforceRainCap() {
+  const gmask = gridMasks[currentFrame];
+  if (!gmask) return;
+
+  // Inside rain cap
+  if (fillModeIn !== 'static' && (mode === 'inside' || mode === 'both') && gridIn) {
+    let insideCells = 0;
+    for (let i = 0; i < gmask.length; i++) if (gmask[i]) insideCells++;
+    const target = Math.floor(insideCells * P.fillPctIn.val);
+
+    let count = 0;
+    for (let i = 0; i < gridIn.length; i++) if (gridIn[i]) count++;
+
+    if (count > target) {
+      let excess = count - target;
+      for (let y = GH - 1; y >= 0 && excess > 0; y--) {
+        for (let x = 0; x < GW && excess > 0; x++) {
+          const i = y * GW + x;
+          if (gridIn[i]) {
+            gridIn[i] = 0; colorIn[i] = 0; lifeIn[i] = 0;
+            excess--;
+          }
+        }
+      }
+    }
+  }
+
+  // Outside rain cap (only when container is on — no-container handles its own drain)
+  if (fillModeOut !== 'static' && containerOut && (mode === 'outside' || mode === 'both') && gridOut) {
+    const gpRow = groundRow();
+    let outsideCells = 0;
+    for (let y = 0; y < gpRow; y++) {
+      for (let x = 0; x < GW; x++) {
+        if (!gmask[y * GW + x]) outsideCells++;
+      }
+    }
+    const target = Math.floor(outsideCells * P.fillPctOut.val);
+
+    let count = 0;
+    for (let i = 0; i < gridOut.length; i++) if (gridOut[i]) count++;
+
+    if (count > target) {
+      let excess = count - target;
+      for (let y = GH - 1; y >= 0 && excess > 0; y--) {
+        for (let x = 0; x < GW && excess > 0; x++) {
+          const i = y * GW + x;
+          if (gridOut[i]) {
+            gridOut[i] = 0; colorOut[i] = 0; lifeOut[i] = 0;
+            excess--;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── Container cleanup: delete particles at bottom when no floor ──
+function containerCleanup() {
+  if (containerOut || !(mode === 'outside' || mode === 'both') || !gridOut) return;
+  // Delete particles in bottom 2 rows so they visually fall off screen
+  for (let dy = 0; dy < 2; dy++) {
+    const y = GH - 1 - dy;
+    if (y < 0) continue;
+    for (let x = 0; x < GW; x++) {
+      const i = y * GW + x;
+      if (gridOut[i]) {
+        gridOut[i] = 0; colorOut[i] = 0; lifeOut[i] = 0;
+      }
+    }
+  }
+}
+
+// ── Interaction pass: react at body boundary (water+lava/fire → steam) ──
+function interactionPass() {
+  if (!interactMaterials) return;
+  if (mode !== 'both') return;
+  if (!gridIn || !gridOut) return;
+  const gmask = gridMasks[currentFrame];
+  if (!gmask) return;
+  const rate = P.reactRate.val;
+  if (rate <= 0) return;
+
+  // Scan inside cells, look at 4 neighbors; if neighbor is outside-mask and has outMat, react.
+  for (let y = 0; y < GH; y++) {
+    for (let x = 0; x < GW; x++) {
+      const idx = y * GW + x;
+      const inMat = gridIn[idx];
+      if (!inMat) continue;
+      if (inMat !== MAT.WATER && inMat !== MAT.LAVA && inMat !== MAT.FIRE) continue;
+      // Check 4 neighbors
+      const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+      for (let d = 0; d < 4; d++) {
+        const nx = x + dirs[d][0], ny = y + dirs[d][1];
+        if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) continue;
+        const nidx = ny * GW + nx;
+        if (gmask[nidx]) continue;              // neighbor still inside body
+        const outMat = gridOut[nidx];
+        if (!outMat) continue;
+        if (outMat !== MAT.WATER && outMat !== MAT.LAVA && outMat !== MAT.FIRE) continue;
+        if (Math.random() > rate) continue;
+        reactPair(inMat, idx, 'inside', outMat, nidx, 'outside');
+        break;
+      }
+    }
+  }
+}
+
+function reactPair(a, ai, aSide, b, bi, bSide) {
+  // water + lava: water → smoke, lava stays
+  // water + fire: water → smoke, fire → 0
+  // lava + water: same as above (symmetric)
+  // fire + water: same as above
+  const makeSmoke = (side, i) => {
+    if (side === 'inside') { gridIn[i] = MAT.SMOKE; colorIn[i] = (Math.random()*4)|0; lifeIn[i] = 0; }
+    else { gridOut[i] = MAT.SMOKE; colorOut[i] = (Math.random()*4)|0; lifeOut[i] = 0; }
+  };
+  const clear = (side, i) => {
+    if (side === 'inside') { gridIn[i] = 0; colorIn[i] = 0; lifeIn[i] = 0; }
+    else { gridOut[i] = 0; colorOut[i] = 0; lifeOut[i] = 0; }
+  };
+  if ((a === MAT.WATER && b === MAT.LAVA) || (a === MAT.LAVA && b === MAT.WATER)) {
+    if (a === MAT.WATER) makeSmoke(aSide, ai); else makeSmoke(bSide, bi);
+  } else if ((a === MAT.WATER && b === MAT.FIRE) || (a === MAT.FIRE && b === MAT.WATER)) {
+    if (a === MAT.WATER) { makeSmoke(aSide, ai); clear(bSide, bi); }
+    else { makeSmoke(bSide, bi); clear(aSide, ai); }
+  }
+}
+
+// ── Get color for a particle ──
+function getColor(mat, colorIdx, side) {
+  const palette = MAT_COLORS[mat];
+  if (!palette) return [200, 200, 200];
+  const colors = side === 'inside' ? palette.inside : palette.outside;
+  return colors[colorIdx] || colors[0];
+}
+
+// ── Render ──
+function render() {
+  const sw = canvas.width;
+  const sh = canvas.height;
+  const trail = P.trailLen.val;
+
+  // Main canvas: fresh background each frame (so trails don't accumulate on video)
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, sw, sh);
+
+  // Video overlay at requested opacity
+  const vo = P.videoOpacity.val;
+  if (vo > 0 && videoFrames[currentFrame] && videoFrames[currentFrame].complete) {
+    ctx.globalAlpha = vo;
+    ctx.drawImage(videoFrames[currentFrame], 0, 0, sw, sh);
+    ctx.globalAlpha = 1;
+  }
+
+  // Mask overlay
+  if (P.showMask.val) {
+    const gmask = gridMasks[currentFrame];
+    if (gmask) {
+      const ssx = sw / GW, ssy = sh / GH;
+      ctx.fillStyle = 'rgba(0, 200, 200, 0.2)';
+      for (let gy = 0; gy < GH; gy++) {
+        for (let gx = 0; gx < GW; gx++) {
+          if (gmask[gy * GW + gx]) {
+            ctx.fillRect(gx * ssx, gy * ssy, ssx + 0.5, ssy + 0.5);
+          }
+        }
+      }
+    }
+  }
+
+  // Ground plane indicator
+  if ((mode === 'outside' || mode === 'both') && containerOut && (showTuner || P.groundPlane.val < 0.99)) {
+    const gpY = Math.floor(sh * P.groundPlane.val);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, gpY);
+    ctx.lineTo(sw, gpY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Build fresh particle frame on pCanvas (empty cells = fully transparent)
+  const imgData = pctx.createImageData(GW, GH);
+  const d = imgData.data;
+  let grainCountIn = 0, grainCountOut = 0;
+
+  if (mode === 'inside' || mode === 'both') {
+    for (let i = 0; i < gridIn.length; i++) {
+      const mat = gridIn[i];
+      if (!mat) continue;
+      grainCountIn++;
+      let rgb = getColor(mat, colorIn[i], 'inside');
+      if (mat === MAT.FIRE) {
+        const f = Math.random();
+        if (f < 0.3) rgb = [255, 200 + Math.random() * 55 | 0, 50 + Math.random() * 50 | 0];
+        else if (f < 0.6) rgb = [255, 100 + Math.random() * 80 | 0, 10 + Math.random() * 20 | 0];
+        else rgb = [255, 60 + Math.random() * 60 | 0, 5];
+      } else if (mat === MAT.LAVA && Math.random() < 0.12) {
+        rgb = [255, 180 + Math.random() * 70 | 0, 30 + Math.random() * 50 | 0];
+      }
+      const pi = i * 4;
+      d[pi]     = rgb[0];
+      d[pi + 1] = rgb[1];
+      d[pi + 2] = rgb[2];
+      d[pi + 3] = 255;
+    }
+  }
+
+  if (mode === 'outside' || mode === 'both') {
+    for (let i = 0; i < gridOut.length; i++) {
+      const mat = gridOut[i];
+      if (!mat) continue;
+      grainCountOut++;
+      let rgb = getColor(mat, colorOut[i], 'outside');
+      if (mat === MAT.FIRE) {
+        const f = Math.random();
+        if (f < 0.3) rgb = [255, 190 + Math.random() * 55 | 0, 45 + Math.random() * 45 | 0];
+        else if (f < 0.6) rgb = [255, 90 + Math.random() * 70 | 0, 8 + Math.random() * 18 | 0];
+        else rgb = [245, 55 + Math.random() * 55 | 0, 5];
+      } else if (mat === MAT.LAVA && Math.random() < 0.12) {
+        rgb = [250, 170 + Math.random() * 65 | 0, 25 + Math.random() * 45 | 0];
+      }
+      const pi = i * 4;
+      if (d[pi + 3] === 0) {
+        d[pi]     = rgb[0];
+        d[pi + 1] = rgb[1];
+        d[pi + 2] = rgb[2];
+        d[pi + 3] = 255;
+      }
+    }
+  }
+
+  pctx.putImageData(imgData, 0, 0);
+
+  // Composite onto trailCanvas so particle trails don't touch the video
+  if (trail > 0) {
+    trailCtx.globalCompositeOperation = 'destination-out';
+    trailCtx.fillStyle = `rgba(0,0,0,${1 - trail})`;
+    trailCtx.fillRect(0, 0, GW, GH);
+    trailCtx.globalCompositeOperation = 'source-over';
+  } else {
+    trailCtx.clearRect(0, 0, GW, GH);
+  }
+  trailCtx.drawImage(pCanvas, 0, 0);
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(trailCanvas, 0, 0, sw, sh);
+
+  // Info
+  const total = grainCountIn + grainCountOut;
+  const matLabel = mode === 'both'
+    ? `${MAT_NAMES[insideMat]}/${MAT_NAMES[outsideMat]}`
+    : (mode === 'outside' ? MAT_NAMES[outsideMat] : MAT_NAMES[insideMat]);
+  const modeLabel = mode === 'both' ? `${grainCountIn}in + ${grainCountOut}out` : `${total}`;
+  document.getElementById('info').textContent =
+    `frame ${currentFrame}/${TOTAL_FRAMES} | ${matLabel} | ${modeLabel} grains | in:${fillModeIn}/out:${fillModeOut}${containerOut ? '' : ' (no floor)'} | ${GW}x${GH} | cell ${CELL}`;
+}
+
+// ── Main loop ──
+function loop(time) {
+  if (!lastTime) lastTime = time;
+  const dt = Math.min(time - lastTime, 50);
+  lastTime = time;
+
+  if (playing) {
+    frameAccum += dt * P.playSpeed.val;
+    const frameTime = 1000 / FPS;
+    while (frameAccum >= frameTime) {
+      frameAccum -= frameTime;
+      currentFrame = (currentFrame + 1) % gridMasks.length;
+      onFrameChange();
+    }
+  } else if (currentFrame !== prevFrame) {
+    onFrameChange();
+  }
+
+  // Dampen inertia
+  if (!playing || currentFrame === prevFrame) {
+    bodyVelX *= P.inertiaDamp.val;
+    bodyVelY *= P.inertiaDamp.val;
+    bodyAngularVel *= P.inertiaDamp.val;
+    if (Math.abs(bodyVelX) < 0.1) bodyVelX = 0;
+    if (Math.abs(bodyVelY) < 0.1) bodyVelY = 0;
+    if (Math.abs(bodyAngularVel) < 0.01) bodyAngularVel = 0;
+  }
+
+  // Rain before physics so new grains settle this frame
+  rainPass();
+
+  // Physics
+  const iters = P.iters.val;
+  for (let i = 0; i < iters; i++) {
+    if (mode === 'inside' || mode === 'both') physicsStepInside();
+    if (mode === 'outside' || mode === 'both') physicsStepOutside();
+  }
+
+  // Material reactions at body boundary (water+lava/fire → steam)
+  interactionPass();
+
+  // Enforce rain particle cap (steady-state for rain/empty modes)
+  enforceRainCap();
+
+  // Delete particles at bottom when container is off
+  containerCleanup();
+
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ── UI ──
+function stepFrame(dir) {
+  playing = false;
+  currentFrame = Math.max(0, Math.min(gridMasks.length - 1, currentFrame + dir));
+}
+
+function toggleP(key) {
+  P[key].val = P[key].val ? 0 : 1;
+  buildTuner();
+}
+
+function cycleVideoOpacity() {
+  const vo = P.videoOpacity.val;
+  if (vo > 0) {
+    lastVideoOpacity = vo;
+    P.videoOpacity.val = 0;
+  } else {
+    P.videoOpacity.val = lastVideoOpacity > 0 ? lastVideoOpacity : 0.5;
+  }
+  buildTuner();
+}
+
+function toggleTuner() {
+  showTuner = !showTuner;
+  document.getElementById('tuner').style.display = showTuner ? 'block' : 'none';
+}
+
+function buildTuner() {
+  const el = document.getElementById('tuner');
+  el.innerHTML = '<h3>tuner</h3>';
+
+  const MAT_BTNS = [
+    { m: 1, name: 'sand',  sw: '#e0d8c0' },
+    { m: 2, name: 'water', sw: '#2860d0' },
+    { m: 3, name: 'smoke', sw: '#8888a0' },
+    { m: 4, name: 'fire',  sw: '#ff6820' },
+    { m: 5, name: 'lava',  sw: '#d04010' },
+  ];
+  const FILL_BTNS = ['static', 'rain', 'empty'];
+
+  function sideBlock(side) {
+    const sec = document.createElement('div');
+    sec.className = 'section';
+    sec.textContent = side;
+    el.appendChild(sec);
+
+    const matRow = document.createElement('div');
+    matRow.className = 'mat-row';
+    matRow.id = `mat-row-${side}`;
+    for (const b of MAT_BTNS) {
+      const btn = document.createElement('button');
+      btn.dataset.mat = b.m;
+      btn.innerHTML = `<span class="swatch" style="background:${b.sw}"></span>${b.name}`;
+      btn.onclick = () => selectMat(side, b.m);
+      matRow.appendChild(btn);
+    }
+    el.appendChild(matRow);
+
+    const fillRow = document.createElement('div');
+    fillRow.className = 'mat-row';
+    fillRow.id = `fill-row-${side}`;
+    for (const f of FILL_BTNS) {
+      const btn = document.createElement('button');
+      btn.dataset.fill = f;
+      btn.textContent = f;
+      btn.onclick = () => setFillMode(side, f);
+      fillRow.appendChild(btn);
+    }
+    el.appendChild(fillRow);
+  }
+
+  sideBlock('inside');
+  sideBlock('outside');
+
+  // Container toggle for outside
+  const containerRow = document.createElement('div');
+  containerRow.className = 'mat-row';
+  const containerBtn = document.createElement('button');
+  containerBtn.id = 'container-out-btn';
+  containerBtn.textContent = 'container';
+  containerBtn.onclick = toggleContainer;
+  containerRow.appendChild(containerBtn);
+  el.appendChild(containerRow);
+
+  const groups = [
+    { label: 'spawn', keys: ['fillPctIn', 'fillPctOut', 'rainRate', 'cellSize'] },
+    { label: 'physics', keys: ['iters', 'inertia', 'inertiaDamp', 'spin', 'reactRate'] },
+    { label: 'visuals', keys: ['playSpeed', 'trailLen', 'showMask', 'videoOpacity'] },
+    { label: 'ground', keys: ['groundPlane'] },
+  ];
+
+  for (const group of groups) {
+    const section = document.createElement('div');
+    section.className = 'section';
+    section.textContent = group.label;
+    el.appendChild(section);
+
+    for (const key of group.keys) {
+      const p = P[key];
+      if (!p) continue;
+      const label = document.createElement('label');
+      label.innerHTML = `${p.label} <input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.val}" data-key="${key}"><span class="val">${p.val}</span>`;
+      el.appendChild(label);
+      const input = label.querySelector('input');
+      input.addEventListener('input', (e) => {
+        const newVal = parseFloat(e.target.value);
+        p.val = newVal;
+        label.querySelector('.val').textContent = newVal;
+        if (key === 'cellSize') onCellSizeChange(newVal);
+      });
+    }
+  }
+
+  updateMatButtons();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 't') toggleTuner();
+  if (e.key === 'b') toggleP('showMask');
+  if (e.key === 'v') cycleVideoOpacity();
+  if (e.key === 'r') respawn();
+  if (e.key === 'm') cycleMode();
+  if (e.key === 'i') toggleInside();
+  if (e.key === 'o') toggleOutside();
+  if (e.key === 'x') toggleInteract();
+  if (e.key === ' ') { e.preventDefault(); playing = !playing; }
+  if (e.key === 'ArrowRight') stepFrame(1);
+  if (e.key === 'ArrowLeft') stepFrame(-1);
+  // Material shortcuts: 1-5 (inside). Shift+1-5 for outside.
+  if (/^[1-5]$/.test(e.key)) {
+    const matMap = { '1': MAT.SAND, '2': MAT.WATER, '3': MAT.SMOKE, '4': MAT.FIRE, '5': MAT.LAVA };
+    selectMat(e.shiftKey ? 'outside' : 'inside', matMap[e.key]);
+  }
+  // Fill mode: lowercase = inside, uppercase (shift) = outside
+  // e/E = empty, f/F = rain, g/G = static
+  if (e.key === 'e') setFillMode('inside', 'empty');
+  if (e.key === 'f') setFillMode('inside', 'rain');
+  if (e.key === 'g') setFillMode('inside', 'static');
+  if (e.key === 'E') setFillMode('outside', 'empty');
+  if (e.key === 'F') setFillMode('outside', 'rain');
+  if (e.key === 'G') setFillMode('outside', 'static');
+  if (e.key === 'c') toggleContainer();
+});
+
+// ── Gallery ──
+function goToGallery() {
+  location.href = location.pathname;
+}
+
+async function loadGallery() {
+  const grid = document.getElementById('gallery-grid');
+  grid.innerHTML = '<div style="color:#555;padding:20px">loading...</div>';
+
+  try {
+    const resp = await fetch(API_BASE + '/videos');
+    const videos = await resp.json();
+
+    grid.innerHTML = '';
+    if (videos.length === 0) {
+      grid.innerHTML = '<div style="color:#555;padding:20px">no videos yet — upload one!</div>';
+      return;
+    }
+
+    for (const v of videos) {
+      const card = document.createElement('div');
+      card.className = 'gallery-card' + (v.status !== 'ready' ? ' processing' : '');
+
+      if (v.status === 'ready' && v.thumbnail) {
+        card.innerHTML = `
+          <img class="thumb" src="${v.thumbnail}" alt="${v.name}" loading="lazy">
+          <div class="card-info">
+            <div class="name">${v.name}</div>
+            <div class="meta">${v.totalFrames || '?'} frames</div>
+          </div>`;
+        card.onclick = () => { location.search = '?video=' + v.name; };
+      } else if (v.status === 'extracting' || v.status === 'running_sam2' || v.status === 'queued') {
+        const pct = Math.round((v.progress || 0) * 100);
+        const label = v.status === 'extracting' ? 'extracting frames...' :
+                      v.status === 'running_sam2' ? `SAM2... ${pct}%` : 'queued...';
+        card.innerHTML = `
+          <div class="thumb-placeholder">${label}</div>
+          <div class="card-info">
+            <div class="name">${v.name}</div>
+          </div>
+          <div class="card-progress"><div class="card-progress-fill" style="width:${pct}%"></div></div>`;
+        card.dataset.processingName = v.name;
+      } else if (v.status === 'incomplete' || v.status === 'error') {
+        card.innerHTML = `
+          <div class="thumb-placeholder" style="color:#a55">${v.status === 'error' ? 'error' : 'incomplete'}</div>
+          <div class="card-info">
+            <div class="name">${v.name}</div>
+            <div class="meta">${v.error || ''}</div>
+          </div>`;
+      } else {
+        continue;
+      }
+      grid.appendChild(card);
+    }
+
+    const processing = videos.filter(v => ['extracting', 'running_sam2', 'queued'].includes(v.status));
+    if (processing.length > 0) {
+      setTimeout(pollProcessing, 3000);
+    }
+  } catch (e) {
+    grid.innerHTML = `<div style="color:#a55;padding:20px">Error loading videos: ${e.message}</div>`;
+  }
+}
+
+async function pollProcessing() {
+  const cards = document.querySelectorAll('.gallery-card[data-processing-name]');
+  if (cards.length === 0) return;
+
+  for (const card of cards) {
+    const name = card.dataset.processingName;
+    try {
+      const resp = await fetch(API_BASE + '/videos/' + name + '/status');
+      const st = await resp.json();
+
+      if (st.status === 'done') {
+        loadGallery();
+        return;
+      }
+
+      const pct = Math.round((st.progress || 0) * 100);
+      const label = st.status === 'extracting' ? 'extracting frames...' :
+                    st.status === 'running_sam2' ? `SAM2... ${pct}%` : 'queued...';
+      const placeholder = card.querySelector('.thumb-placeholder');
+      if (placeholder) placeholder.textContent = label;
+      const fill = card.querySelector('.card-progress-fill');
+      if (fill) fill.style.width = pct + '%';
+    } catch {}
+  }
+
+  setTimeout(pollProcessing, 3000);
+}
+
+// ── Upload ──
+let selectedFile = null;
+
+function openUpload() {
+  document.getElementById('upload-modal').classList.add('active');
+  selectedFile = null;
+  document.getElementById('file-input').value = '';
+  document.getElementById('upload-name').value = '';
+  document.getElementById('selected-file').style.display = 'none';
+  document.getElementById('submit-upload-btn').disabled = true;
+  document.getElementById('upload-status').style.display = 'none';
+  document.getElementById('upload-progress-bar').style.display = 'none';
+}
+
+function closeUpload() {
+  document.getElementById('upload-modal').classList.remove('active');
+}
+
+document.getElementById('file-input').addEventListener('change', (e) => {
+  if (e.target.files.length > 0) {
+    selectedFile = e.target.files[0];
+    document.getElementById('selected-file').textContent = selectedFile.name + ' (' + formatSize(selectedFile.size) + ')';
+    document.getElementById('selected-file').style.display = 'block';
+    document.getElementById('submit-upload-btn').disabled = false;
+  }
+});
+
+const dropZone = document.getElementById('drop-zone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('dragover'); });
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) {
+    selectedFile = e.dataTransfer.files[0];
+    document.getElementById('selected-file').textContent = selectedFile.name + ' (' + formatSize(selectedFile.size) + ')';
+    document.getElementById('selected-file').style.display = 'block';
+    document.getElementById('submit-upload-btn').disabled = false;
+  }
+});
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+
+async function submitUpload() {
+  if (!selectedFile) return;
+
+  const statusEl = document.getElementById('upload-status');
+  const progressBar = document.getElementById('upload-progress-bar');
+  const progressFill = document.getElementById('upload-progress-fill');
+  const submitBtn = document.getElementById('submit-upload-btn');
+
+  submitBtn.disabled = true;
+  statusEl.textContent = 'uploading...';
+  statusEl.style.display = 'block';
+  progressBar.style.display = 'block';
+  progressFill.style.width = '0%';
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+  const customName = document.getElementById('upload-name').value.trim();
+  if (customName) formData.append('name', customName);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', API_BASE + '/upload');
+
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      progressFill.style.width = pct + '%';
+      statusEl.textContent = `uploading... ${pct}%`;
+    }
+  };
+
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      const result = JSON.parse(xhr.responseText);
+      statusEl.textContent = `processing "${result.name}"...`;
+      progressFill.style.width = '100%';
+      setTimeout(() => {
+        closeUpload();
+        loadGallery();
+      }, 800);
+    } else {
+      const err = JSON.parse(xhr.responseText);
+      statusEl.textContent = 'error: ' + (err.error || 'upload failed');
+      statusEl.style.color = '#a55';
+      submitBtn.disabled = false;
+    }
+  };
+
+  xhr.onerror = () => {
+    statusEl.textContent = 'network error';
+    statusEl.style.color = '#a55';
+    submitBtn.disabled = false;
+  };
+
+  xhr.send(formData);
+}
+
+document.getElementById('upload-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('upload-modal')) closeUpload();
+});
+
+// ── Boot ──
+async function main() {
+  if (isGalleryMode) {
+    document.getElementById('gallery').classList.add('active');
+    document.body.classList.add('gallery-mode');
+    document.getElementById('canvas').style.display = 'none';
+    loadGallery();
+  } else {
+    document.getElementById('gallery').classList.remove('active');
+    document.getElementById('controls').style.display = 'flex';
+    document.getElementById('back-btn').style.display = 'block';
+    document.getElementById('loading').style.display = 'flex';
+    await loadConfig();
+    resize();
+    initCanvases();
+    buildTuner();
+    await loadMasks();
+    respawn();
+    requestAnimationFrame(loop);
+  }
+}
+main();
+</script>
+</body>
+</html>

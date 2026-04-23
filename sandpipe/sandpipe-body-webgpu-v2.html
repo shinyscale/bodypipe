@@ -1,0 +1,2377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bodypipe — SAM2 falling sand (WebGPU)</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; overflow: hidden; font-family: monospace; display: flex; align-items: center; justify-content: center; height: 100vh; }
+canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+#info { position: fixed; top: 8px; left: 8px; color: #555; font-size: 11px; z-index: 10; pointer-events: none; }
+#tuner {
+  position: fixed; top: 8px; right: 8px; z-index: 30;
+  background: rgba(0,0,0,0.85); color: #ccc; font-family: monospace;
+  font-size: 11px; padding: 10px 14px; border-radius: 6px;
+  display: none; min-width: 240px; max-height: 90vh; overflow-y: auto;
+}
+#tuner h3 { margin: 0 0 8px; color: #eee; font-size: 12px; }
+#tuner label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+#tuner input[type=range] { flex: 1; height: 14px; accent-color: #888; }
+#tuner .val { min-width: 42px; text-align: right; color: #aaa; font-size: 10px; }
+#tuner .section { margin-top: 8px; padding-top: 6px; border-top: 1px solid #333; color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+#loading {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #666; font-family: monospace; font-size: 14px; z-index: 100;
+  background: #111;
+}
+#controls {
+  position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 6px; z-index: 20; flex-wrap: wrap; justify-content: center;
+}
+#controls button {
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px; padding: 6px 12px; font-family: monospace; font-size: 12px;
+  cursor: pointer; touch-action: manipulation;
+}
+#controls button:active { background: rgba(255,255,255,0.25); }
+#controls button.mode-active { background: rgba(100,180,140,0.3); border-color: rgba(100,180,140,0.5); }
+#tuner .mat-row { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
+#tuner .mat-row.dim button { opacity: 0.35; }
+#tuner .mat-row button {
+  background: rgba(255,255,255,0.08); color: #999; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px; padding: 4px 8px; font-family: monospace; font-size: 11px;
+  cursor: pointer; touch-action: manipulation; display: inline-flex; align-items: center; gap: 5px;
+}
+#tuner .mat-row button:active { background: rgba(255,255,255,0.2); }
+#tuner .mat-row button.mat-active { color: #eee; border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.15); }
+#tuner .mat-row button.fill-active { color: #eee; border-color: rgba(100,180,140,0.5); background: rgba(100,180,140,0.25); }
+#tuner .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+/* Gallery */
+#gallery {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: #111; z-index: 200; overflow-y: auto; padding: 20px; display: none;
+}
+#gallery.active { display: block; }
+body.gallery-mode { overflow: auto; }
+#gallery-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 0 4px; }
+#gallery-header h1 { color: #ddd; font-size: 18px; font-weight: normal; }
+#upload-btn {
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 6px; padding: 10px 18px; font-family: monospace; font-size: 13px; cursor: pointer;
+}
+#gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+.gallery-card {
+  background: #1a1a1a; border-radius: 8px; overflow: hidden; cursor: pointer;
+  transition: transform 0.15s; border: 1px solid rgba(255,255,255,0.08);
+}
+.gallery-card:active { transform: scale(0.97); }
+.gallery-card .thumb { width: 100%; aspect-ratio: 3/4; object-fit: cover; display: block; background: #222; }
+.gallery-card .thumb-placeholder { width: 100%; aspect-ratio: 3/4; background: #222; display: flex; align-items: center; justify-content: center; color: #555; font-size: 11px; }
+.gallery-card .card-info { padding: 8px 10px; color: #aaa; font-size: 12px; }
+.gallery-card .card-info .name { color: #ddd; margin-bottom: 3px; }
+.gallery-card .card-info .meta { color: #666; font-size: 10px; }
+.gallery-card.processing { cursor: default; opacity: 0.8; }
+.card-progress { height: 3px; background: #333; margin: 6px 10px 0; border-radius: 2px; overflow: hidden; }
+.card-progress-fill { height: 100%; background: #5a8; border-radius: 2px; transition: width 0.3s ease; }
+#back-btn {
+  position: fixed; top: 10px; right: 8px; z-index: 25;
+  background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px; padding: 6px 12px; font-family: monospace; font-size: 12px;
+  cursor: pointer; display: none;
+}
+/* Upload modal */
+#upload-modal {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.92); z-index: 300; display: none; align-items: center; justify-content: center; padding: 20px;
+}
+#upload-modal.active { display: flex; }
+#upload-box { background: #1a1a1a; border-radius: 12px; padding: 24px; max-width: 400px; width: 100%; border: 1px solid rgba(255,255,255,0.1); }
+#upload-box h2 { color: #ddd; font-size: 15px; font-weight: normal; margin-bottom: 16px; }
+#drop-zone { border: 2px dashed rgba(255,255,255,0.2); border-radius: 8px; padding: 32px 16px; text-align: center; color: #666; font-size: 13px; margin-bottom: 14px; }
+#drop-zone.dragover { border-color: #5a8; color: #5a8; }
+#drop-zone input[type=file] { display: none; }
+#drop-zone .browse-link { color: #7ab; text-decoration: underline; cursor: pointer; }
+#upload-name { width: 100%; background: #222; border: 1px solid rgba(255,255,255,0.15); color: #ccc; font-family: monospace; font-size: 13px; padding: 8px 10px; border-radius: 6px; margin-bottom: 14px; }
+#upload-actions { display: flex; gap: 10px; justify-content: flex-end; }
+#upload-actions button { background: rgba(255,255,255,0.12); color: #ccc; border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 10px 18px; font-family: monospace; font-size: 13px; cursor: pointer; }
+#upload-actions .submit-btn { background: #2a4a3a; border-color: #3a6a4a; color: #8d8; }
+#upload-actions .submit-btn:disabled { opacity: 0.4; cursor: default; }
+#upload-status { color: #888; font-size: 12px; margin-top: 10px; display: none; }
+#upload-progress-bar { height: 3px; background: #333; border-radius: 2px; margin-top: 8px; overflow: hidden; display: none; }
+#upload-progress-fill { height: 100%; background: #5a8; border-radius: 2px; transition: width 0.2s ease; width: 0%; }
+#gpu-badge { position: fixed; bottom: 10px; right: 10px; color: #4a8; font-size: 10px; font-family: monospace; z-index: 5; }
+</style>
+</head>
+<body>
+<!-- Gallery view -->
+<div id="gallery">
+  <div id="gallery-header">
+    <h1>bodypipe (WebGPU)</h1>
+    <button id="upload-btn" onclick="openUpload()">+ upload</button>
+  </div>
+  <div id="gallery-grid"></div>
+</div>
+<!-- Upload modal -->
+<div id="upload-modal">
+  <div id="upload-box">
+    <h2>upload video</h2>
+    <div id="drop-zone">
+      <div>drop a video here</div>
+      <div style="margin-top:8px">or <span class="browse-link" onclick="document.getElementById('file-input').click()">browse files</span></div>
+      <input type="file" id="file-input" accept="video/*">
+    </div>
+    <div id="selected-file" style="color:#888;font-size:12px;margin-bottom:10px;display:none"></div>
+    <input type="text" id="upload-name" placeholder="name (optional)">
+    <div id="upload-actions">
+      <button onclick="closeUpload()">cancel</button>
+      <button class="submit-btn" id="submit-upload-btn" onclick="submitUpload()" disabled>upload + process</button>
+    </div>
+    <div id="upload-status"></div>
+    <div id="upload-progress-bar"><div id="upload-progress-fill"></div></div>
+  </div>
+</div>
+<!-- Simulation view -->
+<div id="loading" style="display:none">loading masks...</div>
+<div id="info"></div>
+<div id="tuner"><h3>tuner</h3></div>
+<canvas id="canvas" tabindex="0"></canvas>
+<button id="back-btn" onclick="goToGallery()">gallery</button>
+<div id="controls" style="display:none">
+  <button onclick="playing=!playing">play/pause</button>
+  <button onclick="stepFrame(-1)">&laquo;</button>
+  <button onclick="stepFrame(1)">&raquo;</button>
+  <button id="mode-in-btn" class="mode-active" onclick="toggleInside()">inside</button>
+  <button id="mode-out-btn" onclick="toggleOutside()">outside</button>
+  <button id="interact-btn" onclick="toggleInteract()">interact</button>
+  <button onclick="toggleP('showMask')">mask</button>
+  <button onclick="cycleVideoOpacity()">video</button>
+  <button onclick="respawn()">respawn</button>
+  <button onclick="toggleTuner()">tuner</button>
+</div>
+<div id="gpu-badge">WebGPU</div>
+
+<script>
+// ======================================================================
+// bodypipe — WebGPU compute shader version (fully GPU-resident)
+// Grid data NEVER leaves the GPU after initial upload.
+// ======================================================================
+
+const VIDEOS_BASE = '../research/videos/';
+const API_BASE = '/api';
+const params = new URLSearchParams(location.search);
+const videoName = params.get('video');
+const isGalleryMode = !videoName;
+
+let MASK_DIR, VIDEO_DIR, TOTAL_FRAMES, FPS, MASK_W, MASK_H, CELL, GW, GH;
+
+function setDefaults() {
+  MASK_DIR = '../research/lieberman_masks/';
+  VIDEO_DIR = '../research/lieberman_video_frames/';
+  TOTAL_FRAMES = 300; FPS = 30;
+  MASK_W = 720; MASK_H = 900; CELL = 4;
+  GW = Math.floor(MASK_W / CELL);
+  GH = Math.floor(MASK_H / CELL);
+}
+
+async function loadConfig() {
+  const configUrl = VIDEOS_BASE + videoName + '/config.json';
+  try {
+    const resp = await fetch(configUrl);
+    if (!resp.ok) throw new Error(resp.status);
+    const cfg = await resp.json();
+    MASK_DIR = VIDEOS_BASE + videoName + '/' + (cfg.maskDir || 'masks/');
+    VIDEO_DIR = VIDEOS_BASE + videoName + '/' + (cfg.frameDir || 'frames/');
+    TOTAL_FRAMES = cfg.totalFrames || 300;
+    FPS = cfg.fps || 30;
+    MASK_W = cfg.width || 720; MASK_H = cfg.height || 900;
+    CELL = 4;
+    GW = Math.floor(MASK_W / CELL);
+    GH = Math.floor(MASK_H / CELL);
+    document.title = `bodypipe — ${cfg.name || videoName} (WebGPU)`;
+  } catch (e) {
+    console.warn('No config.json, using defaults:', e);
+    setDefaults();
+  }
+}
+setDefaults();
+
+// -- Material types --
+const MAT = { EMPTY: 0, SAND: 1, WATER: 2, SMOKE: 3, FIRE: 4, LAVA: 5, POWDER: 6 };
+let insideMat = MAT.SAND, outsideMat = MAT.SAND;
+const MAT_NAMES = { 1: 'sand', 2: 'water', 3: 'smoke', 4: 'fire', 5: 'lava', 6: 'powder' };
+
+// -- Fill mode --
+let fillModeIn = 'static', fillModeOut = 'static';
+let containerOut = true;
+let interactMaterials = false;
+
+// -- Color palettes --
+const MAT_COLORS = {
+  [MAT.SAND]:  { inside: [[232,220,200],[212,196,168],[221,208,184],[240,228,208]], outside: [[180,200,225],[160,178,205],[200,215,230],[145,168,200]] },
+  [MAT.WATER]: { inside: [[40,110,230],[30,85,210],[55,130,250],[70,150,255]], outside: [[25,55,175],[18,42,155],[35,70,195],[45,65,185]] },
+  [MAT.SMOKE]: { inside: [[145,140,155],[125,120,135],[165,160,175],[110,105,120]], outside: [[105,105,120],[85,85,100],[125,125,140],[95,95,110]] },
+  [MAT.FIRE]:  { inside: [[255,130,25],[255,90,12],[255,170,45],[255,210,65]], outside: [[255,110,18],[255,70,8],[255,150,35],[245,190,55]] },
+  [MAT.LAVA]:  { inside: [[205,65,12],[225,85,22],[185,45,8],[255,125,35]], outside: [[185,55,12],[205,75,18],[165,40,8],[235,105,28]] },
+  [MAT.POWDER]:{ inside: [[244,240,232],[230,225,215],[250,246,238],[236,230,220]], outside: [[215,220,230],[200,208,220],[225,230,238],[205,212,225]] },
+};
+
+// -- Mode toggles --
+let insideOn = true, outsideOn = false, mode = 'inside';
+function deriveMode() { if (insideOn && outsideOn) return 'both'; if (insideOn) return 'inside'; if (outsideOn) return 'outside'; return 'none'; }
+function toggleInside() { insideOn = !insideOn; mode = deriveMode(); updateModeButtons(); respawn(); updateMatButtons(); }
+function toggleOutside() { outsideOn = !outsideOn; mode = deriveMode(); updateModeButtons(); respawn(); updateMatButtons(); }
+function updateModeButtons() {
+  const inBtn = document.getElementById('mode-in-btn');
+  const outBtn = document.getElementById('mode-out-btn');
+  if (inBtn) inBtn.classList.toggle('mode-active', insideOn);
+  if (outBtn) outBtn.classList.toggle('mode-active', outsideOn);
+}
+function cycleMode() {
+  if (insideOn && !outsideOn) { insideOn = false; outsideOn = true; }
+  else if (!insideOn && outsideOn) { insideOn = true; outsideOn = true; }
+  else { insideOn = true; outsideOn = false; }
+  mode = deriveMode(); updateModeButtons(); respawn();
+}
+
+// -- Material picker (GPU-only: just respawn) --
+function selectMat(side, mat) {
+  if (side === 'inside') { insideMat = mat; }
+  else { outsideMat = mat; }
+  updateMatButtons();
+  respawn();
+}
+function updateMatButtons() {
+  const inRow = document.getElementById('mat-row-inside');
+  const outRow = document.getElementById('mat-row-outside');
+  if (!inRow || !outRow) return;
+  inRow.querySelectorAll('button[data-mat]').forEach(b => b.classList.toggle('mat-active', parseInt(b.dataset.mat) === insideMat));
+  outRow.querySelectorAll('button[data-mat]').forEach(b => b.classList.toggle('mat-active', parseInt(b.dataset.mat) === outsideMat));
+  inRow.classList.toggle('dim', !insideOn);
+  outRow.classList.toggle('dim', !outsideOn);
+  const fillInRow = document.getElementById('fill-row-inside');
+  const fillOutRow = document.getElementById('fill-row-outside');
+  if (fillInRow) { fillInRow.querySelectorAll('button[data-fill]').forEach(b => b.classList.toggle('fill-active', b.dataset.fill === fillModeIn)); fillInRow.classList.toggle('dim', !insideOn); }
+  if (fillOutRow) { fillOutRow.querySelectorAll('button[data-fill]').forEach(b => b.classList.toggle('fill-active', b.dataset.fill === fillModeOut)); fillOutRow.classList.toggle('dim', !outsideOn); }
+  const containerBtn = document.getElementById('container-out-btn');
+  if (containerBtn) { containerBtn.classList.toggle('fill-active', containerOut); containerBtn.classList.toggle('dim', !outsideOn); }
+}
+function setFillMode(side, m) { if (side === 'inside') fillModeIn = m; else fillModeOut = m; respawn(); }
+function toggleContainer() { containerOut = !containerOut; updateMatButtons(); respawn(); }
+function toggleInteract() { interactMaterials = !interactMaterials; const btn = document.getElementById('interact-btn'); if (btn) btn.classList.toggle('mode-active', interactMaterials); }
+
+// -- Tunable params --
+const P = {
+  fillPctIn:    { val: 0.70, min: 0.0,  max: 1.0,  step: 0.05, label: 'inside fill %' },
+  fillPctOut:   { val: 0.70, min: 0.0,  max: 1.0,  step: 0.05, label: 'outside fill %' },
+  rainRate:     { val: 0.30, min: 0.0,  max: 1.0,  step: 0.02, label: 'rain rate' },
+  cellSize:     { val: 4,    min: 1,    max: 8,    step: 1,    label: 'grain size' },
+  itersIn:      { val: 2,    min: 1,    max: 12,   step: 1,    label: 'physics iters (inside)' },
+  itersOut:     { val: 6,    min: 1,    max: 12,   step: 1,    label: 'physics iters (outside)' },
+  playSpeed:    { val: 1.0,  min: 0.1,  max: 3.0,  step: 0.1,  label: 'play speed' },
+  inertia:      { val: 0.8,  min: 0.0,  max: 2.0,  step: 0.05, label: 'inertia' },
+  inertiaDamp:  { val: 0.85, min: 0.5,  max: 0.99, step: 0.01, label: 'inertia damp' },
+  groundPlane:  { val: 0.95, min: 0.3,  max: 1.0,  step: 0.01, label: 'ground plane' },
+  spin:         { val: 1.0,  min: 0.0,  max: 3.0,  step: 0.1,  label: 'spin force' },
+  reactRate:    { val: 0.40, min: 0.0,  max: 1.0,  step: 0.02, label: 'react rate' },
+  gravityIn:    { val: 1.0,  min: 0.0,  max: 1.0,  step: 0.05, label: 'gravity (inside)' },
+  gravityOut:   { val: 1.0,  min: 0.0,  max: 1.0,  step: 0.05, label: 'gravity (outside)' },
+  splashIn:     { val: 1.0,  min: 0.0,  max: 5.0,  step: 0.1,  label: 'splash (inside)' },
+  splashOut:    { val: 1.0,  min: 0.0,  max: 5.0,  step: 0.1,  label: 'splash (outside)' },
+  showMask:     { val: 0,    min: 0,    max: 1,    step: 1,    label: 'show mask' },
+  videoOpacity: { val: 0.0,  min: 0.0,  max: 1.0,  step: 0.05, label: 'video opacity' },
+  trailLen:     { val: 0.0,  min: 0.0,  max: 1.0,   step: 0.01,  label: 'trail length' },
+  fxZoom:       { val: 0.0,  min: -0.02, max: 0.02, step: 0.001, label: 'feedback zoom' },
+  fxTwirl:      { val: 0.0,  min: -0.05, max: 0.05, step: 0.002, label: 'twirl' },
+  fxChromaAb:   { val: 0.0,  min: 0.0,   max: 0.02, step: 0.0005, label: 'chromatic aberration' },
+  fxChromaTrails: { val: 0.0, min: 0.0,  max: 0.15, step: 0.005, label: 'chromatic trails' },
+};
+
+// -- State --
+let fullMasks = [], gridMasks = [], videoFrames = [];
+let gpuAllMasksBuf = null; // All masks pre-uploaded to GPU
+let precomputedCentroids = null; // Float64Array pairs [cx, cy] per frame
+let precomputedOrientations = null; // Float64Array per frame
+// Packed grid: each u32 has bits 0-7 = material, bits 8-9 = color variant, bits 10-25 = life
+let gridIn = null, gridOut = null;
+let currentFrame = 0, prevFrame = -1, playing = true;
+let frameAccum = 0, lastTime = 0, showTuner = false;
+let bodyVelX = 0, bodyVelY = 0, bodyAngularVel = 0;
+let prevOrientation = null, bodyCx = 0, bodyCy = 0;
+let lastVideoOpacity = 0.5;
+let gpuNeedsUpload = false;
+let frameJustChanged = false, shiftX = 0, shiftY = 0;
+
+// -- Canvas --
+const canvas = document.getElementById('canvas');
+
+// -- Helper: pack/unpack cell --
+function packCell(mat, variant, life) {
+  return (mat & 0xFF) | ((variant & 0x3) << 8) | ((life & 0xFFFF) << 10);
+}
+function unpackMat(cell) { return cell & 0xFF; }
+function unpackVariant(cell) { return (cell >> 8) & 0x3; }
+function unpackLife(cell) { return (cell >> 10) & 0xFFFF; }
+
+function resize() {
+  const UI_BOTTOM = 60, TOP_PAD = 8;
+  const scaleX = window.innerWidth / MASK_W;
+  const scaleY = (window.innerHeight - UI_BOTTOM - TOP_PAD) / MASK_H;
+  const scale = Math.min(scaleX, scaleY);
+  canvas.width = Math.floor(MASK_W * scale);
+  canvas.height = Math.floor(MASK_H * scale);
+  canvas.style.width = canvas.width + 'px';
+  canvas.style.height = canvas.height + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+let cellSizeChangeTimeout = null;
+function onCellSizeChange(newCell) {
+  clearTimeout(cellSizeChangeTimeout);
+  cellSizeChangeTimeout = setTimeout(() => {
+    CELL = Math.max(1, Math.min(8, Math.round(newCell)));
+    GW = Math.floor(MASK_W / CELL); GH = Math.floor(MASK_H / CELL);
+    gridMasks = fullMasks.map(m => downsample(m));
+    rebuildPrecomputed();
+    rebuildGpuMasks();
+    resizeGPU();
+    if (device) { createBuffers(); createPipelines(); }
+    respawn();
+  }, 200);
+}
+function rebuildPrecomputed() {
+  precomputedCentroids = new Float64Array(TOTAL_FRAMES * 2);
+  precomputedOrientations = new Float64Array(TOTAL_FRAMES);
+  for (let f = 0; f < TOTAL_FRAMES; f++) {
+    const gm = gridMasks[f];
+    let cx = 0, cy = 0, cnt = 0;
+    for (let y = 0; y < GH; y += 2) for (let x = 0; x < GW; x += 2) if (gm[y * GW + x]) { cx += x; cy += y; cnt++; }
+    if (cnt > 0) { cx /= cnt; cy /= cnt; } else { cx = GW / 2; cy = GH / 2; }
+    precomputedCentroids[f * 2] = cx; precomputedCentroids[f * 2 + 1] = cy;
+    let mu20 = 0, mu02 = 0, mu11 = 0;
+    for (let y = 0; y < GH; y += 2) for (let x = 0; x < GW; x += 2) if (gm[y * GW + x]) { const dx = x - cx, dy = y - cy; mu20 += dx * dx; mu02 += dy * dy; mu11 += dx * dy; }
+    precomputedOrientations[f] = 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
+  }
+}
+function rebuildGpuMasks() {
+  if (!device) return;
+  const cellCount = GW * GH;
+  const totalBytes = TOTAL_FRAMES * cellCount * 4;
+  // Guard: at very small CELL values the combined all-masks buffer can
+  // exceed the adapter's max storage binding size. In that case we skip
+  // the preload and fall back to per-frame CPU->GPU upload of just the
+  // active mask (see onFrameChange).
+  const maxBufSize = device.limits ? device.limits.maxStorageBufferBindingSize : 128 * 1024 * 1024;
+  if (totalBytes > maxBufSize) {
+    console.log(`all-masks preload skipped (${(totalBytes/1024/1024).toFixed(1)} MB > limit ${(maxBufSize/1024/1024).toFixed(1)} MB); using per-frame upload`);
+    if (gpuAllMasksBuf) { gpuAllMasksBuf.destroy(); gpuAllMasksBuf = null; }
+    return;
+  }
+  const allMasksData = new Uint32Array(TOTAL_FRAMES * cellCount);
+  for (let f = 0; f < TOTAL_FRAMES; f++) { const gm = gridMasks[f]; const off = f * cellCount; for (let i = 0; i < cellCount; i++) allMasksData[off + i] = gm[i]; }
+  try {
+    if (gpuAllMasksBuf) gpuAllMasksBuf.destroy();
+    const BUF = GPUBufferUsage;
+    gpuAllMasksBuf = device.createBuffer({ size: allMasksData.byteLength, usage: BUF.STORAGE | BUF.COPY_SRC, mappedAtCreation: true });
+    new Uint32Array(gpuAllMasksBuf.getMappedRange()).set(allMasksData);
+    gpuAllMasksBuf.unmap();
+  } catch (e) {
+    console.warn('rebuildGpuMasks allocation failed, falling back to per-frame upload:', e);
+    gpuAllMasksBuf = null;
+  }
+}
+
+function downsample(mask) {
+  const gm = new Uint8Array(GW * GH);
+  // At CELL=1 the old threshold was floor(0.4)=0 which marked EVERY cell
+  // in-mask (body silhouette disappeared). Use ~50% of pixels with a floor
+  // of 1 so a single-pixel block still requires that pixel to actually be set.
+  const thresh = Math.max(1, Math.round(CELL * CELL * 0.5));
+  for (let gy = 0; gy < GH; gy++) {
+    for (let gx = 0; gx < GW; gx++) {
+      let count = 0;
+      const mx0 = gx * CELL, my0 = gy * CELL;
+      for (let dy = 0; dy < CELL; dy++) {
+        for (let dx = 0; dx < CELL; dx++) {
+          const mx = mx0 + dx, my = my0 + dy;
+          if (mx < MASK_W && my < MASK_H && mask[my * MASK_W + mx]) count++;
+        }
+      }
+      gm[gy * GW + gx] = count >= thresh ? 1 : 0;
+    }
+  }
+  return gm;
+}
+
+async function loadMasks() {
+  const loadingEl = document.getElementById('loading');
+  loadingEl.textContent = 'fetching masks...';
+
+  const offscreen = document.createElement('canvas');
+  offscreen.width = MASK_W; offscreen.height = MASK_H;
+  const octx = offscreen.getContext('2d', { willReadFrequently: true });
+
+  fullMasks = new Array(TOTAL_FRAMES);
+  gridMasks = new Array(TOTAL_FRAMES);
+
+  // Fetch ALL mask PNGs in parallel
+  const fetchPromises = [];
+  for (let i = 0; i < TOTAL_FRAMES; i++) {
+    const url = MASK_DIR + String(i).padStart(5, '0') + '.png';
+    fetchPromises.push(fetch(url).then(r => r.ok ? r.blob() : null).catch(() => null));
+  }
+  const blobs = await Promise.all(fetchPromises);
+
+  // Decode + extract pixels in batches
+  const BATCH = 20;
+  for (let start = 0; start < TOTAL_FRAMES; start += BATCH) {
+    const end = Math.min(start + BATCH, TOTAL_FRAMES);
+    const bitmapPromises = [];
+    for (let i = start; i < end; i++) {
+      if (blobs[i]) bitmapPromises.push(createImageBitmap(blobs[i]).then(bmp => ({ idx: i, bmp })));
+      else bitmapPromises.push(Promise.resolve({ idx: i, bmp: null }));
+    }
+    const bitmaps = await Promise.all(bitmapPromises);
+    for (const { idx, bmp } of bitmaps) {
+      if (!bmp) { fullMasks[idx] = new Uint8Array(MASK_W * MASK_H); gridMasks[idx] = new Uint8Array(GW * GH); continue; }
+      octx.clearRect(0, 0, MASK_W, MASK_H);
+      octx.drawImage(bmp, 0, 0, MASK_W, MASK_H);
+      bmp.close();
+      const imgData = octx.getImageData(0, 0, MASK_W, MASK_H);
+      const binary = new Uint8Array(MASK_W * MASK_H);
+      for (let j = 0; j < binary.length; j++) binary[j] = imgData.data[j * 4] > 128 ? 1 : 0;
+      fullMasks[idx] = binary;
+      gridMasks[idx] = downsample(binary);
+    }
+    loadingEl.textContent = `decoding masks... ${end}/${TOTAL_FRAMES}`;
+    await new Promise(r => setTimeout(r, 0));
+  }
+  blobs.length = 0;
+
+  // Upload ALL masks to one giant GPU buffer — no per-frame CPU→GPU transfer
+  if (device) {
+    loadingEl.textContent = 'uploading masks to GPU...';
+    await new Promise(r => setTimeout(r, 0));
+    const cellCount = GW * GH;
+    const allMasksData = new Uint32Array(TOTAL_FRAMES * cellCount);
+    for (let f = 0; f < TOTAL_FRAMES; f++) {
+      const gm = gridMasks[f];
+      const offset = f * cellCount;
+      for (let i = 0; i < cellCount; i++) allMasksData[offset + i] = gm[i];
+    }
+    const BUF = GPUBufferUsage;
+    gpuAllMasksBuf = device.createBuffer({ size: allMasksData.byteLength, usage: BUF.STORAGE | BUF.COPY_SRC, mappedAtCreation: true });
+    new Uint32Array(gpuAllMasksBuf.getMappedRange()).set(allMasksData);
+    gpuAllMasksBuf.unmap();
+    console.log(`Uploaded ${TOTAL_FRAMES} masks to GPU (${(allMasksData.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+  }
+
+  // Precompute all centroids + orientations — zero iteration at runtime
+  loadingEl.textContent = 'precomputing motion...';
+  await new Promise(r => setTimeout(r, 0));
+  precomputedCentroids = new Float64Array(TOTAL_FRAMES * 2);
+  precomputedOrientations = new Float64Array(TOTAL_FRAMES);
+  for (let f = 0; f < TOTAL_FRAMES; f++) {
+    const gm = gridMasks[f];
+    let cx = 0, cy = 0, cnt = 0;
+    for (let y = 0; y < GH; y += 2) {
+      for (let x = 0; x < GW; x += 2) {
+        if (gm[y * GW + x]) { cx += x; cy += y; cnt++; }
+      }
+    }
+    if (cnt > 0) {
+      cx /= cnt; cy /= cnt;
+      precomputedCentroids[f * 2] = cx;
+      precomputedCentroids[f * 2 + 1] = cy;
+      let mu20 = 0, mu02 = 0, mu11 = 0;
+      for (let y = 0; y < GH; y += 2) {
+        for (let x = 0; x < GW; x += 2) {
+          if (gm[y * GW + x]) {
+            const dx = x - cx, dy = y - cy;
+            mu20 += dx * dx; mu02 += dy * dy; mu11 += dx * dy;
+          }
+        }
+      }
+      precomputedOrientations[f] = 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
+    } else {
+      precomputedCentroids[f * 2] = GW / 2;
+      precomputedCentroids[f * 2 + 1] = GH / 2;
+      precomputedOrientations[f] = 0;
+    }
+  }
+  console.log(`Precomputed ${TOTAL_FRAMES} centroids + orientations`);
+
+  // Video frame loads (non-blocking, for overlay)
+  for (let i = 0; i < TOTAL_FRAMES; i++) {
+    const img = new Image();
+    img.src = VIDEO_DIR + String(i).padStart(5, '0') + '.jpg';
+    videoFrames.push(img);
+  }
+  loadingEl.style.display = 'none';
+  canvas.focus();
+}
+
+function gridCentroid(gmask) {
+  let cx = 0, cy = 0, cnt = 0;
+  for (let y = 0; y < GH; y += 2) {
+    for (let x = 0; x < GW; x += 2) {
+      if (gmask[y * GW + x]) { cx += x; cy += y; cnt++; }
+    }
+  }
+  return cnt > 0 ? { x: cx / cnt, y: cy / cnt } : null;
+}
+
+function maskOrientation(gmask, cx, cy) {
+  let mu20 = 0, mu02 = 0, mu11 = 0;
+  for (let y = 0; y < GH; y += 2) {
+    for (let x = 0; x < GW; x += 2) {
+      if (gmask[y * GW + x]) {
+        const dx = x - cx, dy = y - cy;
+        mu20 += dx * dx; mu02 += dy * dy; mu11 += dx * dy;
+      }
+    }
+  }
+  return 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
+}
+
+function groundRow() { return Math.floor(GH * P.groundPlane.val); }
+
+function respawn() {
+  const N = GW * GH;
+  gridIn = new Uint32Array(N);
+  gridOut = new Uint32Array(N);
+  const gmask = gridMasks[currentFrame];
+  if (!gmask) return;
+  const gpRow = groundRow();
+  const startFillIn = fillModeIn === 'empty' ? 0 : P.fillPctIn.val;
+  const startFillOut = fillModeOut === 'empty' ? 0 : P.fillPctOut.val;
+
+  if ((mode === 'inside' || mode === 'both') && startFillIn > 0) {
+    const inside = [];
+    for (let i = 0; i < gmask.length; i++) if (gmask[i]) inside.push(i);
+    shuffle(inside);
+    const fill = Math.floor(inside.length * startFillIn);
+    for (let i = 0; i < fill; i++) {
+      const life = insideMat === MAT.FIRE ? ((Math.random()*15)|0) : insideMat === MAT.SMOKE ? ((Math.random()*20)|0) : 0;
+      gridIn[inside[i]] = packCell(insideMat, (Math.random()*4)|0, life);
+    }
+  }
+  if ((mode === 'outside' || mode === 'both') && startFillOut > 0) {
+    const effectiveGP = containerOut ? gpRow : GH;
+    const outside = [];
+    for (let y = 0; y < GH; y++) { if (y >= effectiveGP) continue; for (let x = 0; x < GW; x++) { const i = y * GW + x; if (!gmask[i]) outside.push(i); } }
+    shuffle(outside);
+    const fill = Math.floor(outside.length * startFillOut);
+    for (let i = 0; i < fill; i++) {
+      const life = outsideMat === MAT.FIRE ? ((Math.random()*15)|0) : outsideMat === MAT.SMOKE ? ((Math.random()*20)|0) : 0;
+      gridOut[outside[i]] = packCell(outsideMat, (Math.random()*4)|0, life);
+    }
+  }
+  prevFrame = currentFrame;
+  bodyVelX = 0; bodyVelY = 0; bodyAngularVel = 0; prevOrientation = null;
+  gpuNeedsUpload = true;
+  updateMatButtons();
+}
+
+function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = arr[i]; arr[i] = arr[j]; arr[j] = t; } }
+
+function onFrameChange() {
+  if (prevFrame < 0 || !precomputedCentroids) { prevFrame = currentFrame; return; }
+
+  // Pure array lookups — zero iteration
+  const c0x = precomputedCentroids[prevFrame * 2], c0y = precomputedCentroids[prevFrame * 2 + 1];
+  const c1x = precomputedCentroids[currentFrame * 2], c1y = precomputedCentroids[currentFrame * 2 + 1];
+  const rawDx = c1x - c0x, rawDy = c1y - c0y;
+  shiftX = Math.round(rawDx);
+  shiftY = Math.round(rawDy);
+  bodyVelX = bodyVelX * P.inertiaDamp.val + (-rawDx) * P.inertia.val;
+  bodyVelY = bodyVelY * P.inertiaDamp.val + (-rawDy) * P.inertia.val * 0.3;
+  bodyCx = c1x; bodyCy = c1y;
+
+  const theta = precomputedOrientations[currentFrame];
+  if (prevOrientation !== null) {
+    let dTheta = theta - prevOrientation;
+    while (dTheta > Math.PI / 2) dTheta -= Math.PI;
+    while (dTheta < -Math.PI / 2) dTheta += Math.PI;
+    bodyAngularVel = bodyAngularVel * P.inertiaDamp.val + dTheta * P.spin.val;
+  }
+  prevOrientation = theta;
+
+  // Swap active mask. Fast path: GPU-to-GPU copy from preloaded all-masks.
+  // Fallback path (fires when the all-masks buffer would exceed the
+  // adapter limit, typically CELL=1): upload the current frame's mask
+  // directly from the CPU via writeBuffer.
+  if (device && gpuMaskBuf) {
+    const cellCount = GW * GH;
+    if (gpuAllMasksBuf) {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(gpuAllMasksBuf, currentFrame * cellCount * 4, gpuMaskBuf, 0, cellCount * 4);
+      device.queue.submit([enc.finish()]);
+    } else {
+      const gm = gridMasks[currentFrame];
+      if (gm) {
+        const buf = new Uint32Array(cellCount);
+        for (let i = 0; i < cellCount; i++) buf[i] = gm[i];
+        device.queue.writeBuffer(gpuMaskBuf, 0, buf);
+      }
+    }
+  }
+
+  frameJustChanged = true;
+  prevFrame = currentFrame;
+}
+
+// ======================================================================
+// WebGPU
+// ======================================================================
+
+let device, gpuContext, canvasFormat;
+let gpuGridInA, gpuGridOutA, gpuGridTmp, gpuMaskBuf, gpuParamsBuf;
+let physicsPipeline, driftPipeline, centrifugalPipeline, lifePipeline, renderPipeline;
+let displacePipeline, relocatePipeline, maskKillPipeline, rainPipeline;
+let relocateBindGroupIn, relocateBindGroupOut;
+let physicsBindGroupsIn, physicsBindGroupsOut;
+let driftBindGroupIn, driftBindGroupOut;
+let centrifugalBindGroupIn;
+let lifeBindGroupIn, lifeBindGroupOut;
+let bouncePipeline, bounceBindGroupOut;
+let displaceBindGroupIn, displaceBindGroupOut;
+let maskKillBindGroupIn, maskKillBindGroupOut;
+let rainBindGroupIn, rainBindGroupOut;
+let renderBindGroup;
+// Trail ping-pong (GPU-native): draw particles into trailCurr sampling from
+// trailPrev * retention; present pass composites trailCurr over background
+// to canvas. Swap each frame.
+let trailTexA = null, trailTexB = null, trailSampler = null, trailParamsBuf = null;
+let presentPipeline = null;
+let trailToggle = 0; // 0 = A is prev, B is curr; 1 = B is prev, A is curr
+let gpuReady = false;
+let gpuFrameSeed = 0;
+
+// -- WGSL Shaders --
+
+const WGSL_PHYSICS = `
+struct Params {
+  width: u32,
+  height: u32,
+  step_offset: u32,
+  frame_seed: u32,
+  body_vel_x: f32,
+  body_vel_y: f32,
+  body_angular_vel: f32,
+  body_cx: f32,
+  body_cy: f32,
+  ground_row: u32,
+  container_on: u32,
+  spin_coeff: f32,
+  inside_mat: u32,
+  outside_mat: u32,
+  is_inside: u32,
+  pad0: u32,
+  shift_x: i32,
+  shift_y: i32,
+  rain_rate: f32,
+  rain_top: u32,
+  rain_mat: u32,
+  rain_mode: u32,
+  gravity_in: f32,
+  gravity_out: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 {
+  var s = v * 747796405u + 2891336453u;
+  var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+
+fn rand_f(seed: u32) -> f32 {
+  return f32(seed) / 4294967295.0;
+}
+
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+fn is_valid_inside(idx: u32) -> bool {
+  return mask[idx] == 1u;
+}
+
+fn is_valid_outside(idx: u32, y: u32) -> bool {
+  if (mask[idx] != 0u) { return false; }
+  if (params.container_on == 1u && y >= params.ground_row) { return false; }
+  return true;
+}
+
+fn is_valid(idx: u32, y: u32) -> bool {
+  if (params.is_inside == 1u) { return is_valid_inside(idx); }
+  return is_valid_outside(idx, y);
+}
+
+fn does_fall(m: u32) -> bool { return m == 1u || m == 2u || m == 5u || m == 6u; }
+fn does_rise(m: u32) -> bool { return m == 3u || m == 4u; }
+fn is_liquid(m: u32) -> bool { return m == 2u; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let bx = id.x;
+  let by = id.y;
+  let off = params.step_offset;
+  let ox = bx * 2u + (off & 1u);
+  let oy = by * 2u + ((off >> 1u) & 1u);
+
+  if (ox + 1u >= params.width || oy + 1u >= params.height) { return; }
+
+  let i0 = oy * params.width + ox;
+  let i1 = oy * params.width + ox + 1u;
+  let i2 = (oy + 1u) * params.width + ox;
+  let i3 = (oy + 1u) * params.width + ox + 1u;
+
+  var c = array<u32, 4>(grid[i0], grid[i1], grid[i2], grid[i3]);
+  var seed = pcg(ox * 374761393u + oy * 668265263u + params.frame_seed + off * 1013904223u);
+
+  let m0 = get_mat(c[0]); let m1 = get_mat(c[1]);
+  let m2 = get_mat(c[2]); let m3 = get_mat(c[3]);
+
+  // Validity of each position
+  let v0 = is_valid(i0, oy); let v1 = is_valid(i1, oy);
+  let v2 = is_valid(i2, oy + 1u); let v3 = is_valid(i3, oy + 1u);
+
+  var sw = array<bool, 4>(false, false, false, false);
+
+  // Gravity: TL->BL, TR->BR. Each fall swap is gated on a probability
+  // derived from the per-side gravity slider (1.0 = always, 0 = never).
+  let g = select(params.gravity_out, params.gravity_in, params.is_inside == 1u);
+  // Material-specific fall modifiers:
+  //   lava  (5): 60% chance to stay put per tick (viscous / sticky)
+  //   powder(6): 40% chance to stay put per tick (air resistance — lighter than sand)
+  let f0 = does_fall(m0)
+           && !(m0 == 5u && rand_f(pcg(seed + 1u)) < 0.6)
+           && !(m0 == 6u && rand_f(pcg(seed + 21u)) < 0.4);
+  let f1 = does_fall(m1)
+           && !(m1 == 5u && rand_f(pcg(seed + 2u)) < 0.6)
+           && !(m1 == 6u && rand_f(pcg(seed + 22u)) < 0.4);
+  seed = pcg(seed);
+
+  if (!sw[0] && !sw[2] && f0 && get_mat(c[2]) == 0u && v0 && v2 && rand_f(pcg(seed + 11u)) < g) {
+    let tc = c[0]; c[0] = c[2]; c[2] = tc; sw[0] = true; sw[2] = true;
+  }
+  if (!sw[1] && !sw[3] && f1 && get_mat(c[3]) == 0u && v1 && v3 && rand_f(pcg(seed + 12u)) < g) {
+    let tc = c[1]; c[1] = c[3]; c[3] = tc; sw[1] = true; sw[3] = true;
+  }
+
+  // Diagonal gravity
+  seed = pcg(seed);
+  let diag_lr = rand_f(seed) > 0.5;
+  if (diag_lr) {
+    if (!sw[0] && !sw[3] && does_fall(get_mat(c[0])) && get_mat(c[3]) == 0u && get_mat(c[2]) != 0u && v0 && v3 && rand_f(pcg(seed + 13u)) < g) {
+      let tc = c[0]; c[0] = c[3]; c[3] = tc; sw[0] = true; sw[3] = true;
+    }
+    if (!sw[1] && !sw[2] && does_fall(get_mat(c[1])) && get_mat(c[2]) == 0u && get_mat(c[3]) != 0u && v1 && v2 && rand_f(pcg(seed + 14u)) < g) {
+      let tc = c[1]; c[1] = c[2]; c[2] = tc; sw[1] = true; sw[2] = true;
+    }
+  } else {
+    if (!sw[1] && !sw[2] && does_fall(get_mat(c[1])) && get_mat(c[2]) == 0u && get_mat(c[3]) != 0u && v1 && v2 && rand_f(pcg(seed + 15u)) < g) {
+      let tc = c[1]; c[1] = c[2]; c[2] = tc; sw[1] = true; sw[2] = true;
+    }
+    if (!sw[0] && !sw[3] && does_fall(get_mat(c[0])) && get_mat(c[3]) == 0u && get_mat(c[2]) != 0u && v0 && v3 && rand_f(pcg(seed + 16u)) < g) {
+      let tc = c[0]; c[0] = c[3]; c[3] = tc; sw[0] = true; sw[3] = true;
+    }
+  }
+
+  // Rising: BL->TL, BR->TR
+  seed = pcg(seed);
+  let r2 = does_rise(get_mat(c[2])) && !(get_mat(c[2]) == 4u && rand_f(pcg(seed + 3u)) > 0.65);
+  let r3 = does_rise(get_mat(c[3])) && !(get_mat(c[3]) == 4u && rand_f(pcg(seed + 4u)) > 0.65);
+
+  if (!sw[2] && !sw[0] && r2 && get_mat(c[0]) == 0u && v2 && v0) {
+    let tc = c[2]; c[2] = c[0]; c[0] = tc; sw[2] = true; sw[0] = true;
+  }
+  if (!sw[3] && !sw[1] && r3 && get_mat(c[1]) == 0u && v3 && v1) {
+    let tc = c[3]; c[3] = c[1]; c[1] = tc; sw[3] = true; sw[1] = true;
+  }
+
+  // Diagonal rising
+  if (!sw[2] && !sw[1] && does_rise(get_mat(c[2])) && get_mat(c[1]) == 0u && v2 && v1) {
+    let tc = c[2]; c[2] = c[1]; c[1] = tc; sw[2] = true; sw[1] = true;
+  }
+  if (!sw[3] && !sw[0] && does_rise(get_mat(c[3])) && get_mat(c[0]) == 0u && v3 && v0) {
+    let tc = c[3]; c[3] = c[0]; c[0] = tc; sw[3] = true; sw[0] = true;
+  }
+
+  // Horizontal flow (water, smoke)
+  seed = pcg(seed);
+  let h_dir = rand_f(seed) > 0.5;
+  if (h_dir) {
+    if (!sw[0] && !sw[1] && (is_liquid(get_mat(c[0])) || does_rise(get_mat(c[0]))) && get_mat(c[1]) == 0u && v0 && v1 && rand_f(pcg(seed + 5u)) < 0.6) {
+      let tc = c[0]; c[0] = c[1]; c[1] = tc; sw[0] = true; sw[1] = true;
+    }
+    if (!sw[2] && !sw[3] && (is_liquid(get_mat(c[2])) || does_rise(get_mat(c[2]))) && get_mat(c[3]) == 0u && v2 && v3 && rand_f(pcg(seed + 6u)) < 0.6) {
+      let tc = c[2]; c[2] = c[3]; c[3] = tc; sw[2] = true; sw[3] = true;
+    }
+  } else {
+    if (!sw[1] && !sw[0] && (is_liquid(get_mat(c[1])) || does_rise(get_mat(c[1]))) && get_mat(c[0]) == 0u && v1 && v0 && rand_f(pcg(seed + 7u)) < 0.6) {
+      let tc = c[1]; c[1] = c[0]; c[0] = tc; sw[1] = true; sw[0] = true;
+    }
+    if (!sw[3] && !sw[2] && (is_liquid(get_mat(c[3])) || does_rise(get_mat(c[3]))) && get_mat(c[2]) == 0u && v3 && v2 && rand_f(pcg(seed + 8u)) < 0.6) {
+      let tc = c[3]; c[3] = c[2]; c[2] = tc; sw[3] = true; sw[2] = true;
+    }
+  }
+
+  grid[i0] = c[0]; grid[i1] = c[1]; grid[i2] = c[2]; grid[i3] = c[3];
+}
+`;
+
+const WGSL_DRIFT = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+  gravity_in: f32, gravity_out: f32,
+  splash_in: f32, splash_out: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+  let cell = grid[idx];
+  if (get_mat(cell) == 0u) { return; }
+
+  var vel_x = params.body_vel_x;
+  if (params.is_inside == 0u) { vel_x = -vel_x; } // outside: pushed opposite
+
+  let splash = select(params.splash_out, params.splash_in, params.is_inside == 1u);
+  vel_x = vel_x * splash;
+
+  let abs_vx = abs(vel_x);
+  if (abs_vx < 0.3) { return; }
+
+  let drift_prob = clamp(abs_vx * 0.15, 0.0, 1.0);
+  let seed = pcg(x * 374761393u + y * 668265263u + params.frame_seed + 999u);
+  let r = f32(seed) / 4294967295.0;
+  if (r > drift_prob) { return; }
+
+  var dir = 1i;
+  if (vel_x < 0.0) { dir = -1i; }
+  let nx = i32(x) + dir;
+  if (nx < 0 || nx >= i32(params.width)) { return; }
+  let nidx = y * params.width + u32(nx);
+
+  // Check validity
+  if (params.is_inside == 1u) {
+    if (mask[nidx] != 1u) { return; }
+  } else {
+    if (mask[nidx] != 0u) { return; }
+    if (params.container_on == 1u && y >= params.ground_row) { return; }
+  }
+  if (get_mat(grid[nidx]) != 0u) { return; }
+
+  // Swap
+  grid[nidx] = cell;
+  grid[idx] = 0u;
+}
+`;
+
+const WGSL_CENTRIFUGAL = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+  gravity_in: f32, gravity_out: f32,
+  splash_in: f32, splash_out: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+  let cell = grid[idx];
+  if (get_mat(cell) == 0u) { return; }
+
+  // Amplify angular velocity by splash BEFORE threshold check so splash
+  // affects slow rotations too, not just fast ones that already passed.
+  let av = abs(params.body_angular_vel) * params.splash_in;
+  if (av < 0.05) { return; }
+
+  let dx = f32(x) - params.body_cx;
+  let dy = f32(y) - params.body_cy;
+  let r2 = dx * dx + dy * dy;
+  if (r2 < 4.0) { return; }
+
+  let coeff = params.spin_coeff * params.splash_in;
+  let push_prob = clamp(coeff * coeff * r2, 0.0, 1.0);
+  let seed = pcg(x * 668265263u + y * 374761393u + params.frame_seed + 777u);
+  let rnd = f32(seed) / 4294967295.0;
+  if (rnd > push_prob) { return; }
+
+  let r = sqrt(r2);
+  let rdx = dx / r; let rdy = dy / r;
+  let nxi = i32(x) + i32(round(rdx));
+  let nyi = i32(y) + i32(round(rdy));
+  if (nxi < 0 || nxi >= i32(params.width) || nyi < 0 || nyi >= i32(params.height)) { return; }
+  let nidx = u32(nyi) * params.width + u32(nxi);
+
+  if (mask[nidx] != 1u) { return; }
+  if (get_mat(grid[nidx]) != 0u) { return; }
+
+  grid[nidx] = cell;
+  grid[idx] = 0u;
+}
+`;
+
+const WGSL_BOUNCE = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+  gravity_in: f32, gravity_out: f32,
+  splash_in: f32, splash_out: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+// Outside-mode collision bounce: any outside particle whose cell BELOW is
+// inside the body mask is "sitting on" the body's top surface. With a
+// probability proportional to body speed + splash_out, it gets relaunched
+// upward (with optional sideways tilt) like a rain droplet deflecting off
+// an umbrella. Runs only when bound for outside-mode dispatch.
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+  let cell = grid[idx];
+  if (get_mat(cell) == 0u) { return; }
+
+  // Only meaningful for outside-mode grid; is_inside is set false by caller.
+  if (params.is_inside == 1u) { return; }
+
+  // Must be outside the body (mask=0) -- no bouncing of particles already
+  // inside the mask (there shouldn't be any in outside-grid, but guard).
+  if (mask[idx] != 0u) { return; }
+
+  // Must be sitting on the body surface: cell directly below is mask=1.
+  if (y + 1u >= params.height) { return; }
+  let below_idx = (y + 1u) * params.width + x;
+  if (mask[below_idx] != 1u) { return; }
+
+  // Bounce impulse proportional to body speed (both axes) + splash_out.
+  let speed = length(vec2<f32>(params.body_vel_x, params.body_vel_y));
+  let impulse = speed * params.splash_out;
+  if (impulse < 0.3) { return; }
+  let bounce_prob = clamp(impulse * 0.25, 0.0, 0.7);
+
+  let seed = pcg(x * 374761393u + y * 668265263u + params.frame_seed + 31337u);
+  if (f32(seed) / 4294967295.0 > bounce_prob) { return; }
+
+  // Pick target: upward, with random horizontal tilt biased by body_vel_x
+  // so droplets spray "with" the body's lateral motion.
+  let seed2 = pcg(seed + 1u);
+  let tilt_rand = i32(seed2 & 3u) - 1i;  // -1, 0, 1, 2 -> remap
+  var tilt = 0i;
+  if (tilt_rand == -1i) { tilt = -1i; }
+  else if (tilt_rand == 1i) { tilt = 1i; }
+  else if (tilt_rand == 2i) {
+    // Bias with body_vel_x sign
+    if (params.body_vel_x > 0.3) { tilt = 1i; }
+    else if (params.body_vel_x < -0.3) { tilt = -1i; }
+  }
+
+  let tx = i32(x) + tilt;
+  let ty = i32(y) - 1i;
+  if (tx < 0 || tx >= i32(params.width) || ty < 0) { return; }
+  let tidx = u32(ty) * params.width + u32(tx);
+
+  // Target must be outside mask AND empty.
+  if (mask[tidx] != 0u) { return; }
+  if (get_mat(grid[tidx]) != 0u) { return; }
+
+  // Bounce!
+  grid[tidx] = cell;
+  grid[idx] = 0u;
+}
+`;
+
+const WGSL_LIFE = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+  var cell = grid[idx];
+  let mat = cell & 0xFFu;
+  if (mat == 0u) { return; }
+
+  let variant = (cell >> 8u) & 0x3u;
+  var life = (cell >> 10u) & 0xFFFFu;
+  let seed = pcg(x * 374761393u + y * 668265263u + params.frame_seed + life * 48271u);
+  let rnd = f32(seed) / 4294967295.0;
+
+  if (mat == 4u) { // FIRE
+    life = life + 1u;
+    let threshold = 22u + u32(rnd * 28.0);
+    if (life > threshold) {
+      let seed2 = pcg(seed + 1u);
+      let r2 = f32(seed2) / 4294967295.0;
+      if (r2 < 0.35) {
+        // Fire -> smoke
+        let new_variant = (pcg(seed + 2u) >> 16u) & 0x3u;
+        grid[idx] = 3u | (new_variant << 8u);
+      } else {
+        grid[idx] = 0u;
+      }
+      return;
+    }
+    // Flicker color variant
+    let new_variant = (pcg(seed + 3u) >> 16u) & 0x3u;
+    grid[idx] = mat | (new_variant << 8u) | (life << 10u);
+  } else if (mat == 3u) { // SMOKE
+    life = life + 1u;
+    let threshold = 55u + u32(rnd * 35.0);
+    if (life > threshold) {
+      grid[idx] = 0u;
+      return;
+    }
+    grid[idx] = mat | (variant << 8u) | (life << 10u);
+  }
+}
+`;
+
+// -- NEW GPU-RESIDENT SHADERS --
+
+const WGSL_DISPLACE = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<storage, read> tmp: array<u32>;
+@group(0) @binding(3) var<storage, read> mask: array<u32>;
+
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+
+  let sx = i32(x) - params.shift_x;
+  let sy = i32(y) - params.shift_y;
+
+  if (sx >= 0 && sx < i32(params.width) && sy >= 0 && sy < i32(params.height)) {
+    let src_idx = u32(sy) * params.width + u32(sx);
+    let cell = tmp[src_idx];
+    if (get_mat(cell) != 0u) {
+      // Preserve the shifted cell regardless of new-mask validity.
+      // The spiral relocate pass that follows will pick up any grain
+      // now sitting outside the new mask and find it a new empty home.
+      dst[idx] = cell;
+      return;
+    }
+  }
+  dst[idx] = 0u;
+}
+`;
+
+// ── GPU relocate: push invalid grains toward nearest valid cell via atomicCAS ──
+// Run 8-16 iterations. Each pass, every invalid grain tries to move 1 cell toward
+// the body centroid. atomicCompareExchangeWeak prevents collisions.
+const WGSL_RELOCATE = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+
+fn is_valid_pos(idx: u32, y: u32) -> bool {
+  if (params.is_inside == 1u) { return mask[idx] == 1u; }
+  if (mask[idx] != 0u) { return false; }
+  if (params.container_on == 1u && y >= params.ground_row) { return false; }
+  return true;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+
+  let cell = atomicLoad(&grid[idx]);
+  if ((cell & 0xFFu) == 0u) { return; }
+  if (is_valid_pos(idx, y)) { return; }
+
+  // Spiral search outward for the NEAREST empty valid cell. Port of the
+  // CPU nearestEmpty(). Each stranded grain walks rings r=1..max_r and
+  // tries cells on the RING PERIMETER ONLY (8r cells per ring, not r^2).
+  // At max_r=20 that's ~840 cells per stranded grain — tractable on GPU.
+  let max_r = 20i;
+  let xi = i32(x);
+  let yi = i32(y);
+  for (var r = 1i; r <= max_r; r++) {
+    // Top (y = yi - r) and bottom (y = yi + r) edges: full x range [xi-r, xi+r]
+    for (var dx = -r; dx <= r; dx++) {
+      // top
+      let tx = xi + dx; let ty = yi - r;
+      if (tx >= 0 && tx < i32(params.width) && ty >= 0 && ty < i32(params.height)) {
+        let tidx = u32(ty) * params.width + u32(tx);
+        if (is_valid_pos(tidx, u32(ty))) {
+          let result = atomicCompareExchangeWeak(&grid[tidx], 0u, cell);
+          if (result.exchanged) { atomicStore(&grid[idx], 0u); return; }
+        }
+      }
+      // bottom
+      let bx = xi + dx; let by = yi + r;
+      if (bx >= 0 && bx < i32(params.width) && by >= 0 && by < i32(params.height)) {
+        let bidx = u32(by) * params.width + u32(bx);
+        if (is_valid_pos(bidx, u32(by))) {
+          let result = atomicCompareExchangeWeak(&grid[bidx], 0u, cell);
+          if (result.exchanged) { atomicStore(&grid[idx], 0u); return; }
+        }
+      }
+    }
+    // Left (x = xi - r) and right (x = xi + r) edges: y range (xi-r+1..xi+r-1) to avoid re-checking corners
+    for (var dy = -r + 1i; dy <= r - 1i; dy++) {
+      let ly = yi + dy; let lx = xi - r;
+      if (lx >= 0 && lx < i32(params.width) && ly >= 0 && ly < i32(params.height)) {
+        let lidx = u32(ly) * params.width + u32(lx);
+        if (is_valid_pos(lidx, u32(ly))) {
+          let result = atomicCompareExchangeWeak(&grid[lidx], 0u, cell);
+          if (result.exchanged) { atomicStore(&grid[idx], 0u); return; }
+        }
+      }
+      let ry = yi + dy; let rx = xi + r;
+      if (rx >= 0 && rx < i32(params.width) && ry >= 0 && ry < i32(params.height)) {
+        let ridx = u32(ry) * params.width + u32(rx);
+        if (is_valid_pos(ridx, u32(ry))) {
+          let result = atomicCompareExchangeWeak(&grid[ridx], 0u, cell);
+          if (result.exchanged) { atomicStore(&grid[idx], 0u); return; }
+        }
+      }
+    }
+  }
+  // No home within max_r — grain stays put (next frame will try again).
+}
+`;
+
+const WGSL_MASK_KILL = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.height) { return; }
+  let idx = y * params.width + x;
+  let cell = grid[idx];
+  if (get_mat(cell) == 0u) { return; }
+
+  if (params.is_inside == 1u) {
+    // Inside grid: kill grains not inside the mask
+    if (mask[idx] != 1u) { grid[idx] = 0u; }
+  } else {
+    // Outside grid: kill grains inside the mask
+    if (mask[idx] != 0u) { grid[idx] = 0u; return; }
+    // Kill grains below ground when container is on
+    if (params.container_on == 1u && y >= params.ground_row) { grid[idx] = 0u; return; }
+    // Kill bottom 2 rows when container is off (grains fall through)
+    if (params.container_on == 0u && y >= params.height - 2u) { grid[idx] = 0u; }
+  }
+}
+`;
+
+const WGSL_RAIN = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> grid: array<u32>;
+@group(0) @binding(2) var<storage, read> mask: array<u32>;
+
+fn pcg(v: u32) -> u32 {
+  var s = v * 747796405u + 2891336453u;
+  var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+fn get_mat(cell: u32) -> u32 { return cell & 0xFFu; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x; let y = id.y;
+  if (x >= params.width || y >= params.rain_top) { return; }
+  let idx = y * params.width + x;
+
+  // Check validity: inside mode needs mask==1, outside needs mask==0
+  if (params.rain_mode == 1u) {
+    if (mask[idx] != 1u) { return; }
+  } else {
+    if (mask[idx] != 0u) { return; }
+  }
+
+  // Only spawn into empty cells
+  if (get_mat(grid[idx]) != 0u) { return; }
+
+  // Probabilistic spawn using PCG hash
+  let seed = pcg(x * 374761393u + y * 668265263u + params.frame_seed * 48271u + 12345u);
+  let r = f32(seed) / 4294967295.0;
+  if (r > params.rain_rate) { return; }
+
+  // Pack cell: mat + random variant + life for fire/smoke
+  let mat = params.rain_mat;
+  let seed2 = pcg(seed + 1u);
+  let variant = (seed2 >> 16u) & 0x3u;
+  var life = 0u;
+  if (mat == 4u) { life = (pcg(seed2 + 1u) >> 20u) % 15u; }   // FIRE
+  else if (mat == 3u) { life = (pcg(seed2 + 2u) >> 20u) % 20u; } // SMOKE
+
+  grid[idx] = mat | (variant << 8u) | (life << 10u);
+}
+`;
+
+const WGSL_RENDER = `
+struct Params {
+  width: u32, height: u32, step_offset: u32, frame_seed: u32,
+  body_vel_x: f32, body_vel_y: f32, body_angular_vel: f32,
+  body_cx: f32, body_cy: f32, ground_row: u32, container_on: u32,
+  spin_coeff: f32, inside_mat: u32, outside_mat: u32, is_inside: u32, pad0: u32,
+  shift_x: i32, shift_y: i32, rain_rate: f32, rain_top: u32, rain_mat: u32, rain_mode: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grid_in: array<u32>;
+@group(0) @binding(2) var<storage, read> grid_out: array<u32>;
+@group(0) @binding(3) var<storage, read> mask: array<u32>;
+@group(0) @binding(4) var trailPrev: texture_2d<f32>;
+@group(0) @binding(5) var trailSamp: sampler;
+
+struct TrailParams {
+  // per-channel retention: rgba multiplier applied to the sampled previous
+  // trail frame. Default all equal to the trail-length slider; differ for
+  // the "chromatic trails" effect (warm afterimages).
+  retention: vec4<f32>,
+  // VFX knobs: x = feedback-zoom delta (0 = no zoom, positive = zoom in),
+  //           y = twirl angle per frame (radians),
+  //           z = chromatic aberration (UV-space offset magnitude),
+  //           w = reserved.
+  fx: vec4<f32>,
+}
+@group(0) @binding(6) var<uniform> trailParams: TrailParams;
+
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var pos = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  return vec4(pos[vi], 0.0, 1.0);
+}
+
+fn pcg(v: u32) -> u32 { var s = v * 747796405u + 2891336453u; var w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+
+fn inside_color(mat: u32, variant: u32, x: u32, y: u32) -> vec3<f32> {
+  let av = f32(pcg(x * 374761393u + y * 668265263u + params.frame_seed) & 255u) / 255.0;
+  switch mat {
+    case 1u { // sand
+      let v = f32(variant);
+      let base = vec3(0.91, 0.86, 0.78);
+      return base + (v - 1.5) * 0.04;
+    }
+    case 2u { // water
+      let v = f32(variant);
+      return vec3(0.16 + v*0.04, 0.43 + v*0.06, 0.90 + v*0.03);
+    }
+    case 3u { // smoke
+      let v = f32(variant);
+      let base = 0.53 + v * 0.04;
+      return vec3(base, base - 0.01, base + 0.02);
+    }
+    case 4u { // fire
+      if (av < 0.3) { return vec3(1.0, 0.78 + av*0.2, 0.2 + av*0.2); }
+      else if (av < 0.6) { return vec3(1.0, 0.39 + av*0.3, 0.04 + av*0.08); }
+      else { return vec3(1.0, 0.24 + av*0.2, 0.02); }
+    }
+    case 5u { // lava
+      if (av < 0.12) { return vec3(1.0, 0.49 + av*2.0, 0.14); }
+      else { let v = f32(variant); return vec3(0.80 + v*0.04, 0.25 + v*0.03, 0.05); }
+    }
+    case 6u { // powder — pale cream, slight grain variation
+      let v = f32(variant);
+      let base = vec3(0.96, 0.94, 0.90);
+      return base + (v - 1.5) * 0.02;
+    }
+    default { return vec3(0.0); }
+  }
+}
+
+fn outside_color(mat: u32, variant: u32, x: u32, y: u32) -> vec3<f32> {
+  let av = f32(pcg(x * 374761393u + y * 668265263u + params.frame_seed) & 255u) / 255.0;
+  switch mat {
+    case 1u { let v = f32(variant); return vec3(0.70 + v*0.04, 0.78 + v*0.03, 0.88 + v*0.02); }
+    case 2u { let v = f32(variant); return vec3(0.10 + v*0.03, 0.22 + v*0.04, 0.69 + v*0.04); }
+    case 3u { let v = f32(variant); let base = 0.39 + v * 0.04; return vec3(base, base, base + 0.03); }
+    case 4u {
+      if (av < 0.3) { return vec3(1.0, 0.74 + av*0.2, 0.18 + av*0.18); }
+      else if (av < 0.6) { return vec3(1.0, 0.35 + av*0.27, 0.03 + av*0.07); }
+      else { return vec3(0.96, 0.22 + av*0.2, 0.02); }
+    }
+    case 5u {
+      if (av < 0.12) { return vec3(0.92, 0.41 + av*2.0, 0.11); }
+      else { let v = f32(variant); return vec3(0.73 + v*0.04, 0.22 + v*0.03, 0.05); }
+    }
+    case 6u { // powder — cool pale in outside palette
+      let v = f32(variant);
+      let base = vec3(0.85, 0.88, 0.92);
+      return base + (v - 1.5) * 0.02;
+    }
+    default { return vec3(0.0); }
+  }
+}
+
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let canvas_w = f32(params.width);
+  let canvas_h = f32(params.height);
+
+  // textureSample must be called from uniform control flow in WGSL, so we
+  // sample the trail texture BEFORE any pos-dependent branches.
+  // Feedback-zoom + twirl: transform the source UV so the trail sample
+  // comes from a slightly zoomed/rotated version of the previous frame.
+  // Produces the hypnotic "tunnel into infinity" Geiss effect.
+  let uv = pos.xy / vec2<f32>(canvas_w, canvas_h);
+  let zoom = 1.0 + trailParams.fx.x;
+  let ang = trailParams.fx.y;
+  let cs = cos(ang);
+  let sn = sin(ang);
+  let off = (uv - vec2<f32>(0.5, 0.5)) * zoom;
+  let rot = vec2<f32>(off.x * cs - off.y * sn, off.x * sn + off.y * cs);
+  let src_uv = rot + vec2<f32>(0.5, 0.5);
+  let prev = textureSample(trailPrev, trailSamp, src_uv);
+  // Per-channel retention for "chromatic trails" (warm afterimages).
+  let faded = prev * trailParams.retention;
+
+  let gx = u32(pos.x);
+  let gy = u32(pos.y);
+  if (gx >= params.width || gy >= params.height) { return faded; }
+
+  let idx = gy * params.width + gx;
+  let m = mask[idx];
+
+  // Inside-grid particles are only rendered where the mask is 1 (inside the
+  // body). Any stranded grains outside the silhouette are invisible.
+  if (m == 1u) {
+    let cell_in = grid_in[idx];
+    let mat_in = cell_in & 0xFFu;
+    if (mat_in != 0u) {
+      let variant = (cell_in >> 8u) & 0x3u;
+      let col = inside_color(mat_in, variant, gx, gy);
+      return vec4(col, 1.0);
+    }
+  }
+
+  // Outside-grid particles are only rendered where the mask is 0.
+  if (m == 0u) {
+    let cell_out = grid_out[idx];
+    let mat_out = cell_out & 0xFFu;
+    if (mat_out != 0u) {
+      let variant = (cell_out >> 8u) & 0x3u;
+      let col = outside_color(mat_out, variant, gx, gy);
+      return vec4(col, 1.0);
+    }
+  }
+
+  // No particle here -- return faded previous trail.
+  return faded;
+}
+`;
+
+const WGSL_PRESENT = `
+struct TrailParams {
+  retention: vec4<f32>,
+  fx: vec4<f32>,  // x=zoom, y=twirl, z=chroma_ab, w=reserved
+}
+@group(0) @binding(0) var trailTex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> trailParams: TrailParams;
+
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  return vec4(p[vi], 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(trailTex));
+  let uv = pos.xy / dims;
+
+  // Chromatic aberration: sample R/G/B channels at slightly offset UVs
+  // along the radial direction from center. Offset magnitude = fx.z.
+  let ca = trailParams.fx.z;
+  let dir = uv - vec2<f32>(0.5, 0.5);
+  let off = dir * ca;
+  let r = textureSample(trailTex, samp, uv - off).r;
+  let g = textureSample(trailTex, samp, uv).g;
+  let b = textureSample(trailTex, samp, uv + off).b;
+  let a = textureSample(trailTex, samp, uv).a;
+
+  let bg = vec3<f32>(0.067, 0.067, 0.067);
+  return vec4<f32>(mix(bg, vec3<f32>(r, g, b), a), 1.0);
+}
+`;
+
+function raceTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
+async function initGPU() {
+  const badge = document.getElementById('gpu-badge');
+  if (!navigator.gpu) {
+    badge.textContent = 'WebGPU: not supported';
+    return false;
+  }
+
+  // requestAdapter() hangs on some GPU/driver combos (Blackwell) -- try with timeout
+  let adapter = null;
+  for (const pref of ['high-performance', undefined, 'low-power']) {
+    try {
+      const opts = pref ? { powerPreference: pref } : {};
+      adapter = await raceTimeout(navigator.gpu.requestAdapter(opts), 5000);
+      if (adapter) break;
+    } catch { /* timeout, try next */ }
+  }
+  if (!adapter) {
+    badge.textContent = 'WebGPU: adapter timeout';
+    console.warn('WebGPU requestAdapter() timed out');
+    return false;
+  }
+
+  try {
+    // At small CELL values the all-masks storage buffer can be several GB
+    // (600 frames × MASK_W × MASK_H × 4 bytes). Default WebGPU limits cap
+    // maxStorageBufferBindingSize at 128 MB, which blows up when grain
+    // size < 3. Request whatever the adapter actually supports.
+    const reqLimits = {};
+    if (adapter.limits) {
+      if (adapter.limits.maxBufferSize) reqLimits.maxBufferSize = adapter.limits.maxBufferSize;
+      if (adapter.limits.maxStorageBufferBindingSize) reqLimits.maxStorageBufferBindingSize = adapter.limits.maxStorageBufferBindingSize;
+    }
+    device = await raceTimeout(adapter.requestDevice({ requiredLimits: reqLimits }), 5000);
+    console.log('WebGPU device limits:', {
+      maxBufferSize: device.limits.maxBufferSize,
+      maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+    });
+  } catch (e) {
+    badge.textContent = 'WebGPU: device timeout';
+    console.warn('WebGPU requestDevice failed:', e);
+    return false;
+  }
+
+  // Configure canvas for WebGPU
+  gpuContext = canvas.getContext('webgpu');
+  canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+  gpuContext.configure({ device, format: canvasFormat, alphaMode: 'premultiplied' });
+
+  createBuffers();
+  createPipelines();
+
+  try {
+    const info = adapter.info || {};
+    document.getElementById('gpu-badge').textContent = 'WebGPU: ' + (info.device || info.description || 'active');
+  } catch { document.getElementById('gpu-badge').textContent = 'WebGPU: active'; }
+  gpuReady = true;
+  return true;
+}
+
+function createBuffers() {
+  const cellCount = GW * GH;
+  const gridSize = cellCount * 4; // u32 per cell
+  const BUF = GPUBufferUsage;
+
+  // Align uniform buffer to 256 bytes: 22 u32s = 88 bytes, pad to 256
+  const uniformSize = 256;
+
+  gpuGridInA = device.createBuffer({ size: gridSize, usage: BUF.STORAGE | BUF.COPY_DST | BUF.COPY_SRC });
+  gpuGridOutA = device.createBuffer({ size: gridSize, usage: BUF.STORAGE | BUF.COPY_DST | BUF.COPY_SRC });
+  gpuGridTmp = device.createBuffer({ size: gridSize, usage: BUF.STORAGE | BUF.COPY_DST | BUF.COPY_SRC });
+  gpuMaskBuf = device.createBuffer({ size: cellCount * 4, usage: BUF.STORAGE | BUF.COPY_DST });
+  gpuParamsBuf = device.createBuffer({ size: uniformSize, usage: BUF.UNIFORM | BUF.COPY_DST });
+}
+
+function createPipelines() {
+  // Compute layout: uniform + storage(rw) + storage(read)
+  const computeLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+  ]});
+
+  // Displace layout: uniform + storage(rw) + read-only storage + read-only storage
+  const displaceLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+  ]});
+
+  // Render layout: uniform + 3 read-only storage
+  const renderLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+
+  const presentLayout = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+
+  const physicsModule = device.createShaderModule({ code: WGSL_PHYSICS });
+  const driftModule = device.createShaderModule({ code: WGSL_DRIFT });
+  const centrifugalModule = device.createShaderModule({ code: WGSL_CENTRIFUGAL });
+  const lifeModule = device.createShaderModule({ code: WGSL_LIFE });
+  const bounceModule = device.createShaderModule({ code: WGSL_BOUNCE });
+  const displaceModule = device.createShaderModule({ code: WGSL_DISPLACE });
+  const relocateModule = device.createShaderModule({ code: WGSL_RELOCATE });
+  const maskKillModule = device.createShaderModule({ code: WGSL_MASK_KILL });
+  const rainModule = device.createShaderModule({ code: WGSL_RAIN });
+  const renderModule = device.createShaderModule({ code: WGSL_RENDER });
+
+  const computePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [computeLayout] });
+  const displacePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [displaceLayout] });
+
+  physicsPipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: physicsModule, entryPoint: 'main' } });
+  driftPipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: driftModule, entryPoint: 'main' } });
+  centrifugalPipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: centrifugalModule, entryPoint: 'main' } });
+  lifePipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: lifeModule, entryPoint: 'main' } });
+  bouncePipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: bounceModule, entryPoint: 'main' } });
+  displacePipeline = device.createComputePipeline({ layout: displacePipelineLayout, compute: { module: displaceModule, entryPoint: 'main' } });
+  relocatePipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: relocateModule, entryPoint: 'main' } });
+  maskKillPipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: maskKillModule, entryPoint: 'main' } });
+  rainPipeline = device.createComputePipeline({ layout: computePipelineLayout, compute: { module: rainModule, entryPoint: 'main' } });
+
+  // Main render now targets the trail texture (rgba8unorm), not canvas.
+  // The present pass is what writes to canvas.
+  renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [renderLayout] }),
+    vertex: { module: renderModule, entryPoint: 'vs' },
+    fragment: { module: renderModule, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  const presentModule = device.createShaderModule({ code: WGSL_PRESENT });
+  presentPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [presentLayout] }),
+    vertex: { module: presentModule, entryPoint: 'vs' },
+    fragment: { module: presentModule, entryPoint: 'fs', targets: [{ format: canvasFormat }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  // Trail sampler + uniform. TrailParams holds retention (per-channel)
+  // and VFX knobs (feedback zoom, twirl, chromatic aberration). Two vec4s
+  // = 32 bytes, std140-friendly 16B alignment.
+  trailSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  trailParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  createTrailTextures();
+  rebuildBindGroups();
+}
+
+function createTrailTextures() {
+  if (!device) return;
+  if (trailTexA) { try { trailTexA.destroy(); } catch {} }
+  if (trailTexB) { try { trailTexB.destroy(); } catch {} }
+  const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT;
+  trailTexA = device.createTexture({ size: [GW, GH], format: 'rgba8unorm', usage });
+  trailTexB = device.createTexture({ size: [GW, GH], format: 'rgba8unorm', usage });
+  trailToggle = 0;
+}
+
+function rebuildBindGroups() {
+  const computeLayout = physicsPipeline.getBindGroupLayout(0);
+  const displLayout = displacePipeline.getBindGroupLayout(0);
+
+  // Inside grid bind groups (physics uses gpuGridInA in-place)
+  physicsBindGroupsIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  physicsBindGroupsOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  driftBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  driftBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  centrifugalBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  lifeBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  lifeBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  bounceBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  // Displace bind groups (4 bindings: params, dst grid rw, tmp read, mask read)
+  displaceBindGroupIn = device.createBindGroup({ layout: displLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuGridTmp } },
+    { binding: 3, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  displaceBindGroupOut = device.createBindGroup({ layout: displLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuGridTmp } },
+    { binding: 3, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  // Mask-kill bind groups (3 bindings, same layout as physics)
+  maskKillBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+  maskKillBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  // Relocate uses same layout — atomic<u32> is compatible with the same storage buffer
+  relocateBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+  relocateBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  // Rain bind groups (3 bindings, same layout as physics)
+  rainBindGroupIn = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridInA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  rainBindGroupOut = device.createBindGroup({ layout: computeLayout, entries: [
+    { binding: 0, resource: { buffer: gpuParamsBuf } },
+    { binding: 1, resource: { buffer: gpuGridOutA } },
+    { binding: 2, resource: { buffer: gpuMaskBuf } },
+  ]});
+
+  // render bind group is now created per-frame in gpuFrame() because
+  // binding 4 (trailPrev) swaps each frame via ping-pong.
+}
+
+function uploadGridsToGPU() {
+  // Upload mask — GPU copy if available, else CPU fallback
+  if (gpuAllMasksBuf) {
+    const cellCount = GW * GH;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(gpuAllMasksBuf, currentFrame * cellCount * 4, gpuMaskBuf, 0, cellCount * 4);
+    device.queue.submit([enc.finish()]);
+  } else {
+    const gmask = gridMasks[currentFrame];
+    if (gmask) {
+      const maskU32 = new Uint32Array(GW * GH);
+      for (let i = 0; i < gmask.length; i++) maskU32[i] = gmask[i];
+      device.queue.writeBuffer(gpuMaskBuf, 0, maskU32);
+    }
+  }
+  // Upload grids (one-time after respawn)
+  if (gridIn) device.queue.writeBuffer(gpuGridInA, 0, gridIn);
+  if (gridOut) device.queue.writeBuffer(gpuGridOutA, 0, gridOut);
+  gpuNeedsUpload = false;
+}
+
+function makeParamsBuf(phase, seed, isInside) {
+  const buf = new ArrayBuffer(256);
+  const u = new Uint32Array(buf); const f = new Float32Array(buf);
+  const i = new Int32Array(buf);
+  u[0] = GW; u[1] = GH; u[2] = phase; u[3] = seed;
+  f[4] = bodyVelX; f[5] = bodyVelY; f[6] = bodyAngularVel;
+  f[7] = bodyCx; f[8] = bodyCy;
+  u[9] = groundRow(); u[10] = containerOut ? 1 : 0;
+  f[11] = Math.abs(bodyAngularVel) * 0.08;
+  u[12] = insideMat; u[13] = outsideMat; u[14] = isInside ? 1 : 0; u[15] = 0;
+  i[16] = shiftX; i[17] = shiftY;
+  f[18] = 0.0; u[19] = 0; u[20] = 0; u[21] = 0;
+  // Gravity sliders: applied in physics as a probability gate on fall swaps.
+  f[22] = P.gravityIn.val;
+  f[23] = P.gravityOut.val;
+  // Splash multipliers: drift/centrifugal probability scale per side.
+  f[24] = P.splashIn.val;
+  f[25] = P.splashOut.val;
+  return buf;
+}
+
+function makeRainParamsBuf(seed, mat, isInside, rateOverride) {
+  const buf = new ArrayBuffer(256);
+  const u = new Uint32Array(buf); const f = new Float32Array(buf);
+  const i = new Int32Array(buf);
+  u[0] = GW; u[1] = GH; u[2] = 0; u[3] = seed;
+  f[4] = bodyVelX; f[5] = bodyVelY; f[6] = bodyAngularVel;
+  f[7] = bodyCx; f[8] = bodyCy;
+  u[9] = groundRow(); u[10] = containerOut ? 1 : 0;
+  f[11] = Math.abs(bodyAngularVel) * 0.08;
+  u[12] = insideMat; u[13] = outsideMat; u[14] = isInside ? 1 : 0; u[15] = 0;
+  i[16] = 0; i[17] = 0;
+  // Rain-specific fields
+  f[18] = rateOverride !== undefined ? rateOverride : (isInside ? P.rainRate.val * 0.01 : P.rainRate.val * 0.02);
+  u[19] = GH; // rain across full height, not just top — lets maintenance fill anywhere
+  u[20] = mat;
+  u[21] = isInside ? 1 : 2;
+  return buf;
+}
+
+function gpuFrame() {
+  if (!gpuReady || !gridIn || !gridOut) return;
+
+  // One-time upload after respawn
+  if (gpuNeedsUpload) uploadGridsToGPU();
+
+  const wgX = Math.ceil(GW / 16);
+  const wgY = Math.ceil(GH / 16);
+  const wgXFull = Math.ceil(GW / 8);
+  const wgYFull = Math.ceil(GH / 8);
+  const gridSize = GW * GH * 4;
+
+  // -- Frame change: shift + relocate + (conditional) mask-kill --
+  if (frameJustChanged) {
+    frameJustChanged = false;
+    // In 'static' (jar) mode we prioritize mass conservation: more relocate
+    // iterations and no mask-kill. Particles that can't fit in the new mask
+    // persist in-place rather than being deleted.
+    const insideStatic = fillModeIn === 'static';
+    const outsideStatic = fillModeOut === 'static';
+    const RELOCATE_ITERS_IN = insideStatic ? 24 : 12;
+    const RELOCATE_ITERS_OUT = outsideStatic ? 24 : 12;
+
+    if (mode === 'inside' || mode === 'both') {
+      // Matches the known-good strixhalo CPU algorithm:
+      //   1. Displace grains by (shift_x, shift_y) with body motion
+      //   2. Spiral-relocate any grain now outside the new mask to the
+      //      nearest empty in-mask cell (single pass; the shader does the
+      //      full outward search internally)
+      //   3. (non-static) Mask-kill anything spiral couldn't save
+      const copyEnc = device.createCommandEncoder();
+      copyEnc.copyBufferToBuffer(gpuGridInA, 0, gpuGridTmp, 0, gridSize);
+      device.queue.submit([copyEnc.finish()]);
+
+      device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, true));
+      const dEnc = device.createCommandEncoder();
+      const dPass = dEnc.beginComputePass();
+      dPass.setPipeline(displacePipeline);
+      dPass.setBindGroup(0, displaceBindGroupIn);
+      dPass.dispatchWorkgroups(wgXFull, wgYFull);
+      dPass.end();
+      device.queue.submit([dEnc.finish()]);
+
+      // Single spiral-relocate pass — shader searches expanding rings
+      // internally, no outer iteration needed.
+      device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, true));
+      const rEnc = device.createCommandEncoder();
+      const rPass = rEnc.beginComputePass();
+      rPass.setPipeline(relocatePipeline);
+      rPass.setBindGroup(0, relocateBindGroupIn);
+      rPass.dispatchWorkgroups(wgXFull, wgYFull);
+      rPass.end();
+      device.queue.submit([rEnc.finish()]);
+
+      if (!insideStatic) {
+        device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, true));
+        const mkEnc = device.createCommandEncoder();
+        const mkPass = mkEnc.beginComputePass();
+        mkPass.setPipeline(maskKillPipeline);
+        mkPass.setBindGroup(0, maskKillBindGroupIn);
+        mkPass.dispatchWorkgroups(wgXFull, wgYFull);
+        mkPass.end();
+        device.queue.submit([mkEnc.finish()]);
+      }
+    }
+
+    // Outside: no shift (outside grains don't follow body), just relocate + mask-kill
+    if (mode === 'outside' || mode === 'both') {
+      // Relocate outside grains that are now covered by the mask
+      for (let r = 0; r < RELOCATE_ITERS_OUT; r++) {
+        device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed + r, false));
+        const rEnc = device.createCommandEncoder();
+        const rPass = rEnc.beginComputePass();
+        rPass.setPipeline(relocatePipeline);
+        rPass.setBindGroup(0, relocateBindGroupOut);
+        rPass.dispatchWorkgroups(wgXFull, wgYFull);
+        rPass.end();
+        device.queue.submit([rEnc.finish()]);
+      }
+
+      // Mask-kill outside — skipped for 'static' to conserve mass.
+      if (!outsideStatic) {
+        device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, false));
+        const mkEnc = device.createCommandEncoder();
+        const mkPass = mkEnc.beginComputePass();
+        mkPass.setPipeline(maskKillPipeline);
+        mkPass.setBindGroup(0, maskKillBindGroupOut);
+        mkPass.dispatchWorkgroups(wgXFull, wgYFull);
+        mkPass.end();
+        device.queue.submit([mkEnc.finish()]);
+      }
+    }
+  }
+
+  // -- Physics iterations (per-side count) --
+  // Inside and outside have independent iter counts. Inside typically low
+  // (~2) so body-motion impulses (drift/centrifugal) stay visible between
+  // frames; outside typically higher (~6) so rain falls cleanly under
+  // gravity. They're decoupled because the two sides express different
+  // forces at different rates.
+  const itersIn = P.itersIn.val;
+  const itersOut = P.itersOut.val;
+
+  if (mode === 'inside' || mode === 'both') {
+    for (let iter = 0; iter < itersIn; iter++) {
+      gpuFrameSeed++;
+      for (let phase = 0; phase < 4; phase++) {
+        device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(phase, gpuFrameSeed + phase, true));
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(physicsPipeline);
+        pass.setBindGroup(0, physicsBindGroupsIn);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+      }
+    }
+  }
+
+  if (mode === 'outside' || mode === 'both') {
+    for (let iter = 0; iter < itersOut; iter++) {
+      gpuFrameSeed++;
+      for (let phase = 0; phase < 4; phase++) {
+        device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(phase, gpuFrameSeed + phase + 4, false));
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(physicsPipeline);
+        pass.setBindGroup(0, physicsBindGroupsOut);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+      }
+    }
+  }
+
+  // -- Batch post-physics: drift + centrifugal + life --
+  // drift = horizontal inertia (sand lags body motion); centrifugal =
+  // rotational fling (spin throws mass toward walls). These implement the
+  // "water sloshing inside a glass dancer" feel. They have potential data
+  // races (non-atomic read/write) that can drop particles at rare boundary
+  // cases, but that's acceptable — the physics they produce is the point.
+  if (mode === 'inside' || mode === 'both') {
+    device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, true));
+    const enc = device.createCommandEncoder();
+    let p;
+    p = enc.beginComputePass(); p.setPipeline(driftPipeline); p.setBindGroup(0, driftBindGroupIn); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    p = enc.beginComputePass(); p.setPipeline(centrifugalPipeline); p.setBindGroup(0, centrifugalBindGroupIn); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    p = enc.beginComputePass(); p.setPipeline(lifePipeline); p.setBindGroup(0, lifeBindGroupIn); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  if (mode === 'outside' || mode === 'both') {
+    device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, false));
+    const enc = device.createCommandEncoder();
+    let p;
+    p = enc.beginComputePass(); p.setPipeline(driftPipeline); p.setBindGroup(0, driftBindGroupOut); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    p = enc.beginComputePass(); p.setPipeline(bouncePipeline); p.setBindGroup(0, bounceBindGroupOut); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    p = enc.beginComputePass(); p.setPipeline(lifePipeline); p.setBindGroup(0, lifeBindGroupOut); p.dispatchWorkgroups(wgXFull, wgYFull); p.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  // -- Mask-kill outside every frame (for container-off bottom cleanup) --
+  if (mode === 'outside' || mode === 'both') {
+    device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, false));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(maskKillPipeline);
+    pass.setBindGroup(0, maskKillBindGroupOut);
+    pass.dispatchWorkgroups(wgXFull, wgYFull);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  // -- Rain --
+  // Always run maintenance rain to replace particles lost at mask boundaries.
+  // In static mode, use a low maintenance rate. In rain mode, use user's rate.
+  // The shader only spawns in empty valid cells so it naturally self-limits.
+  if (mode === 'inside' || mode === 'both') {
+    // static: initial fill only (respawn), no ongoing emission — jar of stuff.
+    // rain: continuous emission at rainRate. empty: never emit.
+    const rate = (fillModeIn === 'empty' || fillModeIn === 'static') ? 0 : P.rainRate.val * 0.01;
+    if (rate > 0) {
+      gpuFrameSeed++;
+      device.queue.writeBuffer(gpuParamsBuf, 0, makeRainParamsBuf(gpuFrameSeed, insideMat, true, rate));
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(rainPipeline);
+      pass.setBindGroup(0, rainBindGroupIn);
+      pass.dispatchWorkgroups(wgXFull, wgYFull);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+  }
+  if (mode === 'outside' || mode === 'both') {
+    // same semantics as inside: static = jar, rain = emitter, empty = nothing.
+    const rate = (fillModeOut === 'empty' || fillModeOut === 'static') ? 0 : P.rainRate.val * 0.01;
+    if (rate > 0) {
+      gpuFrameSeed++;
+      device.queue.writeBuffer(gpuParamsBuf, 0, makeRainParamsBuf(gpuFrameSeed, outsideMat, false, rate));
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(rainPipeline);
+      pass.setBindGroup(0, rainBindGroupOut);
+      pass.dispatchWorkgroups(wgXFull, wgYFull);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+  }
+
+  // -- Render pass (with ping-pong trails) --
+  // Pass 1: fragment shader draws particles into trailCurr, sampling trailPrev
+  // for non-particle pixels and multiplying by retention (from trailParamsBuf).
+  // Pass 2: presentPipeline composites trailCurr over background onto canvas.
+  if (!trailTexA || !trailTexB) createTrailTextures();
+
+  device.queue.writeBuffer(gpuParamsBuf, 0, makeParamsBuf(0, gpuFrameSeed, true));
+  // TrailParams: [retention.rgba (4 floats), fx.xyzw (4 floats)]
+  // retention per-channel: warm afterimages by letting R decay slower
+  // than B, controlled by fxChromaTrails magnitude.
+  const base = P.trailLen.val;
+  const split = P.fxChromaTrails.val;
+  const retR = Math.max(0, Math.min(0.999, base + split * 0.5));
+  const retG = base;
+  const retB = Math.max(0, Math.min(0.999, base - split * 0.5));
+  device.queue.writeBuffer(trailParamsBuf, 0, new Float32Array([
+    retR, retG, retB, 1.0,                           // retention
+    P.fxZoom.val, P.fxTwirl.val, P.fxChromaAb.val, 0 // fx
+  ]));
+
+  const trailPrev = trailToggle === 0 ? trailTexA : trailTexB;
+  const trailCurr = trailToggle === 0 ? trailTexB : trailTexA;
+
+  const renderBG = device.createBindGroup({
+    layout: renderPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: gpuParamsBuf } },
+      { binding: 1, resource: { buffer: gpuGridInA } },
+      { binding: 2, resource: { buffer: gpuGridOutA } },
+      { binding: 3, resource: { buffer: gpuMaskBuf } },
+      { binding: 4, resource: trailPrev.createView() },
+      { binding: 5, resource: trailSampler },
+      { binding: 6, resource: { buffer: trailParamsBuf } },
+    ],
+  });
+
+  const presentBG = device.createBindGroup({
+    layout: presentPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: trailCurr.createView() },
+      { binding: 1, resource: trailSampler },
+      { binding: 2, resource: { buffer: trailParamsBuf } },
+    ],
+  });
+
+  const enc = device.createCommandEncoder();
+
+  // Pass 1 -> trailCurr
+  {
+    const rp = enc.beginRenderPass({
+      colorAttachments: [{
+        view: trailCurr.createView(),
+        loadOp: 'clear', storeOp: 'store',
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      }],
+    });
+    rp.setPipeline(renderPipeline);
+    rp.setBindGroup(0, renderBG);
+    rp.draw(3);
+    rp.end();
+  }
+
+  // Pass 2 -> canvas (composite bg + trailCurr)
+  {
+    const prp = enc.beginRenderPass({
+      colorAttachments: [{
+        view: gpuContext.getCurrentTexture().createView(),
+        loadOp: 'clear', storeOp: 'store',
+        clearValue: { r: 0.067, g: 0.067, b: 0.067, a: 1.0 },
+      }],
+    });
+    prp.setPipeline(presentPipeline);
+    prp.setBindGroup(0, presentBG);
+    prp.draw(3);
+    prp.end();
+  }
+
+  device.queue.submit([enc.finish()]);
+  trailToggle = 1 - trailToggle;
+}
+
+// -- Main loop --
+let fpsCount = 0, lastFpsTime = performance.now(), currentFps = 60;
+
+function loop(time) {
+  if (!lastTime) lastTime = time;
+  const dt = Math.min(time - lastTime, 50);
+  lastTime = time;
+
+  if (playing) {
+    frameAccum += dt * P.playSpeed.val;
+    const frameTime = 1000 / FPS;
+    while (frameAccum >= frameTime) {
+      frameAccum -= frameTime;
+      currentFrame = (currentFrame + 1) % gridMasks.length;
+      onFrameChange();
+    }
+  } else if (currentFrame !== prevFrame) {
+    onFrameChange();
+  }
+
+  if (!playing || currentFrame === prevFrame) {
+    bodyVelX *= P.inertiaDamp.val; bodyVelY *= P.inertiaDamp.val; bodyAngularVel *= P.inertiaDamp.val;
+    if (Math.abs(bodyVelX) < 0.1) bodyVelX = 0;
+    if (Math.abs(bodyVelY) < 0.1) bodyVelY = 0;
+    if (Math.abs(bodyAngularVel) < 0.01) bodyAngularVel = 0;
+  }
+
+  // Run GPU physics + render
+  gpuFrame();
+
+  // FPS counter
+  fpsCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    currentFps = fpsCount; fpsCount = 0; lastFpsTime = now;
+    // Diagnostic: count non-empty cells in gridIn and gridOut once per second.
+    // We read back via an async mapAsync so the pipeline isn't blocked.
+    countParticlesDebug();
+  }
+
+  // Info overlay
+  const matLabel = mode === 'both' ? `${MAT_NAMES[insideMat]}/${MAT_NAMES[outsideMat]}` : (mode === 'outside' ? MAT_NAMES[outsideMat] : MAT_NAMES[insideMat]);
+  const dbg = (typeof lastParticleCount === 'object' && lastParticleCount) ? ` | in:${lastParticleCount.in} out:${lastParticleCount.out} (inside-outside-mask:${lastParticleCount.inOutsideMask})` : '';
+  document.getElementById('info').textContent = `frame ${currentFrame}/${TOTAL_FRAMES} | ${matLabel} | ${currentFps}fps | ${GW}x${GH} | GPU${dbg}`;
+
+  requestAnimationFrame(loop);
+}
+
+// -- Particle diagnostic (async GPU readback once per second) --
+let lastParticleCount = null;
+let debugBusy = false;
+async function countParticlesDebug() {
+  if (debugBusy || !device || !gpuGridInA || !gpuGridOutA) return;
+  debugBusy = true;
+  const byteLen = GW * GH * 4;
+  // gpuMaskBuf lacks COPY_SRC, so we read the mask from the CPU-side gridMasks array.
+  const stage = device.createBuffer({ size: byteLen * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(gpuGridInA,  0, stage, 0,       byteLen);
+  enc.copyBufferToBuffer(gpuGridOutA, 0, stage, byteLen, byteLen);
+  device.queue.submit([enc.finish()]);
+  try {
+    await stage.mapAsync(GPUMapMode.READ);
+    const u32 = new Uint32Array(stage.getMappedRange());
+    const gmask = gridMasks[currentFrame];
+    const cells = GW * GH;
+    let inCount = 0, outCount = 0, inOutsideMask = 0;
+    for (let i = 0; i < cells; i++) {
+      const m_in = u32[i] & 0xFF;
+      const m_out = u32[cells + i] & 0xFF;
+      if (m_in !== 0) { inCount++; if (gmask && !gmask[i]) inOutsideMask++; }
+      if (m_out !== 0) outCount++;
+    }
+    lastParticleCount = { in: inCount, out: outCount, inOutsideMask };
+    stage.unmap();
+  } catch (e) { console.warn('[debug] readback failed', e); }
+  stage.destroy();
+  debugBusy = false;
+}
+
+// -- Resize for GPU --
+function resizeGPU() {
+  canvas.width = GW;
+  canvas.height = GH;
+  const UI_BOTTOM = 60, TOP_PAD = 8;
+  const scaleX = window.innerWidth / GW;
+  const scaleY = (window.innerHeight - UI_BOTTOM - TOP_PAD) / GH;
+  const scale = Math.min(scaleX, scaleY);
+  canvas.style.width = Math.floor(GW * scale) + 'px';
+  canvas.style.height = Math.floor(GH * scale) + 'px';
+  // Reconfigure WebGPU context for new canvas dimensions
+  if (gpuContext && device) {
+    gpuContext.configure({ device, format: canvasFormat, alphaMode: 'premultiplied' });
+    // Trail ping-pong textures must match new canvas size
+    createTrailTextures();
+  }
+}
+
+// -- UI --
+function stepFrame(dir) { playing = false; currentFrame = Math.max(0, Math.min(gridMasks.length - 1, currentFrame + dir)); }
+function toggleP(key) { P[key].val = P[key].val ? 0 : 1; buildTuner(); }
+function cycleVideoOpacity() { const vo = P.videoOpacity.val; if (vo > 0) { lastVideoOpacity = vo; P.videoOpacity.val = 0; } else { P.videoOpacity.val = lastVideoOpacity > 0 ? lastVideoOpacity : 0.5; } buildTuner(); }
+function toggleTuner() { showTuner = !showTuner; document.getElementById('tuner').style.display = showTuner ? 'block' : 'none'; }
+
+function buildTuner() {
+  const el = document.getElementById('tuner');
+  el.innerHTML = '<h3>tuner</h3>';
+  const MAT_BTNS = [ { m: 1, name: 'sand', sw: '#e0d8c0' }, { m: 2, name: 'water', sw: '#2860d0' }, { m: 3, name: 'smoke', sw: '#8888a0' }, { m: 4, name: 'fire', sw: '#ff6820' }, { m: 5, name: 'lava', sw: '#d04010' }, { m: 6, name: 'powder', sw: '#f4f0e8' } ];
+  const FILL_BTNS = ['static', 'rain', 'empty'];
+  function sideBlock(side) {
+    const sec = document.createElement('div'); sec.className = 'section'; sec.textContent = side; el.appendChild(sec);
+    const matRow = document.createElement('div'); matRow.className = 'mat-row'; matRow.id = `mat-row-${side}`;
+    for (const b of MAT_BTNS) { const btn = document.createElement('button'); btn.dataset.mat = b.m; btn.innerHTML = `<span class="swatch" style="background:${b.sw}"></span>${b.name}`; btn.onclick = () => selectMat(side, b.m); matRow.appendChild(btn); }
+    el.appendChild(matRow);
+    const fillRow = document.createElement('div'); fillRow.className = 'mat-row'; fillRow.id = `fill-row-${side}`;
+    for (const f of FILL_BTNS) { const btn = document.createElement('button'); btn.dataset.fill = f; btn.textContent = f; btn.onclick = () => setFillMode(side, f); fillRow.appendChild(btn); }
+    el.appendChild(fillRow);
+  }
+  sideBlock('inside'); sideBlock('outside');
+  const containerRow = document.createElement('div'); containerRow.className = 'mat-row';
+  const containerBtn = document.createElement('button'); containerBtn.id = 'container-out-btn'; containerBtn.textContent = 'container'; containerBtn.onclick = toggleContainer;
+  containerRow.appendChild(containerBtn); el.appendChild(containerRow);
+  const groups = [
+    { label: 'spawn', keys: ['fillPctIn', 'fillPctOut', 'rainRate', 'cellSize'] },
+    { label: 'physics', keys: ['itersIn', 'itersOut', 'inertia', 'inertiaDamp', 'spin', 'reactRate', 'gravityIn', 'gravityOut', 'splashIn', 'splashOut'] },
+    { label: 'visuals', keys: ['playSpeed', 'showMask', 'videoOpacity', 'trailLen'] },
+    { label: 'vfx', keys: ['fxZoom', 'fxTwirl', 'fxChromaAb', 'fxChromaTrails'] },
+    { label: 'ground', keys: ['groundPlane'] },
+  ];
+  for (const group of groups) {
+    const section = document.createElement('div'); section.className = 'section'; section.textContent = group.label; el.appendChild(section);
+    for (const key of group.keys) {
+      const p = P[key]; if (!p) continue;
+      const label = document.createElement('label');
+      label.innerHTML = `${p.label} <input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.val}" data-key="${key}"><span class="val">${p.val}</span>`;
+      el.appendChild(label);
+      const input = label.querySelector('input');
+      input.addEventListener('input', (e) => { const newVal = parseFloat(e.target.value); p.val = newVal; label.querySelector('.val').textContent = newVal; if (key === 'cellSize') onCellSizeChange(newVal); });
+    }
+  }
+  updateMatButtons();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 't') toggleTuner();
+  if (e.key === 'b') toggleP('showMask');
+  if (e.key === 'v') cycleVideoOpacity();
+  if (e.key === 'r') respawn();
+  if (e.key === 'm') cycleMode();
+  if (e.key === 'i') toggleInside();
+  if (e.key === 'o') toggleOutside();
+  if (e.key === 'x') toggleInteract();
+  if (e.key === ' ') { e.preventDefault(); playing = !playing; }
+  if (e.key === 'ArrowRight') stepFrame(1);
+  if (e.key === 'ArrowLeft') stepFrame(-1);
+  if (/^[1-6]$/.test(e.key)) { const matMap = { '1': MAT.SAND, '2': MAT.WATER, '3': MAT.SMOKE, '4': MAT.FIRE, '5': MAT.LAVA, '6': MAT.POWDER }; selectMat(e.shiftKey ? 'outside' : 'inside', matMap[e.key]); }
+  if (e.key === 'e') setFillMode('inside', 'empty');
+  if (e.key === 'f') setFillMode('inside', 'rain');
+  if (e.key === 'g') setFillMode('inside', 'static');
+  if (e.key === 'E') setFillMode('outside', 'empty');
+  if (e.key === 'F') setFillMode('outside', 'rain');
+  if (e.key === 'G') setFillMode('outside', 'static');
+  if (e.key === 'c') toggleContainer();
+});
+
+// -- Gallery (verbatim from original) --
+function goToGallery() { location.href = location.pathname; }
+
+async function loadGallery() {
+  const grid = document.getElementById('gallery-grid');
+  grid.innerHTML = '<div style="color:#555;padding:20px">loading...</div>';
+  try {
+    const resp = await fetch(API_BASE + '/videos'); const videos = await resp.json();
+    grid.innerHTML = '';
+    if (videos.length === 0) { grid.innerHTML = '<div style="color:#555;padding:20px">no videos yet</div>'; return; }
+    for (const v of videos) {
+      const card = document.createElement('div');
+      card.className = 'gallery-card' + (v.status !== 'ready' ? ' processing' : '');
+      if (v.status === 'ready' && v.thumbnail) {
+        card.innerHTML = `<img class="thumb" src="${v.thumbnail}" loading="lazy"><div class="card-info"><div class="name">${v.name}</div><div class="meta">${v.totalFrames||'?'} frames</div></div>`;
+        card.onclick = () => { location.search = '?video=' + v.name; };
+      } else if (['extracting','running_sam2','queued'].includes(v.status)) {
+        const pct = Math.round((v.progress||0)*100);
+        card.innerHTML = `<div class="thumb-placeholder">${v.status}... ${pct}%</div><div class="card-info"><div class="name">${v.name}</div></div><div class="card-progress"><div class="card-progress-fill" style="width:${pct}%"></div></div>`;
+        card.dataset.processingName = v.name;
+      } else { continue; }
+      grid.appendChild(card);
+    }
+    if (videos.some(v => ['extracting','running_sam2','queued'].includes(v.status))) setTimeout(pollProcessing, 3000);
+  } catch (e) { grid.innerHTML = `<div style="color:#a55;padding:20px">Error: ${e.message}</div>`; }
+}
+
+async function pollProcessing() {
+  const cards = document.querySelectorAll('.gallery-card[data-processing-name]');
+  if (cards.length === 0) return;
+  for (const card of cards) {
+    try { const resp = await fetch(API_BASE + '/videos/' + card.dataset.processingName + '/status'); const st = await resp.json(); if (st.status === 'done') { loadGallery(); return; } } catch {}
+  }
+  setTimeout(pollProcessing, 3000);
+}
+
+// -- Upload --
+let selectedFile = null;
+function openUpload() { document.getElementById('upload-modal').classList.add('active'); selectedFile = null; document.getElementById('file-input').value = ''; document.getElementById('upload-name').value = ''; document.getElementById('selected-file').style.display = 'none'; document.getElementById('submit-upload-btn').disabled = true; document.getElementById('upload-status').style.display = 'none'; document.getElementById('upload-progress-bar').style.display = 'none'; }
+function closeUpload() { document.getElementById('upload-modal').classList.remove('active'); }
+document.getElementById('file-input').addEventListener('change', (e) => { if (e.target.files.length > 0) { selectedFile = e.target.files[0]; document.getElementById('selected-file').textContent = selectedFile.name; document.getElementById('selected-file').style.display = 'block'; document.getElementById('submit-upload-btn').disabled = false; } });
+const dropZone = document.getElementById('drop-zone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); if (e.dataTransfer.files.length > 0) { selectedFile = e.dataTransfer.files[0]; document.getElementById('selected-file').textContent = selectedFile.name; document.getElementById('selected-file').style.display = 'block'; document.getElementById('submit-upload-btn').disabled = false; } });
+
+async function submitUpload() {
+  if (!selectedFile) return;
+  const statusEl = document.getElementById('upload-status');
+  const progressFill = document.getElementById('upload-progress-fill');
+  document.getElementById('submit-upload-btn').disabled = true;
+  statusEl.textContent = 'uploading...'; statusEl.style.display = 'block';
+  document.getElementById('upload-progress-bar').style.display = 'block';
+  const formData = new FormData(); formData.append('file', selectedFile);
+  const customName = document.getElementById('upload-name').value.trim();
+  if (customName) formData.append('name', customName);
+  const xhr = new XMLHttpRequest(); xhr.open('POST', API_BASE + '/upload');
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { progressFill.style.width = Math.round(e.loaded/e.total*100)+'%'; } };
+  xhr.onload = () => { if (xhr.status === 200) { setTimeout(() => { closeUpload(); loadGallery(); }, 800); } else { statusEl.textContent = 'error'; document.getElementById('submit-upload-btn').disabled = false; } };
+  xhr.onerror = () => { statusEl.textContent = 'network error'; document.getElementById('submit-upload-btn').disabled = false; };
+  xhr.send(formData);
+}
+document.getElementById('upload-modal').addEventListener('click', (e) => { if (e.target === document.getElementById('upload-modal')) closeUpload(); });
+
+// -- Boot --
+async function main() {
+  if (isGalleryMode) {
+    document.getElementById('gallery').classList.add('active');
+    document.body.classList.add('gallery-mode');
+    document.getElementById('canvas').style.display = 'none';
+    loadGallery();
+  } else {
+    document.getElementById('gallery').classList.remove('active');
+    document.getElementById('controls').style.display = 'flex';
+    document.getElementById('back-btn').style.display = 'block';
+    document.getElementById('loading').style.display = 'flex';
+    await loadConfig();
+    // Override resize for GPU mode
+    window.removeEventListener('resize', resize);
+    window.addEventListener('resize', resizeGPU);
+    resizeGPU();
+
+    const gpuOk = await initGPU();
+    if (!gpuOk) {
+      console.warn('WebGPU unavailable, redirecting to CPU version');
+      document.getElementById('loading').textContent = 'WebGPU unavailable — loading CPU version...';
+      location.href = 'sandpipe-body.html' + location.search;
+      return;
+    }
+
+    buildTuner();
+    await loadMasks();
+    respawn();
+    requestAnimationFrame(loop);
+  }
+}
+main();
+</script>
+</body>
+</html>
