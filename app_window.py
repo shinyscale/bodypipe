@@ -1507,7 +1507,7 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_video_frame_changed(self, frame_idx: int):
-        """Update status bar, HUD, and broadcast frame change in multi mode."""
+        """Update status bar, HUD, video display, and 3D viewport on every frame."""
         self.set_frame_info(frame_idx, self._video_player.num_frames)
         self.set_fps_info(self._video_player.fps)
         self._session.current_frame = frame_idx
@@ -1519,14 +1519,17 @@ class AppWindow(QMainWindow):
             person=self._session.selected_person,
         )
 
+        # Always update video display and 3D viewport
+        raw = self._video_player.get_raw_frame(frame_idx)
+        self._mesh_viewport.set_video_frame(raw)
+        self._mesh_viewport.on_frame_changed(frame_idx)
+        self._show_frame(frame_idx)
+
+        # Multi-only widgets
         if self._pipeline_dock.current_mode == "multi":
             self._track_overview.set_current_frame(frame_idx)
             self._identity_inspector.set_frame(frame_idx)
             self._pose_corrector.on_frame_changed(frame_idx)
-            raw = self._video_player.get_raw_frame(frame_idx)
-            self._mesh_viewport.set_video_frame(raw)
-            self._mesh_viewport.on_frame_changed(frame_idx)
-            self._show_frame(frame_idx)
 
     def _on_video_loaded(self, video_path):
         """Load video into the shared VideoPlayer and restore cached results."""
@@ -1886,9 +1889,7 @@ class AppWindow(QMainWindow):
             self._mesh_viewport.set_video_frame(raw)
             self._mesh_viewport.on_frame_changed(frame)
 
-        # Show composited frame with overlays in multi mode
-        if self._pipeline_dock.current_mode == "multi":
-            self._show_frame(frame)
+        self._show_frame(frame)
 
         log.info(
             "Panels refreshed: %d person tracks, selected person %d",

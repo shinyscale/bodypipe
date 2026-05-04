@@ -645,6 +645,11 @@ class TrackOverview(QWidget):
         self._scene.addItem(self._playhead)
 
         self.setMinimumHeight(40)
+        self._preferred_height = 80
+
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+        return QSize(self.width(), self._preferred_height)
 
     # -- backward-compatible API ------------------------------------------
 
@@ -680,9 +685,9 @@ class TrackOverview(QWidget):
         self._view.set_lanes(self._lanes)
         self._view.set_num_frames(self._num_frames)
 
-        # Resize widget to fit all tracks + scrollbar
+        # Hint preferred height but don't lock the minimum — allows dock resize
         sb_h = self._view.horizontalScrollBar().height() if self._view.horizontalScrollBar() else 0
-        self.setMinimumHeight(max(40, int(y) + sb_h + 4))
+        self._preferred_height = max(40, int(y) + sb_h + 4)
 
     def set_current_frame(self, frame: int):
         """Move the playhead to *frame*."""
