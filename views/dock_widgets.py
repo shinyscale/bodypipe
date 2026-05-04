@@ -270,6 +270,8 @@ class TrackOverviewDock(QDockWidget):
         self.setObjectName("TrackOverviewDock")
         self._track_overview = track_overview
         self.setWidget(track_overview)
+        # Allow the bottom dock to be resized very small
+        self.setMinimumHeight(30)
 
     @property
     def track_overview(self) -> TrackOverview:
