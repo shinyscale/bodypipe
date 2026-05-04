@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -372,7 +371,6 @@ class _TimelineView(QGraphicsView):
         self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
 
     # -- public -----------------------------------------------------------
 
@@ -542,7 +540,6 @@ class TrackOverview(QWidget):
         # Fixed-width header panel (track labels, collapse arrows)
         self._header_panel = QWidget()
         self._header_panel.setFixedWidth(HEADER_WIDTH)
-        self._header_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
         self._header_layout = QVBoxLayout(self._header_panel)
         self._header_layout.setContentsMargins(0, 0, 0, 0)
         self._header_layout.setSpacing(0)
@@ -647,7 +644,7 @@ class TrackOverview(QWidget):
         self._playhead = _PlayheadItem(1)
         self._scene.addItem(self._playhead)
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        self.setMinimumHeight(30)
         self._preferred_height = 80
 
     def sizeHint(self):  # noqa: N802

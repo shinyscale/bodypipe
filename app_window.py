@@ -746,9 +746,11 @@ class AppWindow(QMainWindow):
         widget is hidden (zero size) and dock nesting is enabled for
         maximum workspace flexibility.
         """
-        # Empty central widget — all content in docks
+        # Empty central widget — all content in docks.
+        # Use setMaximumWidth(0) instead of setMaximumSize(0,0) so the
+        # BottomDockWidgetArea separator remains functional for resizing.
         central = QWidget()
-        central.setMaximumSize(0, 0)
+        central.setMaximumWidth(0)
         self.setCentralWidget(central)
         self.setDockNestingEnabled(True)
 
@@ -860,6 +862,9 @@ class AppWindow(QMainWindow):
 
         # Bottom: Track overview (log dock added later in _setup_log_panel)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._track_overview_dock)
+        self.resizeDocks(
+            [self._track_overview_dock], [120], Qt.Orientation.Vertical,
+        )
 
     def _setup_menu(self):
         """Create menu bar with File, Edit, View, Help menus."""
