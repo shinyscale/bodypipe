@@ -43,6 +43,7 @@ class PipelineConfig:
     use_camera_stabilize: bool = True
     cam_smooth_preset: str = "moderate"  # "light" | "moderate" | "heavy"
     use_drift_analysis: bool = True
+    use_sandpipe: bool = True  # auto-discover sandpipe-physics.json
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +76,7 @@ class PipelineConfig:
             "use_camera_stabilize": self.use_camera_stabilize,
             "cam_smooth_preset": self.cam_smooth_preset,
             "use_drift_analysis": self.use_drift_analysis,
+            "use_sandpipe": self.use_sandpipe,
         }
 
     @classmethod

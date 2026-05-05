@@ -37,6 +37,7 @@ def compute_pin_offset(
     fps: float,
     smoothing_sigma_sec: float = 0.1,
     taper_sec: float = 0.067,
+    per_frame_strength: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute a per-frame translation correction that pins feet.
 
@@ -148,6 +149,10 @@ def compute_pin_offset(
             t = end - k
             out[t] = (1.0 - alpha) * smoothed[t] + alpha * per_frame_smooth[t]
 
+    # Modulate by per-frame strength when provided
+    if per_frame_strength is not None:
+        out *= per_frame_strength[:, np.newaxis]
+
     return out
 
 
@@ -162,39 +167,15 @@ def apply_foot_pin(
     smoothing_sigma_sec: float = 0.1,
     height_threshold: float | None = None,
     velocity_threshold: float | None = None,
+    sandpipe_data: dict | None = None,
+    sandpipe_person_idx: int = 0,
 ) -> tuple[dict, dict]:
     """Run the full foot-pin pass on a refined params dict.
 
-    Modifies a shallow copy of ``refined`` in place: ``transl`` receives
-    the pin correction, other keys are preserved. Returns ``(out, stats)``
-    where ``stats`` summarises the contact detection (frame/episode
-    counts, mean correction magnitude) for the metrics JSON.
-
     Parameters
     ----------
-    refined : dict with ``body_pose``, ``global_orient``, ``transl`` and
-        ``num_frames`` — post rotation filter (or raw baseline when the
-        filter is disabled).
-    fps : frame rate for contact velocity + smoothing sigma.
-    preset : spring preset string, passed through for logging only.
-    sensitivity : one of ``"low"``, ``"medium"`` (default), ``"high"``.
-        Picks a ``(height_threshold, velocity_threshold)`` preset —
-        ``low`` is strict (swing-friendly), ``high`` is lenient (catches
-        fast footwork). Ignored if both explicit thresholds are given.
-    pin_strength : scales the pin correction. ``1.0`` (default) is full
-        pinning, ``0.0`` is a no-op. Clamped to ``[0.0, 1.0]``.
-    min_stance_frames, anchor_window, smoothing_sigma_sec : stance-episode
-        knobs — see ``contact.detect_contacts`` and
-        ``track_stance_anchors``.
-    height_threshold, velocity_threshold : optional explicit overrides;
-        when provided they win over the sensitivity preset.
-
-    Returns
-    -------
-    out : dict — shallow copy of ``refined`` with pinned ``transl``.
-    stats : dict — ``contact_frame_count``, ``stance_episode_count``,
-        ``mean_pin_magnitude_m``, ``max_pin_magnitude_m``, ``preset``,
-        ``sensitivity``, ``pin_strength``.
+    sandpipe_data : optional dict loaded from sandpipe-physics.json.
+    sandpipe_person_idx : which person in the sandpipe export (0-based).
     """
     body_pose = np.asarray(refined["body_pose"])
     global_orient = np.asarray(refined["global_orient"])
@@ -215,34 +196,65 @@ def apply_foot_pin(
         else sens_cfg["velocity_threshold"]
     )
 
-    contacts, toes = detect_contacts(
-        body_pose,
-        global_orient,
-        transl,
-        fps=fps,
-        height_threshold=h_thr,
-        velocity_threshold=v_thr,
-    )
+    if sandpipe_data is not None:
+        from .sandpipe_contact import detect_contacts_sandpipe
+
+        contacts, toes = detect_contacts_sandpipe(
+            body_pose,
+            global_orient,
+            transl,
+            fps=fps,
+            sandpipe_data=sandpipe_data,
+            velocity_threshold=v_thr,
+            person_idx=sandpipe_person_idx,
+        )
+    else:
+        contacts, toes = detect_contacts(
+            body_pose,
+            global_orient,
+            transl,
+            fps=fps,
+            height_threshold=h_thr,
+            velocity_threshold=v_thr,
+        )
     anchors, valid, episode_count = track_stance_anchors(
         toes,
         contacts,
         min_stance_frames=min_stance_frames,
         anchor_window=anchor_window,
     )
+
+    strength = float(np.clip(pin_strength, 0.0, 1.0))
+
+    # Build per-frame strength from sandpipe grounding curve when available.
+    # gc modulates pin intensity: hard pin when grounded (gc~1), soft during
+    # transitions (gc~0.5), no pin when airborne (gc~0).
+    pf_strength = None
+    if sandpipe_data is not None:
+        from .sandpipe_contact import compute_grounding_curve
+        N = int(toes.shape[0])
+        curve = compute_grounding_curve(sandpipe_data, N, fps, person_idx=sandpipe_person_idx)
+        pf_strength = strength * curve  # (N,)
+
     offset = compute_pin_offset(
         toes,
         anchors,
         valid,
         fps=fps,
         smoothing_sigma_sec=smoothing_sigma_sec,
+        per_frame_strength=pf_strength,
     )
 
-    strength = float(np.clip(pin_strength, 0.0, 1.0))
-    pinned_transl = (transl + strength * offset).astype(np.float32)
+    if pf_strength is not None:
+        # Strength is already baked into the offset via per_frame_strength
+        pinned_transl = (transl + offset).astype(np.float32)
+        magnitudes = np.linalg.norm(offset, axis=1) if offset.size else np.zeros(0)
+    else:
+        pinned_transl = (transl + strength * offset).astype(np.float32)
+        magnitudes = np.linalg.norm(offset * strength, axis=1) if offset.size else np.zeros(0)
+
     out = dict(refined)
     out["transl"] = pinned_transl
-
-    magnitudes = np.linalg.norm(offset * strength, axis=1) if offset.size else np.zeros(0)
     stats = {
         "preset": preset,
         "sensitivity": sens_key,

@@ -22,6 +22,7 @@ def refine_body_sequence(
     fps: float,
     preset: str = "moderate",
     pad_frames: int | None = None,
+    grounding_alpha: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Filter body_pose + global_orient per joint in quaternion log space.
 
@@ -32,6 +33,9 @@ def refine_body_sequence(
         preset: "light" | "moderate" | "heavy".
         pad_frames: replicate-pad length at each end of the sequence to
             mitigate the warm-up transient. Defaults to ``int(fps / 2)``.
+        grounding_alpha: optional ``(N,)`` array in ``[0, 1]``. When
+            provided, blends between raw (alpha=0, airborne) and filtered
+            (alpha=1, grounded) in log-quaternion space after filtering.
 
     Returns:
         ``(refined_body_pose, refined_global_orient)`` with shapes
@@ -72,7 +76,6 @@ def refine_body_sequence(
     body_log_filt = critically_damped_filter(
         body_log, body_kp, body_kv, dt, zero_phase=True, pad_frames=pad_frames
     )
-    body_pose_filt = log_sequence_to_aa(body_log_filt)
 
     # Root (single-joint case)
     root_log = aa_sequence_to_log(go_reshaped)
@@ -84,6 +87,16 @@ def refine_body_sequence(
         zero_phase=True,
         pad_frames=pad_frames,
     )
+
+    # Grounding-aware blend: alpha=1 (grounded) → fully filtered,
+    # alpha=0 (airborne) → original (responsive). Linear interpolation
+    # in log-quaternion space is mathematically correct.
+    if grounding_alpha is not None:
+        alpha = grounding_alpha.reshape(-1, 1, 1)  # broadcast over (J, 3)
+        body_log_filt = (1 - alpha) * body_log + alpha * body_log_filt
+        root_log_filt = (1 - alpha) * root_log + alpha * root_log_filt
+
+    body_pose_filt = log_sequence_to_aa(body_log_filt)
     go_filt = log_sequence_to_aa(root_log_filt).reshape(root_in_shape)
 
     if body_pose_flat:
@@ -101,22 +114,13 @@ def run_spring_refine(
     filter_rotations: bool = True,
     foot_pin_sensitivity: str = "medium",
     foot_pin_strength: float = 1.0,
+    sandpipe_physics_path: str | None = None,
+    sandpipe_person_idx: int = 0,
 ) -> tuple[dict, bool]:
     """Orchestrator-facing entry. Returns ``(refined_params, ok)``.
 
-    On any missing required key, returns ``(world_params, False)`` —
-    matching the contract used by ``workers.physics.phc_runner.run_phc_local``.
-
-    ``filter_rotations`` (v1): run the per-joint critically-damped IIR on
-    ``body_pose`` + ``global_orient``. When ``False``, the rotation
-    channels pass through unchanged — useful when the caller only wants
-    the foot-pin pass.
-
-    ``pin_feet`` (v2): after the rotation filter (if any), run the
-    contact-aware foot-pin pass. This modifies ``transl`` to anchor the
-    feet during stance episodes, fixing foot slide under camera moves.
-    Pin failure is non-fatal — we log into ``foot_pin_stats.error`` and
-    return the rotation-refined result with ``source="spring_refined"``.
+    ``sandpipe_physics_path``: path to sandpipe-physics.json.
+    ``sandpipe_person_idx``: which person in the sandpipe export (0-based).
     """
     try:
         body_pose = np.asarray(world_params["body_pose"])
@@ -129,13 +133,28 @@ def run_spring_refine(
     if not filter_rotations and not pin_feet:
         return world_params, False
 
+    # Load sandpipe data early — shared by rotation blending + foot pin.
+    sp_data = None
+    grounding_alpha = None
+    if sandpipe_physics_path:
+        try:
+            from .sandpipe_contact import load_sandpipe_physics, compute_grounding_curve
+            sp_data = load_sandpipe_physics(sandpipe_physics_path)
+            N = body_pose.reshape(-1, 63).shape[0]
+            grounding_alpha = compute_grounding_curve(
+                sp_data, N, fps, person_idx=sandpipe_person_idx,
+            )
+        except Exception:
+            pass  # fall back to non-sandpipe path
+
     if progress_cb is not None:
         progress_cb(0.1)
 
     if filter_rotations:
         try:
             body_pose_filt, go_filt = refine_body_sequence(
-                body_pose, global_orient, fps=fps, preset=preset
+                body_pose, global_orient, fps=fps, preset=preset,
+                grounding_alpha=grounding_alpha,
             )
         except Exception:
             return world_params, False
@@ -164,6 +183,8 @@ def run_spring_refine(
                 preset=preset,
                 sensitivity=foot_pin_sensitivity,
                 pin_strength=foot_pin_strength,
+                sandpipe_data=sp_data,
+                sandpipe_person_idx=sandpipe_person_idx,
             )
             refined["foot_pin_stats"] = pin_stats
             refined["source"] = "spring_refined_pinned"

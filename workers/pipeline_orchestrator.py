@@ -36,6 +36,34 @@ _GEMX_STAGES: list[tuple[float, float, str]] = [
 ]
 
 
+def find_sandpipe_physics(output_dir: Path, video_path: Path) -> Path | None:
+    """Discover sandpipe-physics.json for a video.
+
+    Search order:
+    1. ``output_dir / "sandpipe-physics.json"``
+    2. Walk up from output_dir looking for
+       ``research/videos/<video_stem>/sandpipe-physics.json``
+    """
+    # Direct: alongside outputs
+    direct = output_dir / "sandpipe-physics.json"
+    if direct.is_file():
+        return direct
+
+    # Research tree: look for research/videos/<stem>/sandpipe-physics.json
+    stem = video_path.stem
+    cur = output_dir
+    for _ in range(8):  # don't walk up forever
+        candidate = cur / "research" / "videos" / stem / "sandpipe-physics.json"
+        if candidate.is_file():
+            return candidate
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+
+    return None
+
+
 def find_smplestx_result(output_dir: Path) -> Path | None:
     """Return the most recently modified .pt or .npz in *output_dir*."""
     candidates = list(output_dir.glob("*.pt")) + list(output_dir.glob("*.npz"))
@@ -549,6 +577,12 @@ class FullPipelineWorker(SubprocessWorkerBase):
         progress_cb = self._stage_progress_callback(4)
         try:
             progress_cb(0.1, "Running spring filter...")
+            sp_path = None
+            if self._config.use_sandpipe:
+                sp_path = find_sandpipe_physics(self._output_dir, self._video_path)
+                if sp_path:
+                    self.log_line.emit(f"Sandpipe physics found: {sp_path}")
+
             refined, ok = run_spring_refine(
                 world_params,
                 preset=self._config.spring_refine_preset,
@@ -558,6 +592,7 @@ class FullPipelineWorker(SubprocessWorkerBase):
                 filter_rotations=bool(self._config.use_spring_refine),
                 foot_pin_sensitivity=self._config.foot_pin_sensitivity,
                 foot_pin_strength=float(self._config.foot_pin_strength),
+                sandpipe_physics_path=str(sp_path) if sp_path else None,
             )
             if not ok:
                 self.log_line.emit(
@@ -1593,6 +1628,14 @@ class MultiPersonWorker(QThread):
         preset = self._config.spring_refine_preset
         pin_enabled = bool(self._config.use_foot_pin)
         filter_enabled = bool(self._config.use_spring_refine)
+
+        # Sandpipe discovery (per-video, shared across persons)
+        sp_path = None
+        if self._config.use_sandpipe:
+            sp_path = find_sandpipe_physics(self._output_dir, self._video_path)
+            if sp_path:
+                self.log_line.emit(f"Sandpipe physics found: {sp_path}")
+
         self.progress.emit(
             0.85,
             f"Spring refinement ({total} persons, preset={preset}, pin={'on' if pin_enabled else 'off'})...",
@@ -1762,6 +1805,8 @@ class MultiPersonWorker(QThread):
                     filter_rotations=filter_enabled,
                     foot_pin_sensitivity=self._config.foot_pin_sensitivity,
                     foot_pin_strength=effective_pin_strength,
+                    sandpipe_physics_path=str(sp_path) if sp_path else None,
+                    sandpipe_person_idx=i,
                 )
                 drift_corrected = drift_diag.get("correction_applied", False)
                 if not ok and not drift_corrected:
